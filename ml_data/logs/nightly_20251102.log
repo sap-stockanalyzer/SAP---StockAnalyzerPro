@@ -1,0 +1,46 @@
+[2025-11-02 00:24:29] 🧩 Starting Nightly Job — StockAnalyzerPro v1.6.0 (Continuous Learning)
+[2025-11-02 00:24:34] ℹ️ No daily snapshots found to merge.
+[2025-11-02 00:24:34] 📦 Rolling cache: 5532 tickers, merged 0 day file(s).
+[2025-11-02 00:24:41] 🧪 Repairing 125 short histories to ~180 days...
+[2025-11-02 00:24:41] ⚠️ Backfill failed (continuing): backfill_symbols() got an unexpected keyword argument 'max_workers'
+[2025-11-02 00:24:41] ⚠️ No input JSONs found in stock_cache/daily. Producing empty dataset.
+[2025-11-02 00:24:41] ⚠️ metrics_cache/latest_metrics.json not found; skipping merge.
+[2025-11-02 00:24:42] ✅ ML dataset built [daily] — 0 rows
+[2025-11-02 00:24:42]    JSON: ml_data\training_data_daily.json
+[2025-11-02 00:24:42]    Parquet: ml_data\training_data_daily.parquet
+[2025-11-02 00:24:42] ⚠️ No input JSONs found in stock_cache/daily. Producing empty dataset.
+[2025-11-02 00:24:42] ⚠️ metrics_cache/latest_metrics.json not found; skipping merge.
+[2025-11-02 00:24:42] ✅ ML dataset built [weekly] — 0 rows
+[2025-11-02 00:24:42]    JSON: ml_data\training_data_weekly.json
+[2025-11-02 00:24:42]    Parquet: ml_data\training_data_weekly.parquet
+[2025-11-02 00:24:58] ⚠️ Empty dataset for training
+[2025-11-02 00:24:58] ✅ Training complete: {}
+[2025-11-02 00:24:58] ℹ️ Outcome harvest skipped (ops_helpers.harvest_outcomes unavailable).
+[2025-11-02 00:24:58] 🧠 Online trainer: {'status': 'no_outcomes'}
+[2025-11-02 00:24:58] ℹ️ Drift report skipped (ops_helpers.run_drift_report unavailable).
+[2025-11-02 00:25:07] 🗜️ Wrote weekly aggregate: stocks_2025-W44.json (5530 symbols)
+[2025-11-02 00:25:07] ✅ Nightly Job Complete
+📁 Log file saved → ml_data/logs\nightly_20251102.log
+[2025-11-02 09:49:21] 🧩 Starting Nightly Job — StockAnalyzerPro v1.6.0 (Continuous Learning)
+[2025-11-02 09:49:26] ℹ️ No daily snapshots found to merge.
+[2025-11-02 09:49:27] 📦 Rolling cache: 5532 tickers, merged 0 day file(s).
+[2025-11-02 09:49:33] 🧪 Repairing 125 short histories to ~180 days...
+[2025-11-02 09:49:33] ⚠️ Backfill failed (continuing): backfill_symbols() got an unexpected keyword argument 'max_workers'
+[2025-11-02 09:49:33] ⚠️ No input JSONs found in stock_cache/daily. Producing empty dataset.
+[2025-11-02 09:49:33] ⚠️ metrics_cache/latest_metrics.json not found; skipping merge.
+[2025-11-02 09:49:33] ✅ ML dataset built [daily] — 0 rows
+[2025-11-02 09:49:33]    JSON: ml_data\training_data_daily.json
+[2025-11-02 09:49:33]    Parquet: ml_data\training_data_daily.parquet
+[2025-11-02 09:49:33] ⚠️ No input JSONs found in stock_cache/daily. Producing empty dataset.
+[2025-11-02 09:49:33] ⚠️ metrics_cache/latest_metrics.json not found; skipping merge.
+[2025-11-02 09:49:33] ✅ ML dataset built [weekly] — 0 rows
+[2025-11-02 09:49:33]    JSON: ml_data\training_data_weekly.json
+[2025-11-02 09:49:33]    Parquet: ml_data\training_data_weekly.parquet
+[2025-11-02 09:49:47] ⚠️ Empty dataset for training
+[2025-11-02 09:49:47] ✅ Training complete: {}
+[2025-11-02 09:49:48] 🌾 Outcome harvest: {'status': 'no_outcomes'}
+[2025-11-02 09:49:48] 🧠 Online trainer: {'status': 'no_outcomes'}
+[2025-11-02 09:49:48] ℹ️ Drift report skipped (need >= 2 snapshots).
+[2025-11-02 09:49:56] 🗜️ Wrote weekly aggregate: stocks_2025-W44.json (5530 symbols)
+[2025-11-02 09:49:57] ✅ Nightly Job Complete
+📁 Log file saved → ml_data/logs\nightly_20251102.log

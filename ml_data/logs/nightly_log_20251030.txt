@@ -1,0 +1,5 @@
+[2025-10-30 21:40:23] 🌙 Nightly job started
+[2025-10-30 21:40:23] === STEP 1: Fetching stock + news data ===
+[2025-10-30 21:40:23] ✅ data_pipeline.update_daily: OK
+[2025-10-30 21:40:23] ✅ news_fetcher.update_news: OK
+[2025-10-30 21:40:23] === STEP 2: Building ML dataset(s) ===

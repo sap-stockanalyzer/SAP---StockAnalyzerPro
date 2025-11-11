@@ -1,0 +1,11 @@
+[2025-10-31 21:46:05] 🧩 Starting Nightly Job — StockAnalyzerPro
+[2025-10-31 21:46:05] === STEP 0: Prefetch fundamentals/macro/sentiment ===
+[2025-10-31 21:47:37] ✅ Fundamentals cached: fundamentals_cache\fundamentals_merged.parquet
+[2025-10-31 21:47:37] ✅ Macro features built: macro_cache\macro_features.parquet
+[2025-10-31 21:47:37] ✅ Sentiment enriched: news_cache/sentiment_enriched\daily_social_sentiment.parquet
+[2025-10-31 21:47:37] === STEP 1: Build Dataset ===
+[2025-10-31 21:56:47] ⚠️ Dataset build failed: "Columns not found: 'macd'"
+[2025-10-31 21:56:47] === STEP 2: Train Models ===
+[2025-10-31 21:56:47] === STEP 3: Drift Monitor ===
+[2025-10-31 21:56:47] ⚠️ Drift failed: [Errno 2] No such file or directory: 'ml_data/training_data_weekly.parquet'
+[2025-10-31 21:56:47] ✅ Nightly Job Complete

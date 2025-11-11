@@ -1,0 +1,29 @@
+[2025-10-30 22:16:01] 🌙 Nightly job started
+[2025-10-30 22:16:01] 🧩 Verified directory and JSON assets (self-heal OK)
+[2025-10-30 22:16:01] === STEP 1: Fetching stock + news data ===
+[2025-10-30 22:16:01] ✅ data_pipeline.update_daily: OK
+[2025-10-30 22:16:02] ✅ data_pipeline.update_intraday: OK
+[2025-10-30 22:19:26] ✅ news_fetcher.update_news: OK
+[2025-10-30 22:19:26] === STEP 2: Building ML dataset(s) ===
+[2025-10-30 22:26:44] ✅ ml_data_builder.build_ml_dataset('weekly'): OK
+[2025-10-30 22:26:44] === STEP 3: Training models ===
+[2025-10-30 22:26:44] ⚠️ train_lightgbm.train_lightgbm_models: Dataset not found: ml_data\training_data_weekly.parquet
+Traceback (most recent call last):
+  File "C:\Users\Xaphi\sap_env\backend\nightly_job.py", line 74, in _safe_call
+    res = func(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Xaphi\sap_env\backend\train_lightgbm.py", line 72, in train_lightgbm_models
+    raise FileNotFoundError(f"Dataset not found: {parquet_path}")
+FileNotFoundError: Dataset not found: ml_data\training_data_weekly.parquet
+
+[2025-10-30 22:26:44] === STEP 4: Enrich predictions + log ===
+[2025-10-30 22:26:44] Logged predictions to: ml_data/prediction_logs\preds_20251031T042644Z_nightly.parquet
+[2025-10-30 22:26:44] === STEP 5–6: Harvest + Online Train ===
+[2025-10-30 22:26:45] ⚠️ Harvest failed: unconverted data remains when parsing with format "%Y-%m-%d": " 04:23:06", at position 1. You might want to try:
+    - passing `format` if your strings have a consistent format;
+    - passing `format='ISO8601'` if your strings are all ISO8601 but not necessarily in exactly the same format;
+    - passing `format='mixed'`, and the format will be inferred for each element individually. You might want to use `dayfirst` alongside this.
+[2025-10-30 22:26:45] Online trainer result: {"status": "no_outcomes"}
+[2025-10-30 22:26:45] === STEP 7: Drift monitoring ===
+[2025-10-30 22:26:45] ℹ️ Need ≥2 training_data_*.parquet files for drift.
+[2025-10-30 22:26:45] ✅ Nightly job completed
