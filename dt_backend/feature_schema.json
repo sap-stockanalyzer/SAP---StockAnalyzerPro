@@ -1,0 +1,12 @@
+{
+  "label": "target",
+  "features": [
+    "open", "high", "low", "close", "volume",
+    "ret_1", "ret_5", "ret_15",
+    "vol_20", "vol_60",
+    "ema_5", "ema_10", "ema_20",
+    "rsi_14",
+    "vwap_20"
+  ],
+  "label_classes": ["SELL", "HOLD", "BUY"]
+}
