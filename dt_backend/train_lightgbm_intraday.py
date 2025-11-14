@@ -41,9 +41,9 @@ def _load_dataset(path: Path) -> pd.DataFrame | None:
         log(f"[train_intraday] ⚠️ failed to read parquet: {e}")
         return None
 
-def _prepare(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, list[str]]:
+def _prepare(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, list[str]]:
     # drop obvious non-features & targets
-    drop_cols = {"symbol", "timestamp", "target_ret_15m", "target_label_15m"}
+    drop_cols = {"symbol", "timestamp", "target_ret_15m", "target_label_15m", "split"}
     feature_cols = [c for c in df.columns if c not in drop_cols]
     X = df[feature_cols].select_dtypes(include=["float64", "float32", "int64", "int32"]).copy()
 
@@ -55,11 +55,19 @@ def _prepare(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, list[str]]:
     X = X.loc[mask].fillna(0)
     y = y.loc[mask].astype(int)
 
-    # very simple chronological split (80/20)
-    n = len(y)
-    split = max(50, int(n * 0.8))
-    X_train, X_valid = X.iloc[:split], X.iloc[split:]
-    y_train, y_valid = y.iloc[:split], y.iloc[split:]
+    if "split" in df.columns:
+        train_mask = df["split"].str.lower() == "train"
+        valid_mask = ~train_mask
+        if valid_mask.sum() == 0:
+            valid_mask.iloc[-int(len(df) * 0.1):] = True
+        X_train, X_valid = X[train_mask], X[valid_mask]
+        y_train, y_valid = y[train_mask], y[valid_mask]
+    else:
+        # chronological fallback
+        n = len(y)
+        split = max(50, int(n * 0.8))
+        X_train, X_valid = X.iloc[:split], X.iloc[split:]
+        y_train, y_valid = y.iloc[:split], y.iloc[split:]
 
     return (X_train, y_train, X_valid, y_valid, feature_cols)
 
@@ -109,7 +117,7 @@ def train_intraday_models() -> Dict[str, Any]:
     except Exception as e:
         log(f"[train_intraday] ⚠️ failed to save model: {e}")
 
-    return {
+    metrics = {
         "status": "ok",
         "n_train": int(len(y_tr)),
         "n_valid": int(len(y_va)),
@@ -118,6 +126,19 @@ def train_intraday_models() -> Dict[str, Any]:
         "n_features": int(len(feat_cols)),
         "model_dir": str(MODEL_DIR),
     }
+
+    try:
+        from backend.ml_helpers import register_model  # type: ignore
+
+        register_model(
+            "intraday_lightgbm",
+            {k: v for k, v in metrics.items() if k in {"acc", "f1_macro", "n_train", "n_valid"}},
+            feat_cols,
+        )
+    except Exception:
+        pass
+
+    return metrics
 
 if __name__ == "__main__":
     out = train_intraday_models()

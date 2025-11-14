@@ -98,6 +98,9 @@ def score_intraday_tickers() -> Dict[str, Any]:
         log("[ai_intraday] ⚠️ no latest snapshots found")
         return {}
 
+    feature_list = feature_list or [
+        c for c in snap.columns if c not in {"symbol", "timestamp", "split", "target_label_15m", "target_ret_15m"}
+    ]
     # Prepare features in the same order
     X = snap.reindex(columns=feature_list).copy()
     for c in X.columns:
@@ -112,10 +115,23 @@ def score_intraday_tickers() -> Dict[str, Any]:
     for i, row in snap.iterrows():
         sym = str(row.get("symbol"))
         probs = pred_proba[i]
+        score_val = None
         if isinstance(probs, (list, tuple, np.ndarray)):
+            probs = np.asarray(probs, dtype=float)
             j = int(np.argmax(probs))
             conf = float(np.max(probs))
             label = id2label.get(j, "HOLD")
+            buy_idx = label_map.get("LABEL2ID", {}).get("BUY")
+            sell_idx = label_map.get("LABEL2ID", {}).get("SELL")
+            if buy_idx is not None and buy_idx < probs.size:
+                buy_prob = float(probs[buy_idx])
+            else:
+                buy_prob = 0.0
+            if sell_idx is not None and sell_idx < probs.size:
+                sell_prob = float(probs[sell_idx])
+            else:
+                sell_prob = 0.0
+            score_val = buy_prob - sell_prob
         else:
             label, conf = "HOLD", 0.34
 
@@ -124,9 +140,15 @@ def score_intraday_tickers() -> Dict[str, Any]:
             "timestamp": str(row.get("timestamp")),
             "label": label,
             "confidence": conf,
+            "predicted": score_val if score_val is not None else conf,
+            "score": score_val if score_val is not None else conf,
             "currentPrice": float(row.get("close", np.nan)) if pd.notna(row.get("close")) else None,
             "momentum_score": float(row.get("momentum_score", np.nan)) if "momentum_score" in row else None,
             "orderflow_score": float(row.get("orderflow_score", np.nan)) if "orderflow_score" in row else None,
+            "probabilities": {
+                id2label.get(idx, str(idx)): float(probs[idx]) if isinstance(probs, np.ndarray) and idx < probs.size else None
+                for idx in range(len(classes))
+            } if isinstance(probs, np.ndarray) else None,
         }
         results[sym] = node
 

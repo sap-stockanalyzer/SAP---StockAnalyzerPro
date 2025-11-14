@@ -18,7 +18,7 @@ and maintains /data_dt/rolling_intraday.json.gz in this format:
 """
 import os, time, gzip, json, asyncio, requests, pytz, yfinance as yf
 from datetime import datetime, timezone, timedelta
-from dt_backend.config_dt import FETCH_SPEED_FACTOR
+from dt_backend.config_dt import FETCH_SPEED_FACTOR, DT_PATHS
 from backend.data_pipeline import log
 from dotenv import load_dotenv
 from pathlib import Path
@@ -38,8 +38,9 @@ HEADERS = {
 }
 ALPACA_URL = "https://data.alpaca.markets/v2/stocks/bars"
 
-DATA_PATH = os.path.join("data_dt", "rolling_intraday.json.gz")
-os.makedirs("data_dt", exist_ok=True)
+DATA_PATH = DT_PATHS["dtrolling"]
+RANK_FILE = DT_PATHS["dtsignals"] / "prediction_rank_fetch.json.gz"
+os.makedirs(DATA_PATH.parent, exist_ok=True)
 
 if not ALPACA_KEY or not ALPACA_SECRET:
     log("⚠️ Alpaca API keys not set — live intraday fetch disabled.")
@@ -67,7 +68,8 @@ def is_market_open():
 # ------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------
-def load_ranks(path="ml_data_dt/signals/prediction_rank_fetch.json.gz") -> dict:
+def load_ranks(path: str | os.PathLike = RANK_FILE) -> dict:
+    path = os.fspath(path)
     if not os.path.exists(path):
         log(f"⚠️ Rank file missing at {path}")
         return {"owned": [], "ranks": []}

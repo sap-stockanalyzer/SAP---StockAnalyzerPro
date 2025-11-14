@@ -3,11 +3,11 @@ live_prices_router.py — FastAPI router serving /live-prices using StockAnalysi
 Supports both batch (top N) and on-demand symbol queries.
 """
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Query
-from typing import Optional, List
+from typing import Optional
 from backend.data_pipeline import _fetch_from_stockanalysis, _read_rolling, log
-import requests, datetime, pandas as pd
+import requests
 import yfinance as yf
 
 BASE_URL = "https://stockanalysis.com/api/screener/s/i/"  # StockAnalysis API base
@@ -21,8 +21,8 @@ def get_intraday_bars_bulk(symbols, interval="1m", lookback_minutes=390):
     Returns {symbol: pd.DataFrame[timestamp, open, high, low, close, volume]}.
     """
     out = {}
-    end = datetime.datetime.utcnow()
-    start = end - datetime.timedelta(minutes=lookback_minutes)
+    end = datetime.utcnow()
+    start = end - timedelta(minutes=lookback_minutes)
 
     # --- FIX: filter invalid placeholders ---
     valid_syms = [

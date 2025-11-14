@@ -18,7 +18,10 @@ except Exception:
     def log(msg: str): print(msg, flush=True)
 
 from dt_backend.config_dt import DT_PATHS
-from dt_backend.trade_simulator import simulate_intraday
+try:
+    from dt_backend.trade_simulator import simulate_intraday
+except Exception:
+    simulate_intraday = None
 
 BRAIN_PATH = DT_PATHS["dtbrain"]
 DATA_PATH = DT_PATHS["dtml_data"] / "training_data_intraday.parquet"
@@ -77,6 +80,11 @@ def train_incremental_intraday(
     summary = {"status": "ok", "updated_at": datetime.utcnow().isoformat()}
 
     # 1️⃣ Load data + predictions
+    if simulate_intraday is None:
+        log("[dt_learn] ⚠️ trade_simulator unavailable; skipping incremental learning")
+        summary["status"] = "skipped_no_sim"
+        return summary
+
     if not DATA_PATH.exists() or not SIGNALS_PATH.exists():
         log("[dt_learn] ⚠️ missing dataset or signals → skip incremental")
         summary["status"] = "skipped_no_data"

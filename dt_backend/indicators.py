@@ -1,6 +1,5 @@
 # dt_backend/indicators.py — v1.0
-"""
-Low-level intraday indicators for AION day-trading engine.
+"""Low-level intraday indicators for the DT feature pipeline.
 
 Inputs:
     DataFrame with at least: ["open", "high", "low", "close", "volume"]

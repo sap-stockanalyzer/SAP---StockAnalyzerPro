@@ -124,4 +124,12 @@ def build_symbol_features(
     if split_idx < n:
         df.iloc[split_idx:, df.columns.get_loc("split")] = "valid"
 
-    return df.reset_index().rename(columns={"timestamp": "ts"})
+    df = df.rename(columns={
+        "fwd_ret": "target_ret_15m",
+        "label": "target_label_15m",
+    })
+
+    df = df.reset_index().rename(columns={"index": "timestamp"})
+    df["split"] = df["split"].astype(str)
+
+    return df

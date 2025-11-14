@@ -1,9 +1,20 @@
 from __future__ import annotations
-import os, re, json, gzip, shutil, time, threading, sys, glob
+
+import os
+import re
+import json
+import gzip
+import shutil
+import time
+import threading
+import sys
+import glob
+import random
 from pathlib import Path  # ✅ fix: import Path
 from datetime import datetime, timedelta
-from dt_backend.config_dt import DT_PATHS
 from typing import Dict, Any, List, Optional
+
+from dt_backend.config_dt import DT_PATHS
 
 if os.name == "nt":
     import msvcrt
@@ -13,11 +24,12 @@ else:
 # ------------------------------------------------------------
 # ✅ Intraday (Day-Trading) Cache Structure
 # ------------------------------------------------------------
-STOCK_CACHE_DIR = os.getenv("SAP_STOCK_CACHE_DIR", "data_dt/stock_cache")
+STOCK_CACHE_DIR = os.fspath(DT_PATHS["stock_cache"])
+DT_DATA_DIR = os.fspath(DT_PATHS["dtdata"])
 MASTER_DIR = os.path.join(STOCK_CACHE_DIR, "master")
-MACRO_CACHE_DIR = os.path.join("data_dt", "macro_cache")
-NEWS_CACHE_DIR = os.path.join("data_dt", "news_cache")
-METRICS_CACHE_DIR = os.path.join("data_dt", "metrics_cache")
+MACRO_CACHE_DIR = os.path.join(DT_DATA_DIR, "macro_cache")
+NEWS_CACHE_DIR = os.path.join(DT_DATA_DIR, "news_cache")
+METRICS_CACHE_DIR = os.path.join(DT_DATA_DIR, "metrics_cache")
 
 os.makedirs(MASTER_DIR, exist_ok=True)
 os.makedirs(MACRO_CACHE_DIR, exist_ok=True)
@@ -27,11 +39,11 @@ os.makedirs(METRICS_CACHE_DIR, exist_ok=True)
 # ------------------------------------------------------------
 # ✅ Intraday Rolling / Brain / Lock
 # ------------------------------------------------------------
-ROLLING_PATH = os.path.join(MASTER_DIR, "rolling_intraday.json.gz")
-BRAIN_PATH = os.path.join(MASTER_DIR, "rolling_brain_intraday.json.gz")
+ROLLING_PATH = Path(DT_PATHS["dtrolling"])
+BRAIN_PATH = Path(DT_PATHS["dtbrain"])
 ROOT = Path(__file__).resolve().parents[1]
-LOCK_PATH = ROOT / "data_dt" / "stock_cache" / "master" / "rolling_intraday.lock"
-BACKUP_DIR = os.path.join(MASTER_DIR, "backups")
+LOCK_PATH = Path(DT_PATHS["stock_cache"]) / "master" / "rolling_intraday.lock"
+BACKUP_DIR = Path(MASTER_DIR) / "backups"
 os.makedirs(BACKUP_DIR, exist_ok=True)
 os.makedirs(LOCK_PATH.parent, exist_ok=True)
 
@@ -69,9 +81,6 @@ def log(msg: str) -> None:
 # =====================================================================
 # LOCKING SYSTEM (Intraday)
 # =====================================================================
-
-import random, time
-from dt_backend.config_dt import DT_PATHS  # ✅ intraday config import
 
 class RollingLock:
     """
@@ -132,7 +141,7 @@ def _atomic_write_json_gz(path: Any, obj: Any) -> None:
     # ✅ Handle backup rotation safely (in DT directory)
     if os.path.exists(path_str):
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_dir = os.path.join("data_dt", "stock_cache", "master", "backups")
+        backup_dir = os.fspath(BACKUP_DIR)
         os.makedirs(backup_dir, exist_ok=True)
         backup_path = os.path.join(backup_dir, f"rolling_intraday_{ts}.json.gz")
         shutil.copy2(path_str, backup_path)
@@ -141,7 +150,9 @@ def _atomic_write_json_gz(path: Any, obj: Any) -> None:
     os.replace(tmp_path, path_str)
 
 def _prune_backups() -> None:
-    backup_dir = DT_PATHS["dtlogs"].parent / "stock_cache" / "master" / "backups"
+    backup_dir = os.fspath(BACKUP_DIR)
+    if not os.path.isdir(backup_dir):
+        return
     files = sorted(
         [os.path.join(backup_dir, f) for f in os.listdir(backup_dir) if f.endswith(".json.gz")]
     )

@@ -18,6 +18,9 @@ GLBL_PATH = DT_PATHS["dtml_data"] / "market_state.json"
 NEWS_DIR  = DT_PATHS["dtnews"]
 MACRO_DIR = DT_PATHS["dtmacro"]
 
+NEWS_DIR.mkdir(parents=True, exist_ok=True)
+MACRO_DIR.mkdir(parents=True, exist_ok=True)
+
 # ---------------- Utility helpers ----------------
 def _load_json(path):
     try:

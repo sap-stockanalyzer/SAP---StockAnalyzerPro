@@ -10,6 +10,7 @@ from dt_backend.config_dt import DT_PATHS
 from dt_backend.data_pipeline_dt import _read_dt_rolling as _read_rolling, save_dt_rolling as save_rolling, log
 
 GLBL_PATH = DT_PATHS["dtml_data"] / "market_state.json"
+GLBL_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 def _load_glbl() -> Dict[str, Any]:
     try:

@@ -26,6 +26,7 @@ import gzip
 import json
 from pathlib import Path
 from typing import Dict, Any, Tuple, List, Optional
+from datetime import datetime
 
 import pandas as pd
 
@@ -41,7 +42,8 @@ from .feature_engineering import build_symbol_features
 
 
 ROLLING_PATH: Path = DT_PATHS["data_dt"] / "rolling_intraday.json.gz"
-DATASET_PATH: Path = DT_PATHS["ml_data_dt"] / "training_data_intraday.parquet"
+DATASET_PATH: Path = DT_PATHS["dtml_data"] / "training_data_intraday.parquet"
+BUILD_LOG_PATH: Path = DT_PATHS["dtlogs"] / "dataset_builds.jsonl"
 
 
 # ---------------------------------------------------------------------
@@ -189,6 +191,10 @@ def build_intraday_dataset(
         return None
 
     dataset = pd.concat(frames, ignore_index=True)
+    dataset["timestamp"] = pd.to_datetime(dataset["timestamp"], utc=True, errors="coerce")
+    dataset = dataset.dropna(subset=["timestamp"]).reset_index(drop=True)
+    dataset["target_label_15m"] = dataset["target_label_15m"].astype(str)
+    dataset = dataset.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
 
     # Ensure output directory
     DATASET_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -197,10 +203,27 @@ def build_intraday_dataset(
         dataset.to_parquet(DATASET_PATH, index=False)
         log(f"[DT] [ml_data_builder_intraday] ✅ Wrote dataset → {DATASET_PATH} "
             f"({len(dataset):,} rows, {dataset.shape[1]} cols).")
+        _write_build_log(len(dataset), len(selected), list(dataset.columns))
     except Exception as e:
         log(f"[DT] [ml_data_builder_intraday] ⚠️ Failed to write parquet: {e}")
 
     return dataset
+
+
+def _write_build_log(rows: int, symbols: int, columns: List[str]) -> None:
+    try:
+        BUILD_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "rows": rows,
+            "symbols": symbols,
+            "columns": columns,
+            "dataset": str(DATASET_PATH),
+        }
+        with open(BUILD_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as err:
+        log(f"[DT] [ml_data_builder_intraday] ⚠️ Could not append build log: {err}")
 
 
 if __name__ == "__main__":

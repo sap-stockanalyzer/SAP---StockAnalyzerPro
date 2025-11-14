@@ -11,10 +11,10 @@ uvicorn
 joblib
 pandas_ta
 yfinance
-pyarrow
+torch
 praw
 snscrape
 pandas-datareader
 fredapi
 tqdm
-transformers torch
+transformers

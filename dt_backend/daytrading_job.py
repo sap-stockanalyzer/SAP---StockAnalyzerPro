@@ -134,6 +134,7 @@ def run_daytrading_job(mode: str = "full") -> dict:
         "predictions": 0,
         "signals": None,
         "online_learning": None,
+        "trade_dispatch": None,
         "synced": False,
     }
 
@@ -212,6 +213,15 @@ def run_daytrading_job(mode: str = "full") -> dict:
                     log(f"ℹ️ Seed rank file written → {seeded}")
                 else:
                     log("⚠️ No predictions to rank — seed rank creation also failed.")
+
+            # Push predictions into broker queue for bots
+            try:
+                from dt_backend.trade_executor import sync_predictions_to_broker
+
+                summary["trade_dispatch"] = sync_predictions_to_broker(preds)
+                log(f"🤝 Trade dispatch summary: {summary['trade_dispatch']}")
+            except Exception as broker_err:
+                log(f"[DT] ⚠️ Broker dispatch skipped: {broker_err}")
         except Exception as e:
             log(f"[DT] ⚠️ Intraday prediction failed: {e}")
             summary["predictions"] = 0

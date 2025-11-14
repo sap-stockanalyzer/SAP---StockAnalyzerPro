@@ -1,12 +1,26 @@
 {
-  "label": "target",
+  "label": "target_label_15m",
+  "forward_return": "target_ret_15m",
   "features": [
-    "open", "high", "low", "close", "volume",
-    "ret_1", "ret_5", "ret_15",
-    "vol_20", "vol_60",
-    "ema_5", "ema_10", "ema_20",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "ret_1",
+    "ret_5",
+    "ret_15",
+    "vol_20",
+    "vol_60",
+    "ema_5",
+    "ema_10",
+    "ema_20",
     "rsi_14",
-    "vwap_20"
+    "vwap_20",
+    "minute_of_day",
+    "hour",
+    "day_of_week"
   ],
-  "label_classes": ["SELL", "HOLD", "BUY"]
+  "splits": ["train", "valid"],
+  "version": "1.0.0"
 }
