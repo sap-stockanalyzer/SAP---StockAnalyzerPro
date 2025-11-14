@@ -15,6 +15,21 @@
   3. `git push -u origin work` to create/update the branch upstream. After the first push, `git push`/`git pull` will track GitHub normally.
 - **If you need a `main` branch:** once the remote exists you can either rename `work` to `main` (`git branch -m work main`) before pushing, or push `work` and open a PR into your remote `main` via GitHub.
 
+## Remote sync attempt (2024-05-18)
+- **Goal:** refresh the workspace with any upstream changes by running `git fetch origin`.
+- **Result:** SSH access to GitHub is currently blocked from this environment (`ssh: connect to host github.com port 22: Network is unreachable`), so no additional files could be retrieved.
+- **Next step:** once network egress is available (or HTTPS traffic is permitted), rerun `git fetch origin` followed by `git status` to reconcile local history with GitHub before pushing.
+
+## Backend smoke test report (2024-05-18)
+- **Command:** `python -m compileall backend dt_backend`.
+- **Status:** ✅ All backend and day-trading modules compiled successfully, confirming there are no syntax or import-time errors in the Python tree.
+- **Recommendations:**
+  1. **Keep compile checks in CI.** The `compileall` pass caught encoding issues earlier this week; leaving it in CI provides a cheap regression guard while deeper unit tests are still under construction.
+  2. **Add targeted unit tests.** Prioritize lightweight tests around `backend_extension.run_latest_drift`, `dt_backend/trading_bot_simulator`, and other modules that previously failed to compile so future logic changes are validated automatically.
+  3. **Instrument schedulers.** Now that the modules load cleanly, wire telemetry into `backend/scheduler_runner.py` and `dt_backend/rank_fetch_scheduler.py` so production runs emit traces/metrics (ties back to the Debugging Plan above).
+
+> _Note:_ Because GitHub could not be reached, this workspace still reflects only the files that have been edited locally in Codex. No additional upstream assets were downloaded during this pass.
+
 ## Debugging Plan
 1. **Frontend regressions (Next.js `/app` directory).**
    - Instrument key surfaces such as `app/page.tsx`, `app/optimizer/*`, and `app/reports/*` with feature flags and runtime guards to surface hydration or data-fetch failures early.
