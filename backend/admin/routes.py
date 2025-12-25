@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import os
+import signal
+import threading
+import time
 from typing import Any, Dict
+
 from fastapi import APIRouter, Request, HTTPException
 
 from backend.admin.auth import login_admin, issue_token, require_admin
-from backend.historical_replay_swing.job_manager import start_replay_legacy, get_replay_status
+from backend.historical_replay_swing.job_manager import (
+    start_replay_legacy,
+    get_replay_status,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -24,6 +32,7 @@ def _require_admin(req: Request) -> None:
         raise HTTPException(status_code=403, detail="forbidden")
 
 
+# --- Auth ---
 @router.post("/login")
 async def admin_login(req: Request) -> Dict[str, Any]:
     try:
@@ -41,6 +50,7 @@ async def admin_login(req: Request) -> Dict[str, Any]:
     return {"token": issue_token()}
 
 
+# --- Replay control ---
 @router.post("/replay/start")
 async def replay_start(req: Request) -> Dict[str, Any]:
     _require_admin(req)
@@ -60,3 +70,14 @@ async def replay_start(req: Request) -> Dict[str, Any]:
 async def replay_status(req: Request) -> Dict[str, Any]:
     _require_admin(req)
     return get_replay_status()
+
+
+# --- Restart services ---
+@router.post("/system/restart")
+def restart_services(_: str = Depends(require_admin)):
+    def delayed_exit():
+        time.sleep(1.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=delayed_exit, daemon=True).start()
+    return {"status": "ok", "message": "Restarting services"}
