@@ -7,11 +7,16 @@ import subprocess
 import platform
 import threading
 from typing import Optional
-from dotenv import load_dotenv
+
+# dotenv is optional; if .env has bad lines we don't want to crash boot
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
 
 from utils.live_log import append_log, prune_old_logs
-
-load_dotenv()
 
 # Quiet noisy libs
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
@@ -39,7 +44,54 @@ def _normalize_bind_host(host: str, default: str = "0.0.0.0") -> str:
     return host if _is_valid_bind_host(host) else default
 
 
-def launch(cmd, name: str) -> subprocess.Popen:
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = (os.environ.get(name, "") or "").strip().lower()
+    if v == "":
+        return default
+    if v in ("1", "true", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+
+def uvicorn_cmd(
+    app: str,
+    host: str,
+    port: str | int,
+    *,
+    log_level: str = "warning",
+    access_log: bool = False,
+    reload: bool = False,
+) -> list[str]:
+    """
+    Build a safe uvicorn command.
+    IMPORTANT: flags are presence-based. Never pass "false"/"true" as extra args.
+    """
+    cmd = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        app,
+        "--host",
+        str(host),
+        "--port",
+        str(port),
+        "--log-level",
+        str(log_level),
+    ]
+
+    # access log is a boolean flag in uvicorn; use --no-access-log to disable.
+    if not access_log:
+        cmd.append("--no-access-log")
+
+    if reload:
+        cmd.append("--reload")
+
+    return cmd
+
+
+def launch(cmd: list[str], name: str) -> subprocess.Popen:
     print(f"🚀 Starting {name}...")
     append_log(f"Starting {name}")
     prune_old_logs()
@@ -55,16 +107,13 @@ def launch(cmd, name: str) -> subprocess.Popen:
 
 
 def pipe_output(proc: subprocess.Popen, name: str):
-    # NOTE: proc.stdout can be None if Popen wasn't created with stdout=PIPE.
     if proc.stdout is None:
         return
     for line in proc.stdout:
-        # Mirror to terminal
         try:
             print(line, end="")
         except Exception:
             pass
-        # Persist to live log
         append_log(f"[{name}] {line}")
 
 
@@ -101,6 +150,11 @@ if __name__ == "__main__":
     replay_host = _normalize_bind_host(os.environ.get("REPLAY_APP_HOST", "0.0.0.0"))
     replay_port = os.environ.get("REPLAY_APP_PORT", "8020")
 
+    # Optional toggles
+    UVICORN_LOG_LEVEL = os.environ.get("UVICORN_LOG_LEVEL", "warning").strip() or "warning"
+    UVICORN_ACCESS_LOG = _env_bool("UVICORN_ACCESS_LOG", default=False)
+    UVICORN_RELOAD = _env_bool("UVICORN_RELOAD", default=False)
+
     print("────────────────────────────────────────")
     print("🚀 Launching AION Analytics system")
     print(f"   • backend          → http://{backend_host}:{backend_port}")
@@ -112,46 +166,30 @@ if __name__ == "__main__":
     prune_old_logs()
 
     backend_proc = launch(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
+        uvicorn_cmd(
             "backend.backend_service:app",
-            "--host",
             backend_host,
-            "--port",
-            str(backend_port),
-            "--access-log",
-            "false",
-        ],
+            backend_port,
+            log_level=UVICORN_LOG_LEVEL,
+            access_log=UVICORN_ACCESS_LOG,
+            reload=UVICORN_RELOAD,
+        ),
         "backend",
     )
-    threading.Thread(
-        target=pipe_output,
-        args=(backend_proc, "backend"),
-        daemon=True,
-    ).start()
+    threading.Thread(target=pipe_output, args=(backend_proc, "backend"), daemon=True).start()
 
     dt_proc = launch(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
+        uvicorn_cmd(
             "dt_backend.fastapi_main:app",
-            "--host",
             dt_host,
-            "--port",
-            str(dt_port),
-            "--access-log",
-            "false",
-        ],
+            dt_port,
+            log_level=UVICORN_LOG_LEVEL,
+            access_log=UVICORN_ACCESS_LOG,
+            reload=UVICORN_RELOAD,
+        ),
         "dt_backend",
     )
-    threading.Thread(
-        target=pipe_output,
-        args=(dt_proc, "dt_backend"),
-        daemon=True,
-    ).start()
+    threading.Thread(target=pipe_output, args=(dt_proc, "dt_backend"), daemon=True).start()
 
     dt_live_proc = launch(
         [
@@ -168,25 +206,17 @@ if __name__ == "__main__":
     ).start()
 
     replay_proc = launch(
-        [
-            sys.executable,
-            "-m",
-            "uvicorn",
+        uvicorn_cmd(
             "replay_service:app",
-            "--host",
             replay_host,
-            "--port",
-            str(replay_port),
-            "--access-log",
-            "false",
-        ],
+            replay_port,
+            log_level=UVICORN_LOG_LEVEL,
+            access_log=UVICORN_ACCESS_LOG,
+            reload=UVICORN_RELOAD,
+        ),
         "replay_service",
     )
-    threading.Thread(
-        target=pipe_output,
-        args=(replay_proc, "replay_service"),
-        daemon=True,
-    ).start()
+    threading.Thread(target=pipe_output, args=(replay_proc, "replay_service"), daemon=True).start()
 
     try:
         while True:
