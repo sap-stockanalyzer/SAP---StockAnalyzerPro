@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List
 
 from backend.core.config import PATHS, TIMEZONE
 from utils.logger import log
@@ -55,20 +55,9 @@ def _read_json(p: Path) -> Dict[str, Any]:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    """
-    Atomic write to avoid UI polling reading a half-written JSON file.
-    This is the #1 cause of "status looks wrong / progress resets" in pollers.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
-    tmp.write_text(text, encoding="utf-8")
-    # atomic on POSIX; replace on Windows too
-    tmp.replace(path)
-
-
 def _write_json(p: Path, data: Dict[str, Any]) -> None:
-    _atomic_write_text(p, json.dumps(data, indent=2))
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
 def _parse_iso_dt(x: Any) -> Optional[datetime]:
@@ -88,7 +77,6 @@ def _daterange(start: date, end: date) -> List[date]:
         d = d + timedelta(days=1)
     return days
 
-
 def reset_replay_state() -> dict:
     """
     Hard reset the swing replay state so a new replay can start clean.
@@ -103,7 +91,6 @@ def reset_replay_state() -> dict:
         return {"status": "ok", "reset": True, "path": str(REPLAY_STATE_PATH)}
     except Exception as e:
         return {"status": "error", "reset": False, "error": str(e), "path": str(REPLAY_STATE_PATH)}
-
 
 def _acquire_lock() -> bool:
     """
@@ -126,7 +113,7 @@ def _acquire_lock() -> bool:
         "host": os.getenv("COMPUTERNAME") or os.getenv("HOSTNAME") or None,
     }
     try:
-        _atomic_write_text(lp, json.dumps(ctx, indent=2))
+        lp.write_text(json.dumps(ctx, indent=2), encoding="utf-8")
     except Exception:
         # Fallback: at least write *something* so other processes see a lock.
         lp.write_text(datetime.utcnow().isoformat() + "Z", encoding="utf-8")
@@ -150,12 +137,10 @@ def get_state() -> Dict[str, Any]:
             "status": "never_ran",
             "version": None,
             "started_at": None,
-            "finished_at": None,
             "updated_at": None,
             "start_date": None,
             "end_date": None,
             "current_day": None,
-            "completed_days": [],
             "days_completed": 0,
             "total_days": 0,
             "percent_complete": 0.0,
@@ -165,13 +150,9 @@ def get_state() -> Dict[str, Any]:
             "notes": [],
         }
     try:
-        st = _read_json(p)
-        if not isinstance(st, dict):
-            return {"status": "corrupt", "path": str(p)}
-        return st
+        return _read_json(p)
     except Exception:
-        # If the state file is being written while a poller reads, JSON decode can fail.
-        # We return a special status instead of crashing the server.
+        # If the state file is corrupted, don't crash the server.
         return {"status": "corrupt", "path": str(p)}
 
 
@@ -232,12 +213,10 @@ def reset_state() -> Dict[str, Any]:
         "status": "never_ran",
         "version": None,
         "started_at": None,
-        "finished_at": None,
         "updated_at": _now().isoformat(),
         "start_date": None,
         "end_date": None,
         "current_day": None,
-        "completed_days": [],
         "days_completed": 0,
         "total_days": 0,
         "percent_complete": 0.0,
@@ -348,12 +327,10 @@ def start_replay(cfg: Optional[ReplayConfig] = None) -> Dict[str, Any]:
         resume_from = start_day
     if resume_from > end_day:
         # Nothing to do; mark complete
-        started_at = st.get("started_at") or _now().isoformat()
-        prev_elapsed = float(st.get("elapsed_secs") or 0.0)
         new_state = {
             "status": "complete",
             "version": cfg.version,
-            "started_at": started_at,
+            "started_at": st.get("started_at") or _now().isoformat(),
             "finished_at": _now().isoformat(),
             "start_date": start_day.isoformat(),
             "end_date": end_day.isoformat(),
@@ -362,7 +339,7 @@ def start_replay(cfg: Optional[ReplayConfig] = None) -> Dict[str, Any]:
             "days_completed": len(completed_days),
             "total_days": len(days),
             "percent_complete": 100.0,
-            "elapsed_secs": prev_elapsed,
+            "elapsed_secs": float(st.get("elapsed_secs") or 0.0),
             "eta_secs": 0.0,
             "last_error": None,
             "notes": st.get("notes") or [],
@@ -371,14 +348,10 @@ def start_replay(cfg: Optional[ReplayConfig] = None) -> Dict[str, Any]:
         _release_lock()
         return {"status": "complete", "state": new_state}
 
-    # Keep started_at + elapsed on resume
-    started_at = st.get("started_at") or _now().isoformat()
-    prev_elapsed = float(st.get("elapsed_secs") or 0.0)
-
     state: Dict[str, Any] = {
-        "status": "running",  # IMPORTANT: must stay 'running' for the whole replay
+        "status": "running",
         "version": cfg.version,
-        "started_at": started_at,
+        "started_at": _now().isoformat(),
         "finished_at": None,
         "start_date": start_day.isoformat(),
         "end_date": end_day.isoformat(),
@@ -387,7 +360,7 @@ def start_replay(cfg: Optional[ReplayConfig] = None) -> Dict[str, Any]:
         "days_completed": int(len(completed_days)),
         "total_days": int(len(days)),
         "percent_complete": float((len(completed_days) / max(1, len(days))) * 100.0),
-        "elapsed_secs": float(prev_elapsed),
+        "elapsed_secs": 0.0,
         "eta_secs": None,
         "last_error": None,
         "notes": st.get("notes") or [],
@@ -398,93 +371,60 @@ def start_replay(cfg: Optional[ReplayConfig] = None) -> Dict[str, Any]:
         _set_maintenance(True, reason="swing_historical_replay")
 
     def _worker() -> None:
-        # We accumulate elapsed across resumes.
         t_start = time.time()
         try:
             d = date.fromisoformat(str(state["current_day"]))
             while d <= end_day:
-                cur = get_state()
-
-                # If state is briefly unreadable, do NOT collapse to idle.
-                # Keep marching; next write will restore a clean JSON file.
-                if not isinstance(cur, dict) or cur.get("status") == "corrupt":
-                    cur = state.copy()
-
                 # Stop request?
+                cur = get_state()
                 if cur.get("status") == "stopping":
                     cur["status"] = "stopped"
                     cur["finished_at"] = _now().isoformat()
-                    # keep current_day as the day we stopped on
-                    elapsed = prev_elapsed + (time.time() - t_start)
-                    cur["elapsed_secs"] = float(round(elapsed, 3))
-                    cur["eta_secs"] = None
                     _write_state(cur)
                     return
 
-                # Always stay running during replay
-                cur["status"] = "running"
                 cur["current_day"] = d.isoformat()
                 _write_state(cur)
 
                 try:
                     day_res = _run_one_day(d)
+                    cur = get_state()  # refresh
+                    completed = list(cur.get("completed_days") or [])
+                    completed.append(d.isoformat())
+                    cur["completed_days"] = completed
+                    cur["days_completed"] = int(len(completed))
 
-                    # Refresh, but again: never allow poller-side corruption to reset logic
-                    cur2 = get_state()
-                    if not isinstance(cur2, dict) or cur2.get("status") == "corrupt":
-                        cur2 = cur
-
-                    completed = list(cur2.get("completed_days") or [])
-                    if not completed or completed[-1] != d.isoformat():
-                        completed.append(d.isoformat())
-
-                    cur2["status"] = "running"
-                    cur2["completed_days"] = completed
-                    cur2["days_completed"] = int(len(completed))
-
-                    elapsed = prev_elapsed + (time.time() - t_start)
-                    cur2["elapsed_secs"] = float(round(elapsed, 3))
-                    cur2["percent_complete"] = float((len(completed) / max(1, len(days))) * 100.0)
-                    cur2["eta_secs"] = _compute_eta(elapsed, len(completed), len(days))
-                    cur2["last_error"] = None
-
+                    elapsed = time.time() - t_start
+                    cur["elapsed_secs"] = float(round(elapsed, 3))
+                    cur["percent_complete"] = float((len(completed) / max(1, len(days))) * 100.0)
+                    cur["eta_secs"] = _compute_eta(elapsed, len(completed), len(days))
+                    cur["last_error"] = None
                     # Optional: store last_day_result shallow
-                    cur2["last_day"] = {
+                    cur["last_day"] = {
                         "day": d.isoformat(),
                         "status": (day_res.get("nightly") or {}).get("status"),
                     }
-                    _write_state(cur2)
+                    _write_state(cur)
 
                 except Exception as e_day:
-                    cur_err = get_state()
-                    if not isinstance(cur_err, dict) or cur_err.get("status") == "corrupt":
-                        cur_err = cur
-                    cur_err["status"] = "incomplete"
-                    cur_err["finished_at"] = _now().isoformat()
-                    cur_err["last_error"] = f"{type(e_day).__name__}: {e_day}"
-                    elapsed = prev_elapsed + (time.time() - t_start)
-                    cur_err["elapsed_secs"] = float(round(elapsed, 3))
-                    cur_err["eta_secs"] = None
-                    _write_state(cur_err)
+                    cur = get_state()
+                    cur["status"] = "incomplete"
+                    cur["finished_at"] = _now().isoformat()
+                    cur["last_error"] = f"{type(e_day).__name__}: {e_day}"
+                    _write_state(cur)
                     return
 
+                # next day
                 d = d + timedelta(days=1)
 
             # Completed
-            cur_done = get_state()
-            if not isinstance(cur_done, dict) or cur_done.get("status") == "corrupt":
-                cur_done = state.copy()
-
-            cur_done["status"] = "complete"
-            cur_done["finished_at"] = _now().isoformat()
-            cur_done["current_day"] = None
-            cur_done["percent_complete"] = 100.0
-
-            elapsed = prev_elapsed + (time.time() - t_start)
-            cur_done["elapsed_secs"] = float(round(elapsed, 3))
-            cur_done["eta_secs"] = 0.0
-            cur_done["last_error"] = None
-            _write_state(cur_done)
+            cur = get_state()
+            cur["status"] = "complete"
+            cur["finished_at"] = _now().isoformat()
+            cur["current_day"] = None
+            cur["percent_complete"] = 100.0
+            cur["eta_secs"] = 0.0
+            _write_state(cur)
 
         finally:
             if cfg.set_maintenance_mode:
@@ -495,10 +435,15 @@ def start_replay(cfg: Optional[ReplayConfig] = None) -> Dict[str, Any]:
     _thread.start()
     return {"status": "started", "state": get_state()}
 
-
 def get_replay_status() -> Dict[str, Any]:
     """
     Backward-compatible alias for admin / router API.
+    """
+    return get_status()
+
+def get_replay_status() -> Dict[str, Any]:
+    """
+    Backward-compatible alias for older routers/UI.
     """
     return get_status()
 
@@ -521,7 +466,6 @@ def start_replay_legacy(weeks: int = 4, version: str = "v1") -> Dict[str, Any]:
     cfg = ReplayConfig(lookback_days=w * 7, version=str(version))
     return start_replay(cfg)
 
-
 __all__ = [
     "start_replay",
     "start_replay_legacy",
@@ -532,3 +476,4 @@ __all__ = [
     "reset_state",
     "request_stop",
 ]
+
