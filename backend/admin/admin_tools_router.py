@@ -16,7 +16,8 @@ router = APIRouter(prefix="/admin/tools", tags=["admin-tools"])
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-SWING_REPLAY_STATE = PROJECT_ROOT / "data" / "replay" / "swing" / "replay_state.json"
+from backend.historical_replay_swing.job_manager import REPLAY_STATE_PATH
+SWING_REPLAY_STATE = REPLAY_STATE_PATH
 
 LOCK_PATHS = [
     PROJECT_ROOT / "data" / "locks",

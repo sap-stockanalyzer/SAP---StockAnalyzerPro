@@ -158,6 +158,15 @@ NIGHTLY_LOCK_FILE = BRAINS_ROOT / "nightly_job.lock"
 DT_ROLLING_BRAIN = BRAINS_ROOT / "dt_rolling.json.gz"
 
 # ============================================================
+#  REPLAY PATHS (CANONICAL)
+# ============================================================
+
+SWING_REPLAY_ROOT = DATA_ROOT / "replay" / "swing"
+SWING_REPLAY_STATE = SWING_REPLAY_ROOT / "replay_state.json"
+SWING_REPLAY_LOCK = DATA_ROOT / "replay" / "locks" / "swing.lock"
+MAINTENANCE_FLAG = DATA_ROOT / "replay" / "maintenance_mode.json"
+
+# ============================================================
 #  ML (NIGHTLY)
 # ============================================================
 
@@ -246,7 +255,7 @@ PATHS: Dict[str, Path] = {
     "stock_cache_master": STOCK_CACHE_MASTER,
     "rolling_body": ROLLING_BODY_PATH,
     "rolling_nervous": ROLLING_NERVOUS_PATH,
-    # Backward-compat alias
+
     "rolling": ROLLING_BODY_PATH,
     "rolling_backups": ROLLING_BACKUPS,
     "nightly_lock": NIGHTLY_LOCK_FILE,
@@ -259,13 +268,10 @@ PATHS: Dict[str, Path] = {
     "brain": AION_BRAIN,          # legacy
     "aion_brain": AION_BRAIN,    # canonical
 
-    # -------------------------------------------------
-    # Swing historical replay (admin/tooling)
-    # -------------------------------------------------
-    "swing_replay_root": DATA_ROOT / "replay" / "swing",
-    "swing_replay_state": (DATA_ROOT / "replay" / "swing" / "replay_state.json"),
-    "swing_replay_lock": (DATA_ROOT / "replay" / "swing" / "replay.lock"),
-    "maintenance_flag": (DATA_ROOT / "replay" / "maintenance_mode.json"),
+    "swing_replay_root": SWING_REPLAY_ROOT,
+    "swing_replay_state": SWING_REPLAY_STATE,
+    "swing_replay_lock": SWING_REPLAY_LOCK,
+    "maintenance_flag": MAINTENANCE_FLAG,
 
     "dt_rolling_brain": DT_ROLLING_BRAIN,
 
@@ -281,7 +287,6 @@ PATHS: Dict[str, Path] = {
     "ml_training": ML_TRAINING,
     "ML_DATASET_DAILY": ML_DATASET_DAILY,
 
-    # NEW: LGBM binary cache path
     "ml_lgbm_cache": ML_LGBM_CACHE,
 
     "macro_state": MACRO_STATE,
