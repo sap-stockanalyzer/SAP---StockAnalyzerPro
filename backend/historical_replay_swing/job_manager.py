@@ -29,7 +29,7 @@ from utils.logger import log
 
 
 REPLAY_VERSION = "swing-replay-v0.1"
-
+REPLAY_STATE_PATH = Path(PATHS["swing_replay_state"])
 
 def _now() -> datetime:
     return datetime.now(TIMEZONE)
