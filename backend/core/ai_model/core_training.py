@@ -40,7 +40,8 @@ import pandas as pd
 
 from backend.core.config import PATHS, TIMEZONE
 from backend.core.data_pipeline import log, _read_rolling, _read_aion_brain
-from backend.core.sector_training.sector_store import store
+from backend.core.sector_training.sector_inference import SectorModelStore
+store = SectorModelStore()
 
 from backend.core.memmap_trainer import train_lgbm_memmap_reservoir
 from backend.core.confidence_calibrator import (
@@ -995,7 +996,7 @@ def predict_all(
                     if b is not None:
                         sstats = ((b.stats.get("horizons") or {}).get(h) or {})
                         if isinstance(sstats, dict) and float(sstats.get("std", 0.0) or 0.0) > 0:
-                                   stats = {**stats, **sstats}
+                            stats = {**stats, **sstats}
             except Exception:
                 pass
             was_clipped = bool(abs(raw_pred) > lim + 1e-12)
