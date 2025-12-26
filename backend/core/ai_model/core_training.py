@@ -40,6 +40,7 @@ import pandas as pd
 
 from backend.core.config import PATHS, TIMEZONE
 from backend.core.data_pipeline import log, _read_rolling, _read_aion_brain
+from backend.core.sector_training.sector_store import store
 
 from backend.core.memmap_trainer import train_lgbm_memmap_reservoir
 from backend.core.confidence_calibrator import (
@@ -117,6 +118,19 @@ def _aion_meta_snapshot() -> Dict[str, Any]:
 # ==========================================================
 # PATH HELPERS
 # ==========================================================
+def _resolve_dataset_path(dataset_name: str) -> Path:
+    p = Path(dataset_name)
+    if p.exists():
+        return p
+
+    # named shortcuts
+    if dataset_name in ("daily", "training_data_daily.parquet"):
+        return Path(PATHS["ML_DATASET_DAILY"])
+    if dataset_name in ("intraday", "training_data_intraday.parquet"):
+        return Path(PATHS["ML_DATASET_INTRADAY"])
+
+    raise ValueError(f"Unknown dataset_name: {dataset_name}")
+
 def train_model(
     dataset_name: str = "training_data_daily.parquet",
     use_optuna: bool = True,
@@ -598,7 +612,7 @@ def _load_latest_features_df(
             "No latest_features snapshot and pyarrow unavailable for fallback prediction load."
         )
 
-    df_path = _resolve_dataset_path(DATASET_FILE.name)
+    df_path = Path(PATHS["ML_DATASET_DAILY"])
     cols = ["symbol", "asof_date"] + required_feature_cols
 
     latest_map: Dict[str, Tuple[str, np.ndarray]] = {}
@@ -691,18 +705,19 @@ def predict_all(
         log("[ai_model] ❌ predict_all: feature_columns list is empty.")
         return {}
 
+    # Build rolling key map first (ALWAYS initialize)
+    rolling_key_by_upper: Dict[str, str] = {}
+    for k in rolling.keys():
+        if str(k).startswith("_"):
+            continue
+        rolling_key_by_upper[str(k).upper()] = str(k)
+
     try:
         symbol_whitelist = set(rolling_key_by_upper.keys())
         X_df = _load_latest_features_df(feature_cols, symbol_whitelist=symbol_whitelist)
     except Exception as e:
         log(f"[ai_model] ❌ predict_all: failed to load latest features: {e}")
         return {}
-
-    rolling_key_by_upper: Dict[str, str] = {}
-    for k in rolling.keys():
-        if str(k).startswith("_"):
-            continue
-        rolling_key_by_upper[str(k).upper()] = str(k)
 
     symbols: List[str] = [s for s in rolling_key_by_upper.keys() if s in X_df.index]
     if not symbols:
@@ -788,7 +803,7 @@ def predict_all(
         from backend.core.sector_training.sector_validator import horizon_valid
 
         pred = np.full((X_np.shape[0],), np.nan, dtype=float)
-        unique_secs = set([str(s) for s in list(sector_labels)]) if 'sector_labels' in locals() else {'UNKNOWN'}
+        unique_secs = set(map(str, np.unique(sector_labels)))
         global_model = regressors.get(h)
 
         for sec in unique_secs:
@@ -856,7 +871,6 @@ def predict_all(
             "clipped_hist": _hist_counts(clipped, DIAG_BINS),
         }
 
-
     # ----------------------------------------------------------
     # Coverage: sector-level viability per horizon (proxy)
     # If a horizon is globally weak, we can still allow sectors that show
@@ -873,7 +887,7 @@ def predict_all(
                 if n <= 0:
                     continue
                 std = float(np.std(clipped[mask]))
-                valid = bool((n >= MIN_SECTOR_NAMES) and (std >= float(MIN_PRED_STD)))
+                valid = bool((n >= MIN_SECTOR_NAMES) and (std >= 0.5 * float(MIN_PRED_STD)))
                 sec_map[str(sec)] = {'valid': valid, 'n': n, 'pred_std': std}
             sector_validity[h] = sec_map
     except Exception:
@@ -918,6 +932,7 @@ def predict_all(
         rolling_key = rolling_key_by_upper.get(sym_u)
         node = rolling.get(rolling_key, {}) if rolling_key is not None else {}
 
+        as_of_date = node.get("asof_date") or node.get("date")
         last_close = _last_close_asof(node, as_of_date)
 
         sym_res: Dict[str, Any] = {}
@@ -974,7 +989,15 @@ def predict_all(
                 }
                 continue
             coverage_level = 'global' if global_ok else ('sector' if sector_ok else 'ticker')
-
+            try:
+                if coverage_level == "sector":
+                    b = store._load_sector_bundle(sec_label)
+                    if b is not None:
+                        sstats = ((b.stats.get("horizons") or {}).get(h) or {})
+                        if isinstance(sstats, dict) and float(sstats.get("std", 0.0) or 0.0) > 0:
+                                   stats = {**stats, **sstats}
+            except Exception:
+                pass
             was_clipped = bool(abs(raw_pred) > lim + 1e-12)
 
             conf_raw_arr = _confidence_from_signal(

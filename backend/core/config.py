@@ -166,6 +166,7 @@ ML_MODELS = ML_ROOT / "models"
 ML_PREDICTIONS = ML_ROOT / "predictions"
 ML_DATASETS = ML_ROOT / "datasets"
 ML_TRAINING = ML_ROOT / "training"
+ML_DATASET_DAILY = "ml_data/nightly/dataset/training_data_daily.parquet"
 
 # NEW: LightGBM dataset binary cache lives under ML_MODELS
 ML_LGBM_CACHE = ML_MODELS / "lgbm_cache"
@@ -278,6 +279,7 @@ PATHS: Dict[str, Path] = {
     "ml_predictions": ML_PREDICTIONS,
     "ml_datasets": ML_DATASETS,
     "ml_training": ML_TRAINING,
+    "ML_DATASET_DAILY": ML_DATASET_DAILY,
 
     # NEW: LGBM binary cache path
     "ml_lgbm_cache": ML_LGBM_CACHE,
