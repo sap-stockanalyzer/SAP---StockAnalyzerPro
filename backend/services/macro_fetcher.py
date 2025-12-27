@@ -1,9 +1,16 @@
-# backend/services/macro_fetcher.py — v1.3 (FRED-only + throttle + retries + atomic writes)
+# backend/services/macro_fetcher.py — v1.4 (FRED-only + throttle + retries + better logging + robust obs parsing)
 """
-macro_fetcher.py — v1.3 (FRED-only; no yfinance; rate-limit resilient)
+macro_fetcher.py — v1.4 (FRED-only; no yfinance; rate-limit resilient)
 
-Upgrades:
-  ✅ Replace yfinance with FRED series fetches (no ETF/daily-bars provider needed)
+Upgrades (v1.4):
+  ✅ Canonicalize SP500 naming:
+       - NEW: sp500_close / sp500_daily_pct / sp500_pct_decimal
+       - KEEP: spy_close / spy_daily_pct / spy_pct_decimal as *legacy aliases* (surrogate = SP500)
+         so you don’t break downstream readers immediately.
+  ✅ Log HTTP status + body snippet when we get empty_or_bad_json (no more blindfold)
+  ✅ Robust observation parsing:
+       - scan up to a configurable window (default 60 days) for the last 2 valid numeric values
+       - skip "." and blanks (FRED missing values)
   ✅ Throttle: skip fetch if last macro_state.json is "fresh" (default 6h)
   ✅ Retry w/ exponential backoff on HTTP errors / rate limits (default 3 tries)
   ✅ If fetch returns junk (zeros/empty), DO NOT overwrite existing snapshots
@@ -12,8 +19,10 @@ Upgrades:
   ✅ Adds alias keys used downstream: vix, spy_pct, breadth (regime_detector-friendly)
 
 Notes:
-  • "spy_close" is sourced from FRED SP500 (S&P 500 index level), not SPY ETF.
-  • "tnx_close" uses a Treasury yield series (percent), not ^TNX directly.
+  • We do NOT fetch the SPY ETF here. We fetch FRED SP500 (index level).
+    For clarity, SP500 is stored canonically as sp500_*.
+    Legacy spy_* fields are kept as aliases to avoid breaking older code.
+  • "tnx_close" uses DGS10 (10Y yield, percent), not ^TNX directly.
 """
 
 from __future__ import annotations
@@ -22,7 +31,7 @@ import json
 import os
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -71,6 +80,15 @@ MACRO_MAX_RETRIES = _env_int("AION_MACRO_MAX_RETRIES", 3)
 MACRO_RETRY_BASE_SEC = _env_float("AION_MACRO_RETRY_BASE_SEC", 10.0)
 MACRO_FORCE = _env_bool("AION_MACRO_FORCE", False)
 
+# How far back we’ll search for numeric values if the latest entries are "."
+FRED_WINDOW_DAYS = _env_int("AION_FRED_WINDOW_DAYS", 60)
+
+# FRED API sometimes needs more than 10 obs to find 2 valid numerics (gold does this a lot)
+FRED_LIMIT = _env_int("AION_FRED_OBS_LIMIT", 250)
+
+# Logging: how much of the HTTP body to print on failures
+FRED_ERR_SNIPPET_CHARS = _env_int("AION_FRED_ERR_SNIPPET_CHARS", 240)
+
 FRED_API_KEY = (os.getenv("FRED_API", "") or "").strip()
 
 
@@ -97,7 +115,7 @@ def _read_json_if_exists(path: Path) -> Optional[Dict[str, Any]]:
 
 def _is_fresh(path: Path, max_age_hours: float) -> bool:
     """
-    This is the line of logic that controls "skip if it's < N hours old":
+    Controls "skip if it's < N hours old":
       return age_s < max_age_hours * 3600
     """
     try:
@@ -113,9 +131,12 @@ def _is_fresh(path: Path, max_age_hours: float) -> bool:
 # FRED fetch helpers
 # ------------------------------------------------------------
 
-def _http_get_json(url: str, timeout_s: float = 20.0) -> Optional[Dict[str, Any]]:
+def _http_get_text(url: str, timeout_s: float = 20.0) -> Tuple[Optional[int], str]:
     """
-    Avoids adding dependencies. Uses urllib from stdlib.
+    Stdlib-only HTTP GET.
+
+    Returns: (status_code, body_text)
+      - status_code may be None if we never got a response.
     """
     try:
         import urllib.request
@@ -129,23 +150,66 @@ def _http_get_json(url: str, timeout_s: float = 20.0) -> Optional[Dict[str, Any]
             },
         )
         with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
-            data = resp.read().decode("utf-8", errors="ignore")
-        parsed = json.loads(data)
-        return parsed if isinstance(parsed, dict) else None
+            status = getattr(resp, "status", None)
+            body = resp.read().decode("utf-8", errors="ignore")
+            return int(status) if status is not None else 200, body
 
-    except Exception:
-        return None
+    except Exception as e:
+        # urllib gives us HTTPError with status + body sometimes; extract if possible
+        try:
+            import urllib.error  # type: ignore
+            if isinstance(e, urllib.error.HTTPError):
+                status = int(getattr(e, "code", 0) or 0)
+                try:
+                    body = e.read().decode("utf-8", errors="ignore")
+                except Exception:
+                    body = str(e)
+                return status, body
+        except Exception:
+            pass
+
+        return None, str(e)
 
 
-def _fred_series_observations(series_id: str, limit: int = 5) -> List[Dict[str, Any]]:
+def _http_get_json(url: str, timeout_s: float = 20.0) -> Tuple[Optional[Dict[str, Any]], Dict[str, Any]]:
     """
-    Returns most recent observations (date/value) list.
-    We request sort_order=desc so newest comes first.
+    Returns (parsed_json_or_none, meta)
+      meta includes: status, snippet, err
+    """
+    status, body = _http_get_text(url, timeout_s=timeout_s)
+    snippet = (body or "")[: max(0, int(FRED_ERR_SNIPPET_CHARS))]
+
+    try:
+        js = json.loads(body) if isinstance(body, str) and body else None
+        if isinstance(js, dict):
+            return js, {"status": status, "snippet": snippet, "err": ""}
+        return None, {"status": status, "snippet": snippet, "err": "non_dict_json_or_empty"}
+    except Exception as e:
+        return None, {"status": status, "snippet": snippet, "err": f"json_parse_error: {e}"}
+
+
+def _fred_series_observations(series_id: str, limit: int = 50, window_days: int = 60) -> List[Dict[str, Any]]:
+    """
+    Returns observations list (most recent first).
+
+    Key behaviors:
+      - sort_order=desc so newest is first
+      - observation_start set so we don’t drag the whole history
+      - logs HTTP status + snippet on bad JSON/schema (debuggable!)
     """
     if not FRED_API_KEY:
         return []
 
     base = "https://api.stlouisfed.org/fred/series/observations"
+
+    # Observation start: last N days (inclusive).
+    # Use UTC date; FRED expects YYYY-MM-DD.
+    try:
+        start_dt: date = (datetime.now(timezone.utc) - timedelta(days=max(1, int(window_days)))).date()
+        observation_start = start_dt.isoformat()
+    except Exception:
+        observation_start = ""
+
     params = (
         f"?series_id={series_id}"
         f"&api_key={FRED_API_KEY}"
@@ -153,13 +217,18 @@ def _fred_series_observations(series_id: str, limit: int = 5) -> List[Dict[str, 
         f"&sort_order=desc"
         f"&limit={max(1, int(limit))}"
     )
+    if observation_start:
+        params += f"&observation_start={observation_start}"
+
     url = base + params
 
+    last_meta: Dict[str, Any] = {}
     last_err: Optional[str] = None
 
     for attempt in range(1, max(1, MACRO_MAX_RETRIES) + 1):
+        js, meta = _http_get_json(url, timeout_s=20.0)
+        last_meta = meta or {}
         try:
-            js = _http_get_json(url, timeout_s=20.0)
             if not js or "observations" not in js:
                 last_err = "empty_or_bad_json"
                 raise RuntimeError(last_err)
@@ -178,13 +247,24 @@ def _fred_series_observations(series_id: str, limit: int = 5) -> List[Dict[str, 
             base_s = float(MACRO_RETRY_BASE_SEC) * (2 ** (attempt - 1))
             jitter = random.uniform(0.0, 0.25 * base_s)
             sleep_s = min(180.0, base_s + jitter)
-            log(f"[macro_fetcher] ⚠️ FRED fetch {series_id} attempt {attempt}/{MACRO_MAX_RETRIES} failed: {last_err} — sleeping {sleep_s:.1f}s")
+
+            st = last_meta.get("status")
+            snip = (last_meta.get("snippet") or "").replace("\n", " ")[: max(0, int(FRED_ERR_SNIPPET_CHARS))]
+            err = last_meta.get("err", "")
+
+            log(
+                f"[macro_fetcher] ⚠️ FRED fetch {series_id} attempt {attempt}/{MACRO_MAX_RETRIES} failed: {last_err} "
+                f"(status={st} meta_err={err} snippet='{snip}') — sleeping {sleep_s:.1f}s"
+            )
             try:
                 time.sleep(sleep_s)
             except Exception:
                 pass
 
-    log(f"[macro_fetcher] ⚠️ FRED fetch {series_id} failed after retries: {last_err}")
+    st = last_meta.get("status")
+    snip = (last_meta.get("snippet") or "").replace("\n", " ")[: max(0, int(FRED_ERR_SNIPPET_CHARS))]
+    err = last_meta.get("err", "")
+    log(f"[macro_fetcher] ⚠️ FRED fetch {series_id} failed after retries: {last_err} (status={st} meta_err={err} snippet='{snip}')")
     return []
 
 
@@ -207,9 +287,14 @@ def _parse_fred_value(v: Any) -> Optional[float]:
 def _last2_from_fred(series_id: str) -> Tuple[float, float]:
     """
     Returns (last_value, pct_change_vs_prev) where pct is percent.
-    If missing, returns (0.0, 0.0).
+
+    Robust behavior:
+      - pulls observations over a window (default 60 days)
+      - scans until it finds 2 numeric values
+      - skips "." / blanks
     """
-    obs = _fred_series_observations(series_id, limit=10)
+    obs = _fred_series_observations(series_id, limit=int(FRED_LIMIT), window_days=int(FRED_WINDOW_DAYS))
+
     vals: List[float] = []
     for o in obs:
         x = _parse_fred_value(o.get("value"))
@@ -243,18 +328,18 @@ def _macro_looks_sane(m: Dict[str, Any]) -> bool:
     Prefer VIX too, but don't brick everything if only VIX fails.
     """
     try:
-        spy = abs(safe_float(m.get("spy_close", 0.0)))
-        if spy <= 0.0:
+        spx = abs(safe_float(m.get("sp500_close", 0.0)))
+        if spx <= 0.0:
             return False
 
         vix = abs(safe_float(m.get("vix_close", 0.0)))
-        spy_dec = abs(safe_float(m.get("spy_pct_decimal", 0.0)))
+        spx_dec = abs(safe_float(m.get("sp500_pct_decimal", 0.0)))
         breadth = abs(safe_float(m.get("breadth_proxy", 0.0)))
 
         if vix >= 8.0:
             return True
 
-        return (spy_dec > 0.0001) or (breadth > 0.0001)
+        return (spx_dec > 0.0001) or (breadth > 0.0001)
     except Exception:
         return False
 
@@ -299,15 +384,6 @@ def build_macro_features() -> Dict[str, Any]:
             return {"status": "skipped", "reason": "fresh_cache", "macro_state": cached}
 
     # --- FRED series map ---
-    # Core:
-    #   VIXCLS: CBOE Volatility Index
-    #   SP500: S&P 500 Index
-    # Optional enrichers (all on FRED):
-    #   NASDAQCOM: NASDAQ Composite Index
-    #   DGS10: 10-Year Treasury Constant Maturity Rate (percent)
-    #   DTWEXBGS: Trade Weighted U.S. Dollar Index: Broad (index)
-    #   GOLDAMGBD228NLBM: Gold Fixing Price 10:30 A.M. (London time)
-    #   DCOILWTICO: Crude Oil Prices: WTI
     SERIES = {
         "vix": "VIXCLS",
         "sp500": "SP500",
@@ -326,16 +402,17 @@ def build_macro_features() -> Dict[str, Any]:
     gld_close, gld_pct = _last2_from_fred(SERIES["gld"])
     uso_close, uso_pct = _last2_from_fred(SERIES["uso"])
 
-    # "spy_*" fields now represent SP500 (index) equivalents for regime logic
-    spy_close = float(safe_float(spx_close))
-    spy_pct = float(safe_float(spx_pct))
-    spy_pct_dec = float(spy_pct / 100.0)
+    sp500_close = float(safe_float(spx_close))
+    sp500_daily_pct = float(safe_float(spx_pct))
+    sp500_pct_dec = float(sp500_daily_pct / 100.0)
 
     dxy_pct_dec = float(safe_float(dxy_pct) / 100.0)
-    breadth_proxy = float(spy_pct_dec)
+
+    # Breadth proxy: keep your existing proxy style (SP500 daily change in decimal)
+    breadth_proxy = float(sp500_pct_dec)
 
     volatility = float(max(0.0, min(0.10, float(safe_float(vix_close)) / 100.0)))
-    risk_off = _risk_off_score(float(safe_float(vix_close)), float(spy_pct_dec), float(dxy_pct_dec))
+    risk_off = _risk_off_score(float(safe_float(vix_close)), float(sp500_pct_dec), float(dxy_pct_dec))
 
     now_iso_utc = datetime.now(timezone.utc).isoformat()
     now_iso_local = datetime.now(TIMEZONE).isoformat()
@@ -345,16 +422,16 @@ def build_macro_features() -> Dict[str, Any]:
         "vix_close": float(safe_float(vix_close)),
         "vix_daily_pct": float(safe_float(vix_pct)),
 
-        # SP500-as-SPY surrogate (for regime)
-        "spy_close": float(safe_float(spy_close)),
-        "spy_daily_pct": float(safe_float(spy_pct)),          # percent
-        "spy_pct_decimal": float(safe_float(spy_pct_dec)),    # decimal
+        # ✅ Canonical SP500 fields (clarity)
+        "sp500_close": float(safe_float(sp500_close)),
+        "sp500_daily_pct": float(safe_float(sp500_daily_pct)),       # percent
+        "sp500_pct_decimal": float(safe_float(sp500_pct_dec)),       # decimal
 
         # NASDAQ surrogate for QQQ-ish tech risk (optional)
         "qqq_close": float(safe_float(nas_close)),
         "qqq_daily_pct": float(safe_float(nas_pct)),
 
-        # TNX surrogate: 10Y yield (percent). Not the same as ^TNX, but good enough for macro tilt.
+        # TNX surrogate: 10Y yield (percent)
         "tnx_close": float(safe_float(tnx_close)),
         "tnx_daily_pct": float(safe_float(tnx_pct)),
 
@@ -363,13 +440,13 @@ def build_macro_features() -> Dict[str, Any]:
         "dxy_daily_pct": float(safe_float(dxy_pct)),
         "dxy_pct_decimal": float(safe_float(dxy_pct_dec)),
 
-        # Gold & Oil
+        # Gold & Oil (best-effort; may be 0 if series missing/blank)
         "gld_close": float(safe_float(gld_close)),
         "gld_daily_pct": float(safe_float(gld_pct)),
         "uso_close": float(safe_float(uso_close)),
         "uso_daily_pct": float(safe_float(uso_pct)),
 
-        # Breadth proxy (kept consistent with your previous approach)
+        # Breadth proxy
         "breadth_proxy": float(safe_float(breadth_proxy)),
 
         # Downstream keys
@@ -383,11 +460,27 @@ def build_macro_features() -> Dict[str, Any]:
         # provenance
         "source": "fred",
         "fred_series": dict(SERIES),
+
+        # clarity breadcrumbs
+        "notes": {
+            "sp500_is_index_level_not_spy_etf": True,
+            "legacy_spy_fields_are_sp500_aliases": True,
+        },
     }
+
+    # ----------------------------
+    # Legacy compatibility (do NOT delete yet)
+    # ----------------------------
+    # Older code expects spy_close/spy_pct_decimal, but we are not fetching SPY ETF.
+    # We keep these as aliases to SP500 to avoid breaking downstream,
+    # while sp500_* is the canonical truth going forward.
+    macro_state["spy_close"] = float(macro_state.get("sp500_close", 0.0))
+    macro_state["spy_daily_pct"] = float(macro_state.get("sp500_daily_pct", 0.0))
+    macro_state["spy_pct_decimal"] = float(macro_state.get("sp500_pct_decimal", 0.0))
 
     # Alias keys used by regime_detector / context_state debug expectations
     macro_state["vix"] = float(macro_state.get("vix_close", 0.0))
-    macro_state["spy_pct"] = float(macro_state.get("spy_pct_decimal", 0.0))
+    macro_state["spy_pct"] = float(macro_state.get("spy_pct_decimal", 0.0))   # still what your regime expects
     macro_state["breadth"] = float(macro_state.get("breadth_proxy", 0.0))
 
     # ----------------------------
