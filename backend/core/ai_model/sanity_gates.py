@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from typing import Any, Dict
+
 import numpy as np
+
+from .constants import MIN_PRED_STD, MAX_CLIP_SAT_FRAC
+
 
 # Pulled from v1.7.0
 def _post_train_sanity(
@@ -72,8 +76,3 @@ def _post_train_sanity(
         return out
 
     return out
-
-
-# ==========================================================
-# TRAINING — PURE REGRESSION (memmap for LGBM)
-# ==========================================================

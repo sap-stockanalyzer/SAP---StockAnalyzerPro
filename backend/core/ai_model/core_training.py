@@ -41,6 +41,7 @@ import pandas as pd
 from backend.core.config import PATHS, TIMEZONE
 from backend.core.data_pipeline import log, _read_rolling, _read_aion_brain
 from backend.core.sector_training.sector_inference import SectorModelStore
+
 store = SectorModelStore()
 
 from backend.core.memmap_trainer import train_lgbm_memmap_reservoir
@@ -79,10 +80,6 @@ except Exception:
     HAS_OPTUNA = False
 
 
-# ==========================================================
-# Optional PyArrow (batch parquet scanning)
-# ==========================================================
-
 # === Refactor imports (mechanical) ===
 from backend.core.ai_model.target_builder import (
     # public constants used throughout this module
@@ -103,6 +100,7 @@ from backend.core.ai_model.target_builder import (
     MIN_CONF,
     MAX_CONF,
     DIAG_BINS,
+    MAX_CLIP_SAT_FRAC,
 
     # internal helpers (leading underscore) referenced by core_training
     _preflight_dataset_or_die,
@@ -121,8 +119,6 @@ from backend.core.ai_model.target_builder import (
 )
 from backend.core.ai_model.trainer import _make_regressor, _tune_lightgbm_regressor
 from backend.core.ai_model.sanity_gates import _post_train_sanity
-from backend.core.ai_model.feature_pipeline import *
-from backend.core.ai_model.predictor import *
 from backend.core.ai_model.feature_pipeline import _load_feature_list
 
 
@@ -175,7 +171,6 @@ def _preflight_dataset_or_die(df_path: Path) -> None:
     """
     Fail fast if the dataset is missing/unreadable.
 
-    The nightly job was failing because this symbol wasn't defined at runtime:
     underscore-prefixed names are NOT imported via `from module import *`
     unless explicitly re-exported in __all__.
     """
@@ -214,8 +209,6 @@ def _preflight_dataset_or_die(df_path: Path) -> None:
 def _model_path(horizon: str, model_root: Path | None = None) -> Path:
     """
     Path for joblib model (.pkl) artifacts.
-
-    This symbol was missing at runtime for the same reason as above.
     """
     mr = Path(model_root) if model_root is not None else MODEL_ROOT
     try:
@@ -971,8 +964,6 @@ def predict_all(
 
     # ----------------------------------------------------------
     # Coverage: sector-level viability per horizon (proxy)
-    # If a horizon is globally weak, we can still allow sectors that show
-    # non-degenerate dispersion in predictions (enough names + spread).
     # ----------------------------------------------------------
     MIN_SECTOR_NAMES = int(os.getenv("AION_MIN_SECTOR_NAMES", "30"))
     sector_validity: Dict[str, Dict[str, Any]] = {}

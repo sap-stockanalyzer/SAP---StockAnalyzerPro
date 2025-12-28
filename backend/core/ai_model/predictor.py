@@ -1,15 +1,10 @@
-# LOAD REGRESSION MODELS
-# ==========================================================
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-import os
 import json
-
 import numpy as np
-
 from joblib import load
 
 from backend.core.data_pipeline import log
@@ -24,6 +19,10 @@ except Exception:
     lgb = None  # type: ignore
     HAS_LGBM = False
 
+
+# ==========================================================
+# LOAD REGRESSION MODELS
+# ==========================================================
 def _load_regressors(model_root: Path | None = None) -> Dict[str, Any]:
     models: Dict[str, Any] = {}
     for horizon in HORIZONS:
@@ -49,7 +48,6 @@ def _load_regressors(model_root: Path | None = None) -> Dict[str, Any]:
 # ==========================================================
 # RATING / LABEL / CONFIDENCE HELPERS
 # ==========================================================
-
 def _rating_from_return(pred_ret: float, stats: Dict[str, Any], base_conf: float) -> Tuple[str, int, int]:
     std = float(stats.get("std", 0.05)) or 0.05
     t_hold = 0.25 * std
@@ -92,13 +90,13 @@ def _confidence_from_signal(pred_ret: np.ndarray, stats: Dict[str, Any], sector_
 # ==========================================================
 # Prediction diagnostics writer
 # ==========================================================
-
 def _hist_counts(values: np.ndarray, bins: np.ndarray) -> List[int]:
     try:
         counts, _ = np.histogram(values.astype(float, copy=False), bins=bins)
         return [int(x) for x in counts]
     except Exception:
         return []
+
 
 def _write_pred_diagnostics(diag: Dict[str, Any]) -> None:
     try:
@@ -107,6 +105,3 @@ def _write_pred_diagnostics(diag: Dict[str, Any]) -> None:
         log(f"[ai_model] 📈 Prediction diagnostics written → {PRED_DIAG_FILE}")
     except Exception as e:
         log(f"[ai_model] ⚠️ Failed writing prediction diagnostics: {e}")
-
-
-# ==========================================================

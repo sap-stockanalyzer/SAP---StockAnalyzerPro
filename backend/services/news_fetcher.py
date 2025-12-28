@@ -338,6 +338,7 @@ def fetch_latest_market_news(
     hours_back: int = 24,
     limit: int = DEFAULT_MAX_ARTICLES_PER_CALL,
     language: str = DEFAULT_LANGUAGE,
+    page: int = 1,
 ) -> List[Dict[str, Any]]:
     fetch_tag = "latest_market"
     end = datetime.utcnow()
@@ -348,6 +349,7 @@ def fetch_latest_market_news(
         "published_after": _fmt_marketaux_ts(start),
         "published_before": _fmt_marketaux_ts(end),
         "limit": int(limit),
+        "page": int(page),
         "sort": "published_at",
     }
 
@@ -363,6 +365,7 @@ def fetch_high_impact_news(
     hours_back: int = 48,
     limit: int = DEFAULT_MAX_ARTICLES_PER_CALL,
     language: str = DEFAULT_LANGUAGE,
+    page: int = 1,
 ) -> List[Dict[str, Any]]:
     fetch_tag = "high_impact"
     end = datetime.utcnow()
@@ -373,6 +376,7 @@ def fetch_high_impact_news(
         "published_after": _fmt_marketaux_ts(start),
         "published_before": _fmt_marketaux_ts(end),
         "limit": int(limit),
+        "page": int(page),
         "sort": "relevance_score",
     }
 
@@ -388,6 +392,7 @@ def fetch_top_movers_news(
     hours_back: int = 24,
     limit: int = DEFAULT_MAX_ARTICLES_PER_CALL,
     language: str = DEFAULT_LANGUAGE,
+    page: int = 1,
 ) -> List[Dict[str, Any]]:
     fetch_tag = "top_movers"
     end = datetime.utcnow()
@@ -398,6 +403,7 @@ def fetch_top_movers_news(
         "published_after": _fmt_marketaux_ts(start),
         "published_before": _fmt_marketaux_ts(end),
         "limit": int(limit),
+        "page": int(page),
         "sort": "published_at",
     }
 
@@ -540,8 +546,8 @@ def run_news_fetch(
 
     # ---- High impact ----
     per_mode["high_impact"] = {"calls": 0, "articles": 0}
-    for _ in range(max(0, int(calls_high_impact))):
-        arts = fetch_high_impact_news(hours_back=hours_back_high_impact, limit=int(limit_per_call))
+    for i in range(max(0, int(calls_high_impact))):
+        arts = fetch_high_impact_news(hours_back=hours_back_high_impact, limit=int(limit_per_call), page=(i + 1))
         n = _ingest("high_impact", arts)
         per_mode["high_impact"]["calls"] += 1
         per_mode["high_impact"]["articles"] += n
@@ -552,8 +558,8 @@ def run_news_fetch(
 
     # ---- Top movers ----
     per_mode["top_movers"] = {"calls": 0, "articles": 0}
-    for _ in range(max(0, int(calls_top_movers))):
-        arts = fetch_top_movers_news(hours_back=hours_back_top_movers, limit=int(limit_per_call))
+    for i in range(max(0, int(calls_top_movers))):
+        arts = fetch_top_movers_news(hours_back=hours_back_top_movers, limit=int(limit_per_call), page=(i + 1))
         n = _ingest("top_movers", arts)
         per_mode["top_movers"]["calls"] += 1
         per_mode["top_movers"]["articles"] += n
@@ -564,8 +570,8 @@ def run_news_fetch(
 
     # ---- Latest market ----
     per_mode["latest_market"] = {"calls": 0, "articles": 0}
-    for _ in range(max(0, int(calls_latest_market))):
-        arts = fetch_latest_market_news(hours_back=hours_back_latest_market, limit=int(limit_per_call))
+    for i in range(max(0, int(calls_latest_market))):
+        arts = fetch_latest_market_news(hours_back=hours_back_latest_market, limit=int(limit_per_call), page=(i + 1))
         n = _ingest("latest_market", arts)
         per_mode["latest_market"]["calls"] += 1
         per_mode["latest_market"]["articles"] += n

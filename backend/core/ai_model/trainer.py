@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+from typing import Any, Dict, Optional
+
 import numpy as np
-
-from typing import Dict, Any, Optional
-
 from backend.core.data_pipeline import log
 
 try:
@@ -22,14 +21,15 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error
 from sklearn.ensemble import RandomForestRegressor
 
+
 def _make_regressor(params: Optional[dict] = None):
+    params = params or {}
     return RandomForestRegressor(
-        n_estimators=params.get("n_estimators", 300) if params else 300,
-        max_depth=params.get("max_depth", None) if params else None,
+        n_estimators=params.get("n_estimators", 300),
+        max_depth=params.get("max_depth", None),
         n_jobs=-1,
         random_state=42,
     )
-
 
 
 def _tune_lightgbm_regressor(
@@ -85,8 +85,3 @@ def _tune_lightgbm_regressor(
     best = study.best_params
     log(f"[ai_model] 🎯 Best regression params for {horizon}: {best}")
     return best
-
-
-# ==========================================================
-# HORIZON STATS (RETURN DISTRIBUTIONS)
-# ==========================================================

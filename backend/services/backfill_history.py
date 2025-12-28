@@ -1,6 +1,6 @@
 # backend/services/backfill_history.py
 """
-backfill_history.py — v3.3
+backfill_history.py — v3.3 (+ universe auto-prune on YF miss)
 (Rolling-Native, Normalized Batch StockAnalysis Bundle, YF History Bootstrap)
 
 Purpose:
@@ -24,6 +24,12 @@ NEW in v3.3:
   full normalization (predictions/context/news/social/policy) is delegated
   to backend.core.data_pipeline.save_rolling().
 - Skips meta keys starting with '_' when deriving symbol list from Rolling.
+
+ADD-ON:
+- If YFinance bootstrap returns ZERO bars for a symbol that needs bootstrap,
+  auto-prune that symbol from the swing universe JSON after the run.
+  (DT is unaffected; DT uses Alpaca.)
+
 """
 
 from __future__ import annotations
@@ -34,7 +40,9 @@ import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Iterable
+from typing import Optional, Set
 from pathlib import Path
+from threading import Lock
 
 import requests
 import yfinance as yf
@@ -55,6 +63,12 @@ UNIVERSE_FILE = PATHS["universe"] / "master_universe.json"
 # -------------------------------------------------------------------
 VERBOSE_BOOTSTRAP = False          # per-ticker “Bootstrapped history for XYZ…”
 VERBOSE_BOOTSTRAP_ERRORS = False   # per-ticker YF failure messages
+
+# -------------------------------------------------------------------
+# NEW: Track symbols that fail YFinance bootstrap (thread-safe)
+# -------------------------------------------------------------------
+_YF_NO_DATA: set[str] = set()
+_YF_NO_DATA_LOCK = Lock()
 
 
 def load_universe() -> list[str]:
@@ -405,6 +419,10 @@ def _ensure_bootstrap_history_if_needed(
     - Never overwrites existing per-date bars.
     - YF bars are only used for dates missing in existing history.
     - Result is sorted by date and capped at MAX_HISTORY_DAYS.
+
+    ADD-ON:
+    - If bootstrap is needed and YF returns zero bars, record this symbol
+      for universe pruning after the run.
     """
     symbol = symbol.upper()
     existing_dates = _unique_history_dates(hist)
@@ -415,6 +433,12 @@ def _ensure_bootstrap_history_if_needed(
     # Need bootstrap
     yf_bars = _bootstrap_history_yf(symbol, max_days=MAX_HISTORY_DAYS)
     if not yf_bars:
+        # NEW: record YF miss for later universe prune
+        try:
+            with _YF_NO_DATA_LOCK:
+                _YF_NO_DATA.add(symbol)
+        except Exception:
+            pass
         return hist
 
     by_date: Dict[str, Dict[str, Any]] = {}
@@ -443,6 +467,72 @@ def _ensure_bootstrap_history_if_needed(
         log(f"🧪 Bootstrapped history for {symbol}: {len(merged)} days.")
 
     return merged
+
+
+# -------------------------------------------------------------------
+# Universe pruning helpers (NEW)
+# -------------------------------------------------------------------
+
+def _prune_universe_file(path: Path, bad_syms: set[str]) -> int:
+    """
+    Remove symbols from a universe JSON file.
+
+    Supports:
+      - {"symbols": [...]} dict format
+      - [...] list format
+
+    Writes a timestamped backup next to the file before overwriting.
+    Returns number removed.
+    """
+    if not path.exists():
+        return 0
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        log(f"⚠️ Failed to read universe file for pruning {path}: {e}")
+        return 0
+
+    wrapper = None
+    syms: list[str] = []
+
+    if isinstance(raw, dict) and isinstance(raw.get("symbols"), list):
+        wrapper = "dict"
+        syms = [str(x) for x in (raw.get("symbols") or [])]
+    elif isinstance(raw, list):
+        wrapper = "list"
+        syms = [str(x) for x in raw]
+    else:
+        return 0
+
+    bad_u = {str(s).upper() for s in (bad_syms or set())}
+    before_u = {str(s).upper() for s in syms}
+    keep_u = sorted(before_u - bad_u)
+
+    removed = int(len(before_u) - len(keep_u))
+    if removed <= 0:
+        return 0
+
+    # backup original
+    try:
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        backup_path = path.with_name(path.name + f".bak_{ts}")
+        backup_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    # write pruned
+    try:
+        if wrapper == "dict":
+            raw["symbols"] = keep_u
+            path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        else:
+            path.write_text(json.dumps(keep_u, indent=2), encoding="utf-8")
+    except Exception as e:
+        log(f"⚠️ Failed to write pruned universe file {path}: {e}")
+        return 0
+
+    return removed
 
 
 # -------------------------------------------------------------------
@@ -490,6 +580,9 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
         mode = "fallback"
         log("⚠️ Rolling cache missing — forcing full rebuild.")
     log(f"🧩 Backfill mode: {mode.upper()} | Date: {today}")
+
+    # NEW: track how many were pruned (for end-of-run log)
+    pruned_total = 0
 
     # If caller didn't specify symbols, derive from existing rolling keys (skip meta)
     if not symbols:
@@ -647,8 +740,38 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
     # ----------------------------------------------------------
     save_rolling(rolling)
 
+    # ----------------------------------------------------------
+    # NEW: Prune universe for symbols that YFinance couldn't bootstrap
+    # ----------------------------------------------------------
+    try:
+        with _YF_NO_DATA_LOCK:
+            bad = set(_YF_NO_DATA)
+
+        if bad:
+            removed = 0
+            removed += _prune_universe_file(UNIVERSE_FILE, bad)
+
+            # Optional: if you later add swing/dt split universe files,
+            # keep swing in sync automatically if it exists.
+            swing_file = PATHS["universe"] / "swing_universe.json"
+            if swing_file.exists():
+                removed += _prune_universe_file(swing_file, bad)
+
+            pruned_total = int(removed)
+
+            log(
+                f"🧹 Universe auto-prune: removed {removed} symbols "
+                f"(YFinance bootstrap returned 0 bars)."
+            )
+    except Exception as e:
+        log(f"⚠️ Universe prune step failed: {e}")
+
     dur = time.time() - start
     log(f"✅ Backfill ({mode}) complete — {updated}/{total} updated in {dur:.1f}s.")
+
+    # NEW: end-of-run prune log (always prints, even if 0)
+    log(f"🧹 Pruned from universe this run: {int(pruned_total)}")
+
     return updated
 
 

@@ -1,12 +1,10 @@
-# backend/core/ai_model/feature_pipeline.py
-# ==========================================================
 """Feature pipeline — AION Analytics
 
 Includes:
 - pyarrow/parquet batch scanning helpers
 - latest_features snapshot loader
 - fallback loader that scans the training parquet for the latest row per symbol
-- (Option A) feature_list loader moved here: _load_feature_list()
+- feature_list loader: _load_feature_list()
 """
 
 from __future__ import annotations
@@ -39,14 +37,11 @@ def _try_import_pyarrow():
 
 
 # ==========================================================
-# Feature list loader (Option A)
+# Feature list loader
 # ==========================================================
 def _load_feature_list() -> Dict[str, Any]:
     """
     Load the feature_list JSON that the ML data builder writes.
-
-    This used to live in the monolithic ai_model.py. After refactor, it belongs
-    in the feature pipeline because both training + prediction depend on it.
     """
     if not FEATURE_LIST_FILE.exists():
         raise FileNotFoundError(f"Feature list missing at {FEATURE_LIST_FILE}")
@@ -75,12 +70,6 @@ def _iter_parquet_batches(
 ) -> Iterator[pd.DataFrame]:
     """
     Yield dataframes from a parquet file in chunks when possible.
-
-    columns:
-      Optional list of columns to scan. If None, scan all columns.
-
-    symbol_whitelist:
-      Optional set of uppercase symbols to restrict rows.
     """
     if symbol_whitelist:
         symbol_whitelist = {str(s).upper() for s in symbol_whitelist}
@@ -136,9 +125,6 @@ def _load_latest_features_df(
 
     1) Prefer latest_features snapshot (parquet/csv).
     2) Fallback: scan dataset parquet to find latest row per symbol by asof_date.
-
-    symbol_whitelist:
-      Optional set of symbols to restrict outputs (uppercase recommended).
     """
     if symbol_whitelist:
         symbol_whitelist = {str(s).upper() for s in symbol_whitelist}
