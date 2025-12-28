@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
@@ -151,22 +152,29 @@ class IntradayConfigUpdateRequest(BaseModel):
 async def intraday_status() -> Dict[str, Any]:
     """Lightweight status for the intraday day-trading bot engine.
 
-    This does NOT trigger any cycle; it only inspects the latest artifacts
-    on disk.
+    Best-effort, file-based inspection. Always returns JSON (no 500s unless something
+    truly wild happens).
     """
-    last_day = _get_latest_day()
-    bots = _infer_intraday_bot_names(last_day)
-
-    # "Running" is a best-effort heuristic: do we have fresh-ish artifacts?
-    # If you later add a real heartbeat file in dt_backend, wire it here.
-    freshest_path = None
-    freshest_mtime = 0.0
     try:
+        last_day = _get_latest_day()
+
+        # Discover bots primarily from UI config store (so the page always has rows),
+        # falling back to log-derived names.
+        store = _load_intraday_ui_configs()
+        ui_bots = list((store.get("bots") or {}).keys())
+        discovered = _infer_intraday_bot_names(last_day)
+
+        bot_keys = ui_bots or discovered
+
+        # "Running" heuristic: do we have fresh-ish artifacts?
+        freshest_path = None
+        freshest_mtime = 0.0
         candidates = []
         if SIM_SUMMARY_FILE.exists():
             candidates.append(SIM_SUMMARY_FILE)
         if last_day:
             candidates.extend(list(SIM_LOG_DIR.glob(f"{last_day}_*.json")))
+
         for p in candidates:
             try:
                 mt = p.stat().st_mtime
@@ -175,24 +183,87 @@ async def intraday_status() -> Dict[str, Any]:
                     freshest_path = p
             except Exception:
                 continue
-    except Exception:
-        pass
 
-    age_s = None
-    running = False
-    if freshest_mtime > 0:
         import time as _time
-        age_s = float(_time.time() - freshest_mtime)
-        running = age_s < 60 * 30  # 30 minutes "fresh" window
+        age_s = float(_time.time() - freshest_mtime) if freshest_mtime > 0 else None
+        running = bool(age_s is not None and age_s < 60 * 30)
 
-    return {
-        "running": bool(running),
-        "last_day": last_day,
-        "bot_count": len(bots),
-        "bots": bots,
-        "freshest_artifact": str(freshest_path) if freshest_path else None,
-        "freshness_age_s": age_s,
-    }
+        # Pull a best-effort equity/positions snapshot from sim_summary.json
+        summary = _read_json(SIM_SUMMARY_FILE) or {}
+        latest_day_node = None
+        try:
+            days = summary.get("days") or []
+            if isinstance(days, list) and days:
+                latest_day_node = days[-1]
+        except Exception:
+            latest_day_node = None
+
+        summary_bots = (latest_day_node or {}).get("bots") if isinstance(latest_day_node, dict) else None
+        if not isinstance(summary_bots, dict):
+            summary_bots = {}
+
+        bots_out: Dict[str, Any] = {}
+        for bot_key in bot_keys:
+            ui = (store.get("bots") or {}).get(bot_key, {}) if isinstance(store, dict) else {}
+            enabled = bool(ui.get("enabled", True))
+
+            node = summary_bots.get(bot_key, {}) if isinstance(summary_bots, dict) else {}
+            if not isinstance(node, dict):
+                node = {}
+
+            equity = None
+            try:
+                equity = float(node.get("equity")) if node.get("equity") is not None else None
+            except Exception:
+                equity = None
+
+            positions = None
+            try:
+                positions = int(node.get("positions")) if node.get("positions") is not None else None
+            except Exception:
+                positions = None
+
+            # Latest per-bot artifact time
+            bot_mtime = None
+            if last_day:
+                for p in SIM_LOG_DIR.glob(f"{last_day}_{bot_key}.json"):
+                    try:
+                        bot_mtime = max(bot_mtime or 0.0, p.stat().st_mtime)
+                    except Exception:
+                        continue
+
+            bots_out[bot_key] = {
+                "enabled": enabled,
+                "equity": equity,
+                "holdings_count": positions,
+                "last_update": datetime.fromtimestamp(bot_mtime).isoformat() if bot_mtime else None,
+                # UI rules (best effort)
+                "rules": ui.get("rules", {}),
+                "type": ui.get("type"),
+                "horizon": ui.get("horizon"),
+                "risk": ui.get("risk"),
+            }
+
+        return {
+            "running": running,
+            "last_update": datetime.fromtimestamp(freshest_mtime).isoformat() if freshest_mtime else None,
+            "last_day": last_day,
+            "bot_count": len(bots_out),
+            "bots": bots_out,
+            "freshest_artifact": str(freshest_path) if freshest_path else None,
+            "freshness_age_s": age_s,
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "running": False,
+            "last_update": None,
+            "last_day": _get_latest_day(),
+            "bot_count": 0,
+            "bots": {},
+            "error": f"{type(e).__name__}: {e}",
+            "trace": traceback.format_exc()[-2000:],
+        }
 
 
 @router.get("/configs")
@@ -201,11 +272,20 @@ async def intraday_configs() -> Dict[str, Any]:
 
     Stored as ML_DATA_DT/config/intraday_bots_ui.json.
     """
-    store = _load_intraday_ui_configs()
-    last_day = _get_latest_day()
-    bots = _infer_intraday_bot_names(last_day)
-    _ensure_intraday_ui_defaults(bots, store)
-    return {"configs": store.get("bots", {})}
+    try:
+        store = _load_intraday_ui_configs()
+        last_day = _get_latest_day()
+        bots = _infer_intraday_bot_names(last_day)
+        _ensure_intraday_ui_defaults(bots, store)
+        return {"configs": (store.get("bots", {}) if isinstance(store, dict) else {})}
+    except Exception as e:
+        import traceback
+        return {
+            "configs": {},
+            "error": f"{type(e).__name__}: {e}",
+            "trace": traceback.format_exc()[-2000:],
+        }
+
 
 
 @router.post("/configs")

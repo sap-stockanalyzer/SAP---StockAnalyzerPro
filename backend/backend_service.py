@@ -41,7 +41,7 @@ from backend.routers.intraday_router import router as intraday_router
 from backend.routers.model_router import router as model_router
 from backend.routers.metrics_router import router as metrics_router
 from backend.routers.settings_router import router as settings_router
-from backend.routers.eod_bots_router import router as eod_router
+from backend.routers.bots_page_router import router as bots_page_router
 from backend.routers.bots_hub_router import router as bots_hub_router
 from backend.routers.replay_router import router as replay_router
 from backend.routers.swing_replay_router import router as swing_replay_router
@@ -88,7 +88,7 @@ app.include_router(intraday_router)
 app.include_router(model_router)
 app.include_router(metrics_router)
 app.include_router(settings_router)
-app.include_router(eod_router)
+app.include_router(bots_page_router)
 app.include_router(bots_hub_router)
 app.include_router(replay_router)
 app.include_router(swing_replay_router)

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import gzip
+from datetime import datetime
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -119,6 +120,13 @@ def _load_json(path: Path) -> Optional[dict]:
             return json.load(f)
     except Exception:
         return None
+
+def _safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        v = float(x)
+        return v if v == v else default  # NaN check
+    except Exception:
+        return default
 
 
 def _load_prices_from_rolling() -> Dict[str, float]:
@@ -216,121 +224,168 @@ async def eod_status():
     Current state snapshot for EOD (swing) bots.
 
     Uses:
-      • bot state files: stock_cache/master/bot/rolling_<botname>.json.gz
-      • latest prices from: ml_data/rolling.json.gz (via core data_pipeline)
-    """
-    prices = _load_prices_from_rolling()
-    price_status = "ok" if prices else "no-prices"
+      • bot state files: stock_cache/master/bot/rolling_<botkey>.json(.gz)
+      • latest prices: via backend.core.data_pipeline._read_rolling() (primary)
+        with a best-effort file fallback.
 
-    BOT_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    state_files = sorted(BOT_STATE_DIR.glob("rolling_*.json.gz"))
-
-    bots_out: Dict[str, Any] = {}
-    last_updates: List[str] = []
-
-    for sf in state_files:
-        state = _load_gz_dict(sf)
-        if not isinstance(state, dict):
-            continue
-
-        bot_key = sf.stem.replace("rolling_", "")
-
-        cash = float(state.get("cash", 0.0))
-        positions = state.get("positions", {}) or {}
-
-        pos_list = []
-        equity = cash
-        invested = 0.0
-
-        for sym, pos in positions.items():
-            sym_u = str(sym).upper()
-            px = prices.get(sym_u)
-
-            entry = float(pos.get("entry", 0.0) or 0.0)
-            qty = float(pos.get("qty", 0.0) or 0.0)
-            stop = float(pos.get("stop", 0.0) or 0.0)
-            target = float(pos.get("target", 0.0) or 0.0)
-
-            unreal = None
-            if isinstance(px, (int, float)):
-                unreal = (px - entry) * qty
-                mv = float(px) * float(qty)
-                invested += mv
-                equity += mv
-
-            pos_list.append(
-                {
-                    "symbol": sym_u,
-                    "qty": qty,
-                    "entry": entry,
-                    "stop": stop,
-                    "target": target,
-                    "last_price": px,
-                    "unrealized_pnl": unreal,
-                }
-            )
-
-        enabled, aggression = _load_bot_ui_overrides().get(bot_key, {}).get("enabled", True), _load_bot_ui_overrides().get(bot_key, {}).get("aggression", 0.5)
-
-        last_up = str(state.get("last_updated") or "")
-        if last_up:
-            last_updates.append(last_up)
-
-        bots_out[bot_key] = {
-            # Quick read
-            "type": "swing",
-            "enabled": bool(enabled),
-            "aggression": float(aggression) if aggression is not None else 0.5,
-            "last_update": last_up or None,
-            "cash": float(cash),
-            "invested": float(invested),
-            "allocated": float(equity),
-            "holdings_count": int(len(pos_list)),
-            "equity": float(equity),
-
-            # Legacy + detail
-            "num_positions": len(pos_list),
-            "positions": pos_list,
-
-            # Optional chart series (filled by bot logs elsewhere)
-            "equity_curve": [],
-            "pnl_curve": [],
+    Returns a UI-friendly shape:
+      {
+        "running": bool,
+        "last_update": "ISO",
+        "bots": {
+           "eod_1w": {
+              "enabled": true,
+              "cash": 123.0,
+              "invested": 456.0,
+              "allocated": 600.0,
+              "holdings_count": 3,
+              "equity": 579.0,
+              "last_update": "ISO",
+              "positions": [...]
+           },
+           ...
         }
+      }
+    """
+    try:
+        prices = _load_prices_from_rolling()
+        price_status = "ok" if prices else "no-prices"
 
-    # If bots haven't produced state files yet, still expose bots from configs
-    if not bots_out:
+        # Load core bot configs (best effort)
+        core_cfgs: Dict[str, Any] = {}
         try:
-            configs = _load_all_bot_configs()
+            core_cfgs = _load_all_bot_configs()  # type: ignore
         except Exception:
-            configs = {}
+            core_cfgs = {}
 
-        ui = _ensure_swing_ui_defaults()
-        for bot_key, cfg in (configs or {}).items():
-            enabled = bool((ui.get(bot_key) or {}).get("enabled", True))
-            aggression = float((ui.get(bot_key) or {}).get("aggression", 0.5))
-            cash = float(getattr(cfg, "initial_cash", 0.0) or 0.0)
+        # Determine bot keys: configs first, else state files, else defaults
+        bot_keys: List[str] = list(core_cfgs.keys())
+
+        BOT_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        state_files = sorted(list(BOT_STATE_DIR.glob("rolling_*.json.gz")) + list(BOT_STATE_DIR.glob("rolling_*.json")))
+        if not bot_keys and state_files:
+            bot_keys = [sf.stem.replace("rolling_", "").replace(".json", "") for sf in state_files]
+
+        if not bot_keys:
+            bot_keys = [f"eod_{h}" for h in HORIZONS]
+
+        ui_overrides = _load_bot_ui_overrides()
+
+        bots_out: Dict[str, Any] = {}
+        last_updates: List[str] = []
+
+        for bot_key in sorted(set(bot_keys)):
+            ui = ui_overrides.get(bot_key, {}) if isinstance(ui_overrides, dict) else {}
+            enabled = bool(ui.get("enabled", True))
+
+            # Try state file
+            state_path_gz = BOT_STATE_DIR / f"rolling_{bot_key}.json.gz"
+            state_path_js = BOT_STATE_DIR / f"rolling_{bot_key}.json"
+            state = _load_bot_state(state_path_gz) or _load_bot_state(state_path_js) or {}
+            if not isinstance(state, dict):
+                state = {}
+
+            # Pull cash; tolerate None / strings
+            cash = _safe_float(state.get("cash") or 0.0, 0.0)
+
+            # If we have a core config, use its initial_cash as a default when state is missing
+            cfg = core_cfgs.get(bot_key)
+            if cash <= 0 and cfg is not None:
+                cash = _safe_float(getattr(cfg, "initial_cash", None), cash)
+
+            raw_positions = state.get("positions") or {}
+            positions = raw_positions if isinstance(raw_positions, dict) else {}
+
+            invested = 0.0
+            pos_list = []
+            for sym, pos in positions.items():
+                sym_u = str(sym).upper()
+                px = prices.get(sym_u)
+
+                if isinstance(pos, dict):
+                    entry = _safe_float(pos.get("entry") or 0.0, 0.0)
+                    qty = _safe_float(pos.get("qty") or 0.0, 0.0)
+                    stop = _safe_float(pos.get("stop") or 0.0, 0.0)
+                    target = _safe_float(pos.get("target") or 0.0, 0.0)
+                else:
+                    entry = qty = stop = target = 0.0
+
+                mv = 0.0
+                unreal = None
+                if px is not None:
+                    try:
+                        px_f = float(px)
+                        if px_f > 0 and qty:
+                            mv = px_f * qty
+                            invested += mv
+                            unreal = (px_f - entry) * qty
+                    except Exception:
+                        pass
+
+                pos_list.append(
+                    {
+                        "symbol": sym_u,
+                        "qty": qty,
+                        "entry": entry,
+                        "stop": stop,
+                        "target": target,
+                        "last_price": px,
+                        "market_value": mv,
+                        "unrealized_pnl": unreal,
+                    }
+                )
+
+            equity = cash + invested
+
+            # Allocation limit is a UI concept; default 0.95 if missing
+            max_alloc = ui.get("max_alloc", 0.95)
+            max_alloc_f = _safe_float(max_alloc, 0.95)
+            allocated = equity * max_alloc_f
+
+            last_updated = str(state.get("last_updated") or state.get("last_update") or "")
+            if not last_updated:
+                # fall back to state file mtime if present
+                try:
+                    p = state_path_gz if state_path_gz.exists() else state_path_js
+                    if p.exists():
+                        last_updated = datetime.fromtimestamp(p.stat().st_mtime).isoformat()
+                except Exception:
+                    last_updated = ""
+
+            if last_updated:
+                last_updates.append(last_updated)
+
             bots_out[bot_key] = {
-                "type": "swing",
                 "enabled": enabled,
-                "aggression": aggression,
-                "last_update": None,
                 "cash": cash,
-                "invested": 0.0,
-                "allocated": cash,
-                "holdings_count": 0,
-                "equity": cash,
-                "num_positions": 0,
-                "positions": [],
-                "equity_curve": [],
-                "pnl_curve": [],
+                "invested": invested,
+                "allocated": allocated,
+                "holdings_count": len(pos_list),
+                "equity": equity,
+                "last_update": last_updated,
+                "positions": pos_list,
             }
 
-    return {
-        "running": bool(bots_out),
-        "last_update": max(last_updates) if last_updates else None,
-        "price_status": price_status,
-        "bots": bots_out,
-    }
+        running = any(v.get("enabled") for v in bots_out.values())
+        last_update = max(last_updates) if last_updates else ""
+
+        return {
+            "running": running,
+            "last_update": last_update,
+            "price_status": price_status,
+            "bots": bots_out,
+        }
+
+    except Exception as e:
+        import traceback
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": f"{type(e).__name__}: {e}",
+                "trace": traceback.format_exc()[-2000:],
+            },
+        )
 
 
 # -------------------------------------------------------------------
