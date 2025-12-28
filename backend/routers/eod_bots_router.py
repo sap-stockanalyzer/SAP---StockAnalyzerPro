@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 try:
     from backend.core.config import PATHS
@@ -57,6 +58,47 @@ BOT_LOG_ROOT = ML_DATA / "bot_logs"
 
 # Horizons used by your nightly bots
 HORIZONS = ["1w", "2w", "4w"]
+
+
+# -------------------------------------------------------------------
+# UI config overlays (enabled/aggression) + helpers
+# -------------------------------------------------------------------
+
+try:
+    # Optional overlay store for UI-only fields (enabled/aggression, etc.)
+    from backend.services.bot_ui_store import (
+        ensure_swing_ui_defaults,
+        load_swing_ui_overrides,
+        update_swing_ui_overrides,
+        reset_swing_ui_overrides,
+    )
+except Exception:  # pragma: no cover
+    ensure_swing_ui_defaults = None  # type: ignore
+    load_swing_ui_overrides = None  # type: ignore
+    update_swing_ui_overrides = None  # type: ignore
+    reset_swing_ui_overrides = None  # type: ignore
+
+
+def _ui_enabled(bot_key: str, overrides: Dict[str, Any]) -> bool:
+    try:
+        node = overrides.get(bot_key) or {}
+        return bool(node.get("enabled", True))
+    except Exception:
+        return True
+
+
+def _ui_aggression(bot_key: str, overrides: Dict[str, Any]) -> float:
+    try:
+        node = overrides.get(bot_key) or {}
+        val = float(node.get("aggression", 0.5))
+        return max(0.0, min(1.0, val))
+    except Exception:
+        return 0.5
+
+
+class _UIConfigUpdate(BaseModel):
+    bot_key: str
+    config: Dict[str, Any]
 
 # -------------------------------------------------------------------
 # Helpers
@@ -184,6 +226,7 @@ async def eod_status():
     state_files = sorted(BOT_STATE_DIR.glob("rolling_*.json.gz"))
 
     bots_out: Dict[str, Any] = {}
+    last_updates: List[str] = []
 
     for sf in state_files:
         state = _load_gz_dict(sf)
@@ -197,6 +240,7 @@ async def eod_status():
 
         pos_list = []
         equity = cash
+        invested = 0.0
 
         for sym, pos in positions.items():
             sym_u = str(sym).upper()
@@ -210,7 +254,9 @@ async def eod_status():
             unreal = None
             if isinstance(px, (int, float)):
                 unreal = (px - entry) * qty
-                equity += px * qty
+                mv = float(px) * float(qty)
+                invested += mv
+                equity += mv
 
             pos_list.append(
                 {
@@ -224,14 +270,64 @@ async def eod_status():
                 }
             )
 
+        enabled, aggression = _load_bot_ui_overrides().get(bot_key, {}).get("enabled", True), _load_bot_ui_overrides().get(bot_key, {}).get("aggression", 0.5)
+
+        last_up = str(state.get("last_updated") or "")
+        if last_up:
+            last_updates.append(last_up)
+
         bots_out[bot_key] = {
-            "cash": cash,
-            "equity": equity,
+            # Quick read
+            "type": "swing",
+            "enabled": bool(enabled),
+            "aggression": float(aggression) if aggression is not None else 0.5,
+            "last_update": last_up or None,
+            "cash": float(cash),
+            "invested": float(invested),
+            "allocated": float(equity),
+            "holdings_count": int(len(pos_list)),
+            "equity": float(equity),
+
+            # Legacy + detail
             "num_positions": len(pos_list),
             "positions": pos_list,
+
+            # Optional chart series (filled by bot logs elsewhere)
+            "equity_curve": [],
+            "pnl_curve": [],
         }
 
+    # If bots haven't produced state files yet, still expose bots from configs
+    if not bots_out:
+        try:
+            configs = _load_all_bot_configs()
+        except Exception:
+            configs = {}
+
+        ui = _ensure_swing_ui_defaults()
+        for bot_key, cfg in (configs or {}).items():
+            enabled = bool((ui.get(bot_key) or {}).get("enabled", True))
+            aggression = float((ui.get(bot_key) or {}).get("aggression", 0.5))
+            cash = float(getattr(cfg, "initial_cash", 0.0) or 0.0)
+            bots_out[bot_key] = {
+                "type": "swing",
+                "enabled": enabled,
+                "aggression": aggression,
+                "last_update": None,
+                "cash": cash,
+                "invested": 0.0,
+                "allocated": cash,
+                "holdings_count": 0,
+                "equity": cash,
+                "num_positions": 0,
+                "positions": [],
+                "equity_curve": [],
+                "pnl_curve": [],
+            }
+
     return {
+        "running": bool(bots_out),
+        "last_update": max(last_updates) if last_updates else None,
         "price_status": price_status,
         "bots": bots_out,
     }
@@ -401,20 +497,84 @@ def _get_bot_config(bot_key: str) -> SwingBotConfig:
         )
 
 
-@router.get("/configs")
-async def list_eod_bot_configs() -> Dict[str, Dict[str, Any]]:
-    """
-    Return all EOD bot configs (for settings UI).
+class EodBotUiConfig(BaseModel):
+    """UI-friendly bot rules.
 
-    Response:
-      {
-        "eod_1w": { ... SwingBotConfig fields ... },
-        "eod_2w": { ... },
-        "eod_4w": { ... }
-      }
+    We keep the bot engine's native SwingBotConfig untouched and layer
+    "enabled" + "aggression" as UI-only overrides.
+    """
+
+    enabled: bool = True
+    aggression: float = 0.50
+
+    # Trading rules
+    max_alloc: float = 0.0  # maps to SwingBotConfig.max_position_size
+    max_positions: int = 0
+    stop_loss: float = 0.0  # maps to SwingBotConfig.stop_pct
+    take_profit: float = 0.0  # maps to SwingBotConfig.take_profit_pct
+    min_confidence: float = 0.0
+    initial_cash: float = 0.0
+
+
+def _ui_config_from_core(bot_key: str, cfg: SwingBotConfig) -> Dict[str, Any]:
+    ov = _load_bot_ui_overrides().get(bot_key, {})
+    enabled = bool(ov.get("enabled", True))
+    aggression = float(ov.get("aggression", 0.50) or 0.50)
+
+    return EodBotUiConfig(
+        enabled=enabled,
+        aggression=aggression,
+        max_alloc=float(getattr(cfg, "max_position_size", 0.0) or 0.0),
+        max_positions=int(getattr(cfg, "max_positions", 0) or 0),
+        stop_loss=float(getattr(cfg, "stop_pct", 0.0) or 0.0),
+        take_profit=float(getattr(cfg, "take_profit_pct", 0.0) or 0.0),
+        min_confidence=float(getattr(cfg, "min_confidence", 0.0) or 0.0),
+        initial_cash=float(getattr(cfg, "initial_cash", 0.0) or 0.0),
+    ).model_dump()
+
+
+def _apply_ui_config(bot_key: str, cfg: SwingBotConfig, ui: Dict[str, Any]) -> SwingBotConfig:
+    # Core-mapped fields
+    if "max_alloc" in ui:
+        cfg.max_position_size = float(ui.get("max_alloc") or 0.0)
+    if "max_positions" in ui:
+        cfg.max_positions = int(ui.get("max_positions") or 0)
+    if "stop_loss" in ui:
+        cfg.stop_pct = float(ui.get("stop_loss") or 0.0)
+    if "take_profit" in ui:
+        cfg.take_profit_pct = float(ui.get("take_profit") or 0.0)
+    if "min_confidence" in ui:
+        cfg.min_confidence = float(ui.get("min_confidence") or 0.0)
+    if "initial_cash" in ui:
+        cfg.initial_cash = float(ui.get("initial_cash") or 0.0)
+
+    # UI-only overrides
+    ov = _load_bot_ui_overrides()
+    node = dict(ov.get(bot_key, {}) or {})
+    if "enabled" in ui:
+        node["enabled"] = bool(ui.get("enabled"))
+    if "aggression" in ui:
+        try:
+            node["aggression"] = float(ui.get("aggression"))
+        except Exception:
+            pass
+    if node:
+        ov[bot_key] = node
+        _save_bot_ui_overrides(ov)
+    return cfg
+
+
+@router.get("/configs")
+async def list_eod_bot_configs() -> Dict[str, Any]:
+    """Return UI-friendly configs for all swing bots.
+
+    Shape matches the redesigned Bots page:
+      { "configs": { "eod_1w": {...}, ... } }
     """
     configs = _load_all_bot_configs()
-    return {k: asdict(v) for k, v in configs.items()}
+    _ensure_swing_ui_defaults(configs)
+    out = {k: _ui_config_from_core(k, v) for k, v in configs.items()}
+    return {"configs": out}
 
 
 @router.get("/configs/{bot_key}")
@@ -423,7 +583,63 @@ async def get_eod_bot_config(bot_key: str) -> Dict[str, Any]:
     Return config for a single bot (e.g. 'eod_1w').
     """
     cfg = _get_bot_config(bot_key)
-    return asdict(cfg)
+    _ensure_swing_ui_defaults({bot_key: cfg})
+    return _ui_config_from_core(bot_key, cfg)
+
+
+class EodConfigUpdateRequest(BaseModel):
+    bot_key: str
+    config: Dict[str, Any]
+
+
+@router.post("/configs")
+async def update_eod_bot_config_ui(payload: EodConfigUpdateRequest) -> Dict[str, Any]:
+    """Update swing bot config using the UI shape.
+
+    Body:
+      { "bot_key": "eod_1w", "config": { ... ui fields ... } }
+    """
+    bot_key = str(payload.bot_key).strip()
+    if not bot_key:
+        raise HTTPException(status_code=400, detail="Missing bot_key")
+
+    configs = _load_all_bot_configs()
+    if bot_key not in configs:
+        raise HTTPException(status_code=404, detail="Unknown bot_key")
+
+    cfg = configs[bot_key]
+    cfg = _apply_ui_config(bot_key, cfg, dict(payload.config or {}))
+    configs[bot_key] = cfg
+    _save_all_bot_configs(configs)
+
+    return {"bot_key": bot_key, "config": _ui_config_from_core(bot_key, cfg)}
+
+
+@router.post("/configs/{bot_key}/reset-defaults")
+async def reset_eod_bot_defaults(bot_key: str) -> Dict[str, Any]:
+    """Reset a swing bot back to DEFAULT_BOT_CONFIGS and clear UI overrides."""
+    try:
+        from backend.bots import config_store  # type: ignore
+
+        defaults = config_store.DEFAULT_BOT_CONFIGS
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed loading defaults: {e}")
+
+    if bot_key not in defaults:
+        raise HTTPException(status_code=404, detail="Unknown bot_key")
+
+    configs = _load_all_bot_configs()
+    configs[bot_key] = defaults[bot_key]
+    _save_all_bot_configs(configs)
+
+    # Clear UI overrides for this bot
+    ov = _load_bot_ui_overrides()
+    if bot_key in ov:
+        ov.pop(bot_key, None)
+        _save_bot_ui_overrides(ov)
+
+    _ensure_swing_ui_defaults({bot_key: configs[bot_key]})
+    return {"bot_key": bot_key, "config": _ui_config_from_core(bot_key, configs[bot_key])}
 
 
 @router.put("/configs/{bot_key}")
