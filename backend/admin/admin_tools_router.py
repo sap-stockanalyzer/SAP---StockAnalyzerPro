@@ -109,7 +109,7 @@ def clear_locks(_: None = Depends(admin_required)):
 # --------------------------------------------------
 
 @router.post("/refresh-universes")
-def refresh_universes_tool(user=Depends(require_admin)):
+def refresh_universes_tool(user=Depends(admin_required)):
     try:
         from backend.utils.refresh_universes_from_alpaca import refresh_universes
         res = refresh_universes(write_files=True)
