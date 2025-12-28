@@ -121,6 +121,10 @@ from backend.core.ai_model.trainer import _make_regressor, _tune_lightgbm_regres
 from backend.core.ai_model.sanity_gates import _post_train_sanity
 from backend.core.ai_model.feature_pipeline import _load_feature_list
 
+# Exported for legacy callers (e.g., sector_training) that import from
+# core_training directly.
+from backend.core.ai_model.constants import FEATURE_LIST_FILE
+
 
 def _aion_meta_snapshot() -> Dict[str, Any]:
     try:
