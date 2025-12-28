@@ -1,5 +1,5 @@
 """
-backend/utils/refresh_universes_from_alpaca.py
+utils/refresh_universes_from_alpaca.py
 
 One-shot universe refresh tool:
 - Pulls ALL tradable + active Alpaca assets (US equities/ETFs) via Trading API /v2/assets
