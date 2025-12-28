@@ -462,10 +462,25 @@ def run_nightly_job(
         t0 = time.time()
         try:
             _require(build_daily_dataset, "backend.services.ml_data_builder.build_daily_dataset")
+
+            # ML dataset build can be memory-heavy when multiprocessing forks a large
+            # parent process (rolling + brain + news). On RAM-limited servers this can
+            # look like a "silent terminate" (often the OOM killer).
+            #
+            # Default: OFF for stability. Enable with AION_ML_MP=1.
+            mp_env = str(os.getenv("AION_ML_MP", "0")).strip().lower()
+            use_mp = mp_env in ("1", "true", "yes", "y", "on")
+
+            # Replay should stay deterministic + memory-safe.
+            if mode == "replay":
+                use_mp = False
+
+            log(f"[nightly_job] [ml_data_builder] mp={use_mp} (set AION_ML_MP=1 to enable)")
+
             ds = build_daily_dataset(
                 as_of_date=as_of_date,
                 strict=(mode=="replay"),
-                use_multiprocessing=True,
+                use_multiprocessing=use_mp,
                 debug=False,
                 chunk_symbols=50,
                 corr_sample_rows=50_000,
