@@ -1,5 +1,4 @@
-"""
-dt_backend.ml package
+"""dt_backend.ml package
 
 High-level intraday ML building blocks:
   • build_intraday_dataset
@@ -8,56 +7,53 @@ High-level intraday ML building blocks:
   • build_intraday_signals
   • train_incremental_intraday
 
-IMPORTANT:
-- Do NOT import submodules at package import-time.
-  Running `python -m dt_backend.ml.some_module` imports this package first.
-  If we import that same module here, Python will warn that it was already in sys.modules
-  before execution (runpy warning).
+Notes
+-----
+This package intentionally keeps imports *lazy*.
+
+Reason: when you run a submodule with `python -m dt_backend.ml.<submodule>`,
+Python imports `dt_backend.ml` (this __init__) first. If we eagerly import
+that same submodule here, you'll get the classic runpy warning:
+
+    "found in sys.modules ... prior to execution"
+
+Lazy wrappers avoid that and also keep LightGBM / pandas from loading unless
+you actually call the function.
 """
 
+from __future__ import annotations
+
+from typing import Any, Dict
+
+
 # ---------------------------------------------------------------------
-# Lazy import wrappers (avoid loading modules at package import-time)
+# Lazy wrappers
 # ---------------------------------------------------------------------
 
-def build_intraday_dataset(*args, **kwargs):
-    """
-    Lazy loader for intraday dataset builder.
-
-    This prevents runpy warnings when executing:
-      python -m dt_backend.ml.ml_data_builder_intraday
-    """
+def build_intraday_dataset(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Build the intraday training dataset parquet from rolling."""
     from .ml_data_builder_intraday import build_intraday_dataset as _fn
+
     return _fn(*args, **kwargs)
 
 
-def train_intraday_models(*args, **kwargs):
-    """
-    Lazy loader to only import training code when needed.
-    Keeps LightGBM and model deps out of import-time.
+def train_intraday_models(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Train and persist the intraday model(s)."""
+    # Canonical trainer currently lives in train_lightgbm_intraday.py
+    from .train_lightgbm_intraday import train_lightgbm_intraday as _fn
 
-    Supports either:
-      - train_intraday_models() (if you have that wrapper)
-      - train_lightgbm_intraday() (your current file’s entrypoint)
-    """
-    try:
-        from .train_lightgbm_intraday import train_intraday_models as _fn  # type: ignore
-        return _fn(*args, **kwargs)
-    except Exception:
-        from .train_lightgbm_intraday import train_lightgbm_intraday as _fn  # type: ignore
-        return _fn(*args, **kwargs)
+    return _fn(*args, **kwargs)
 
 
-def score_intraday_tickers(*args, **kwargs):
-    """
-    Lazy loader + compatibility wrapper for intraday scoring.
-
-    Adapts:
-        score_intraday_batch(df, models)
-    into API used by:
-        dt_backend.jobs.daytrading_job
-    """
+def score_intraday_tickers(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Score tickers intraday and write predictions_dt back to rolling."""
     from .ai_model_intraday import score_intraday_batch, load_intraday_models
     from dt_backend.core.data_pipeline_dt import _read_rolling, ensure_symbol_node
+
+    try:
+        from dt_backend.core.data_pipeline_dt import save_rolling as _save_rolling  # type: ignore
+    except Exception:  # pragma: no cover
+        _save_rolling = None
 
     import pandas as pd
 
@@ -78,7 +74,7 @@ def score_intraday_tickers(*args, **kwargs):
         rows.append(feats)
         index.append(sym)
 
-        if max_symbols and len(rows) >= max_symbols:
+        if max_symbols and len(rows) >= int(max_symbols):
             break
 
     if not rows:
@@ -99,18 +95,30 @@ def score_intraday_tickers(*args, **kwargs):
         rolling[sym] = node
         updated += 1
 
-    return {"status": "ok", "symbols_scored": updated}
+    # Persist results (so daytrading_job sees them)
+    if _save_rolling is not None:
+        try:
+            _save_rolling(rolling)
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "symbols_scored": updated,
+    }
 
 
-def build_intraday_signals(*args, **kwargs):
-    """Lazy loader for intraday signal builder."""
+def build_intraday_signals(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Build ranked intraday signals."""
     from .signals_rank_builder import build_intraday_signals as _fn
+
     return _fn(*args, **kwargs)
 
 
-def train_incremental_intraday(*args, **kwargs):
-    """Lazy loader for online incremental training."""
+def train_incremental_intraday(*args: Any, **kwargs: Any) -> Dict[str, Any]:
+    """Online / incremental intraday training."""
     from .continuous_learning_intraday import train_incremental_intraday as _fn
+
     return _fn(*args, **kwargs)
 
 

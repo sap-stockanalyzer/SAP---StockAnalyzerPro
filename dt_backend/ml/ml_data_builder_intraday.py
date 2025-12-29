@@ -1,4 +1,21 @@
-# dt_backend/ml/ml_data_builder_intraday.py — v5.1 (NEWS-AWARE + SAFE)
+# dt_backend/ml/ml_data_builder_intraday.py — v5.1.1 (NEWS-AWARE + SAFE + RUNNABLE)
+"""
+Builds the intraday *dataset parquet* used by train_lightgbm_intraday.py.
+
+What this produces:
+- A parquet file at: <DT_PATHS['dtml_data'] or DT_PATHS['ml_data_dt']>/training_data_intraday.parquet
+- Rows are built from rolling[symbol]['features_dt'] (plus merged intraday news features)
+- If your features_dt already contains 'label' or 'label_id', it will be included automatically.
+  (If it doesn't, training will fail later — see notes in the chat.)
+
+This file previously had two practical issues:
+1) pandas was never actually imported (pd was undefined) → it would crash when building.
+2) Path resolution only considered DT_PATHS['dtml_data'] and ignored DT_PATHS['ml_data_dt'].
+
+This version fixes both, and adds a CLI so you can run:
+  python -m dt_backend.ml.ml_data_builder_intraday
+"""
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -10,13 +27,20 @@ import json
 from dt_backend.core.config_dt import DT_PATHS  # type: ignore
 from dt_backend.core.data_pipeline_dt import _read_rolling, log
 
+
 def _lazy_pd():
     import pandas as pd
     return pd
 
+
 def _intraday_news_dir() -> Path:
-    root = DT_PATHS.get("ml_data_dt") or DT_PATHS.get("root") or "ml_data_dt"
-    d = Path(root) / "news_intraday"
+    base = (
+        DT_PATHS.get("dtml_data")
+        or DT_PATHS.get("ml_data_dt")
+        or DT_PATHS.get("root")
+        or "ml_data_dt"
+    )
+    d = Path(base) / "news_intraday"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -108,21 +132,46 @@ def _infer_ts(node: Dict[str, Any]) -> datetime | None:
 
 
 def _resolve_dataset_paths() -> List[Path]:
+    """
+    Return primary + mirror locations for the dataset parquet.
+
+    Priority:
+      1) DT_PATHS['dtml_intraday_dataset'] if present (explicit full path)
+      2) <DT_PATHS['dtml_data']>/training_data_intraday.parquet
+      3) <DT_PATHS['ml_data_dt']>/training_data_intraday.parquet
+      4) ./ml_data_dt/training_data_intraday.parquet
+    """
     paths: List[Path] = []
 
     if "dtml_intraday_dataset" in DT_PATHS:
-        paths.append(Path(DT_PATHS["dtml_intraday_dataset"]))
+        try:
+            paths.append(Path(DT_PATHS["dtml_intraday_dataset"]))
+        except Exception:
+            pass
 
     if "dtml_data" in DT_PATHS:
-        paths.append(Path(DT_PATHS["dtml_data"]) / "training_data_intraday.parquet")
+        try:
+            paths.append(Path(DT_PATHS["dtml_data"]) / "training_data_intraday.parquet")
+        except Exception:
+            pass
+
+    if "ml_data_dt" in DT_PATHS:
+        try:
+            paths.append(Path(DT_PATHS["ml_data_dt"]) / "training_data_intraday.parquet")
+        except Exception:
+            pass
 
     if not paths:
         paths.append(Path("ml_data_dt") / "training_data_intraday.parquet")
 
+    # de-dupe while keeping order
     seen = set()
     out: List[Path] = []
     for p in paths:
-        key = str(p.resolve())
+        try:
+            key = str(p.resolve())
+        except Exception:
+            key = str(p)
         if key in seen:
             continue
         seen.add(key)
@@ -173,7 +222,9 @@ def build_intraday_dataset(max_symbols: int | None = None) -> Dict[str, Any]:
         log("[dt_ml_builder] ⚠️ no feature rows to write.")
         return {"status": "no_rows", "rows": 0, "symbols": 0}
 
+    pd = _lazy_pd()
     df = pd.DataFrame.from_records(rows)
+
     paths = _resolve_dataset_paths()
 
     try:
@@ -182,7 +233,10 @@ def build_intraday_dataset(max_symbols: int | None = None) -> Dict[str, Any]:
             p.parent.mkdir(parents=True, exist_ok=True)
             df.to_parquet(p, index=False)
             if i == 0:
-                log(f"[dt_ml_builder] ✅ wrote primary dataset → {p} (rows={len(df)}, symbols={df['symbol'].nunique()})")
+                log(
+                    f"[dt_ml_builder] ✅ wrote primary dataset → {p} "
+                    f"(rows={len(df)}, symbols={df['symbol'].nunique()})"
+                )
             else:
                 log(f"[dt_ml_builder] ↳ mirrored dataset → {p}")
 
@@ -191,7 +245,19 @@ def build_intraday_dataset(max_symbols: int | None = None) -> Dict[str, Any]:
             "rows": int(len(df)),
             "symbols": int(df["symbol"].nunique()),
             "path": str(primary),
+            "columns": list(df.columns),
         }
     except Exception as e:
         log(f"[dt_ml_builder] ⚠️ failed to write dataset(s) {paths}: {e}")
         return {"status": "error", "error": str(e), "rows": 0, "symbols": 0}
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Build intraday dataset parquet for DT LightGBM training.")
+    parser.add_argument("--max_symbols", type=int, default=None, help="Optional cap for debugging (e.g. 500).")
+    args = parser.parse_args()
+
+    out = build_intraday_dataset(max_symbols=args.max_symbols)
+    log(f"[dt_ml_builder] 📊 Result: {out}")
