@@ -28,6 +28,11 @@ except Exception:
 
 from utils.live_log import append_log, prune_old_logs
 
+from backend.core.config import PATHS
+print("ROLLING:", PATHS.get("rolling"))
+print("ROLLING_BODY:", PATHS.get("rolling_body"))
+print("ROLLING_BRAIN:", PATHS.get("rolling_brain"))
+
 # Quiet noisy libs
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
 warnings.filterwarnings("ignore", category=UserWarning, module="pandas_ta")
