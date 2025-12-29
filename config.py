@@ -72,7 +72,7 @@ STOCK_CACHE_MASTER = STOCK_CACHE_ROOT / "master"
 ROLLING_BODY_PATH = BRAINS_ROOT / "rolling_body.json.gz"
 ROLLING_NERVOUS_PATH = BRAINS_ROOT / "rolling_nervous.json.gz"
 # Backward-compat alias (old name)
-ROLLING_PATH = ROLLING_BODY_PATH
+ROLLING_PATH = BRAINS_ROOT / "rolling.json.gz"
 ROLLING_BACKUPS = STOCK_CACHE_MASTER / "backups"
 NIGHTLY_LOCK_FILE = BRAINS_ROOT / "nightly_job.lock"
 
@@ -181,7 +181,7 @@ PATHS: Dict[str, Path] = {
     "rolling_body": ROLLING_BODY_PATH,
     "rolling_nervous": ROLLING_NERVOUS_PATH,
 
-    "rolling": ROLLING_BODY_PATH,
+    "rolling": ROLLING_PATH,
     "rolling_backups": ROLLING_BACKUPS,
     "nightly_lock": NIGHTLY_LOCK_FILE,
 
