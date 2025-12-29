@@ -7,34 +7,53 @@ High-level intraday ML building blocks:
   • score_intraday_tickers
   • build_intraday_signals
   • train_incremental_intraday
+
+IMPORTANT:
+- Do NOT import submodules at package import-time.
+  Running `python -m dt_backend.ml.some_module` imports this package first.
+  If we import that same module here, Python will warn that it was already in sys.modules
+  before execution (runpy warning).
 """
 
 # ---------------------------------------------------------------------
-# Safe import (no heavy dependencies at module load)
+# Lazy import wrappers (avoid loading modules at package import-time)
 # ---------------------------------------------------------------------
-from .ml_data_builder_intraday import build_intraday_dataset
+
+def build_intraday_dataset(*args, **kwargs):
+    """
+    Lazy loader for intraday dataset builder.
+
+    This prevents runpy warnings when executing:
+      python -m dt_backend.ml.ml_data_builder_intraday
+    """
+    from .ml_data_builder_intraday import build_intraday_dataset as _fn
+    return _fn(*args, **kwargs)
 
 
-# ---------------------------------------------------------------------
-# Lazy import wrappers (avoid loading LightGBM + deprecated code early)
-# ---------------------------------------------------------------------
 def train_intraday_models(*args, **kwargs):
     """
-    Lazy loader to only import train_lightgbm_intraday when needed.
-    Prevents ImportError when LABEL_ORDER, LightGBM, etc. aren't present.
+    Lazy loader to only import training code when needed.
+    Keeps LightGBM and model deps out of import-time.
+
+    Supports either:
+      - train_intraday_models() (if you have that wrapper)
+      - train_lightgbm_intraday() (your current file’s entrypoint)
     """
-    from .train_lightgbm_intraday import train_intraday_models as _fn
-    return _fn(*args, **kwargs)
+    try:
+        from .train_lightgbm_intraday import train_intraday_models as _fn  # type: ignore
+        return _fn(*args, **kwargs)
+    except Exception:
+        from .train_lightgbm_intraday import train_lightgbm_intraday as _fn  # type: ignore
+        return _fn(*args, **kwargs)
 
 
 def score_intraday_tickers(*args, **kwargs):
     """
     Lazy loader + compatibility wrapper for intraday scoring.
 
-    This adapts the canonical intraday scorer:
+    Adapts:
         score_intraday_batch(df, models)
-
-    into the higher-level API expected by:
+    into API used by:
         dt_backend.jobs.daytrading_job
     """
     from .ai_model_intraday import score_intraday_batch, load_intraday_models
@@ -80,24 +99,17 @@ def score_intraday_tickers(*args, **kwargs):
         rolling[sym] = node
         updated += 1
 
-    return {
-        "status": "ok",
-        "symbols_scored": updated,
-    }
+    return {"status": "ok", "symbols_scored": updated}
 
 
 def build_intraday_signals(*args, **kwargs):
-    """
-    Lazy loader for intraday signal builder.
-    """
+    """Lazy loader for intraday signal builder."""
     from .signals_rank_builder import build_intraday_signals as _fn
     return _fn(*args, **kwargs)
 
 
 def train_incremental_intraday(*args, **kwargs):
-    """
-    Lazy loader for online incremental training.
-    """
+    """Lazy loader for online incremental training."""
     from .continuous_learning_intraday import train_incremental_intraday as _fn
     return _fn(*args, **kwargs)
 
