@@ -34,6 +34,7 @@ ADD-ON:
 
 from __future__ import annotations
 
+import os
 import json
 import gzip
 import time
@@ -63,6 +64,58 @@ UNIVERSE_FILE = PATHS["universe"] / "master_universe.json"
 # -------------------------------------------------------------------
 VERBOSE_BOOTSTRAP = False          # per-ticker “Bootstrapped history for XYZ…”
 VERBOSE_BOOTSTRAP_ERRORS = False   # per-ticker YF failure messages
+
+
+# -------------------------------------------------------------------
+# YFinance safety knobs (rate limit mitigation)
+# -------------------------------------------------------------------
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(str(os.environ.get(name, "") or default).strip())
+    except Exception:
+        return default
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(str(os.environ.get(name, "") or default).strip())
+    except Exception:
+        return default
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = (os.environ.get(name, "") or "").strip().lower()
+    if v == "":
+        return default
+    if v in ("1", "true", "yes", "y", "on"):
+        return True
+    if v in ("0", "false", "no", "n", "off"):
+        return False
+    return default
+
+# Enable YF bootstrap (kept ON by default for backward compatibility).
+# Set AION_YF_BOOTSTRAP=0 to completely disable YFinance usage.
+YF_BOOTSTRAP_ENABLED = _env_bool("AION_YF_BOOTSTRAP", default=True)
+
+# Hard cap concurrent YF calls (critical: backfill itself is multi-threaded)
+YF_MAX_CONCURRENCY = max(1, _env_int("AION_YF_MAX_CONCURRENCY", 1))
+YF_MIN_SPACING_SECONDS = max(0.0, _env_float("AION_YF_MIN_SPACING_SECONDS", 0.15))
+YF_MAX_RETRIES = max(0, _env_int("AION_YF_MAX_RETRIES", 5))
+YF_BACKOFF_SECONDS = max(0.25, _env_float("AION_YF_BACKOFF_SECONDS", 2.0))
+
+_YF_SEM = None  # initialized lazily to avoid import-order surprises
+_YF_LAST_CALL_TS = 0.0
+_YF_TS_LOCK = Lock()
+
+def _yf_semaphore() -> "Lock":
+    # Lazily create semaphore-like lock pool.
+    # Using threading.Semaphore but typed loosely to keep py3.10/3.12 happy.
+    global _YF_SEM
+    if _YF_SEM is None:
+        try:
+            import threading
+            _YF_SEM = threading.Semaphore(int(YF_MAX_CONCURRENCY))
+        except Exception:
+            _YF_SEM = Lock()
+    return _YF_SEM
 
 # -------------------------------------------------------------------
 # NEW: Track symbols that fail YFinance bootstrap (thread-safe)
@@ -357,51 +410,123 @@ def fetch_sa_bundle_parallel(max_workers: int = 8) -> Dict[str, Dict[str, Any]]:
 # YF history bootstrap helpers
 # -------------------------------------------------------------------
 
+
 def _bootstrap_history_yf(symbol: str, max_days: int = MAX_HISTORY_DAYS) -> List[Dict[str, Any]]:
     """
     Fetch up to ~3 years of daily bars from YFinance for a symbol.
     Returns list of {date, open, high, low, close, volume}.
+
+    IMPORTANT:
+      - This call is rate-limit prone and must be concurrency-capped.
+      - We use a global semaphore + minimum spacing + exponential backoff.
+      - If YF is disabled (AION_YF_BOOTSTRAP=0), returns [] immediately.
     """
+    if not YF_BOOTSTRAP_ENABLED:
+        return []
+
     symbol = symbol.upper()
+
+    # Optional: yfinance exposes a dedicated error type in newer versions.
     try:
-        df = yf.download(
-            tickers=symbol,
-            interval="1d",
-            period="3y",         # ~3 calendar years
-            auto_adjust=False,   # explicit → no FutureWarning
-            progress=False,
-        )
-        if df is None or df.empty:
-            return []
+        from yfinance.exceptions import YFRateLimitError  # type: ignore
+    except Exception:
+        YFRateLimitError = Exception  # type: ignore
 
-        # Drop rows with all-NaN OHLCV
-        cols = ["Open", "High", "Low", "Close", "Volume"]
-        df = df[cols].dropna(how="all")
+    sem = _yf_semaphore()
 
-        bars: List[Dict[str, Any]] = []
-        # itertuples gives us plain Python scalars → no FutureWarning
-        for idx, open_, high, low, close, volume in df.itertuples():
-            bars.append(
-                {
-                    "date": idx.strftime("%Y-%m-%d"),
-                    "open": float(open_ or 0.0),
-                    "high": float(high or 0.0),
-                    "low": float(low or 0.0),
-                    "close": float(close or 0.0),
-                    "volume": float(volume or 0.0),
-                }
+    def _respect_spacing():
+        global _YF_LAST_CALL_TS
+        try:
+            with _YF_TS_LOCK:
+                now = time.time()
+                wait = float(YF_MIN_SPACING_SECONDS) - (now - float(_YF_LAST_CALL_TS))
+                if wait > 0:
+                    time.sleep(wait)
+                _YF_LAST_CALL_TS = time.time()
+        except Exception:
+            pass
+
+    # Retry loop
+    tries = 0
+    backoff = float(YF_BACKOFF_SECONDS)
+
+    while True:
+        tries += 1
+        try:
+            # Concurrency cap
+            try:
+                sem.acquire()
+            except Exception:
+                pass
+
+            _respect_spacing()
+
+            df = yf.download(
+                tickers=symbol,
+                interval="1d",
+                period="3y",         # ~3 calendar years
+                auto_adjust=False,   # explicit → no FutureWarning
+                progress=False,
+                threads=False,       # yfinance internal threading can amplify rate limits
             )
 
-        if not bars:
+            if df is None or df.empty:
+                return []
+
+            cols = ["Open", "High", "Low", "Close", "Volume"]
+            df = df[cols].dropna(how="all")
+
+            bars: List[Dict[str, Any]] = []
+            for idx, open_, high, low, close, volume in df.itertuples():
+                bars.append(
+                    {
+                        "date": idx.strftime("%Y-%m-%d"),
+                        "open": float(open_ or 0.0),
+                        "high": float(high or 0.0),
+                        "low": float(low or 0.0),
+                        "close": float(close or 0.0),
+                        "volume": float(volume or 0.0),
+                    }
+                )
+
+            if not bars:
+                return []
+
+            return bars[-max_days:]
+
+        except KeyboardInterrupt:
+            # If you really did Ctrl+C, honor it.
+            raise
+        except (YFRateLimitError,) as e:
+            # Hard rate limit — backoff and retry.
+            if tries <= int(YF_MAX_RETRIES):
+                if VERBOSE_BOOTSTRAP_ERRORS:
+                    log(f"⚠️ YF rate limited for {symbol} (try {tries}/{YF_MAX_RETRIES}): {e}")
+                time.sleep(backoff)
+                backoff = min(backoff * 1.8, 60.0)
+                continue
+            if VERBOSE_BOOTSTRAP_ERRORS:
+                log(f"⚠️ YF rate limit giving up for {symbol}: {e}")
             return []
+        except Exception as e:
+            # Many yfinance versions throw generic Exceptions with "Too Many Requests"
+            msg = str(e)
+            is_rl = ("Too Many Requests" in msg) or ("rate limit" in msg.lower())
+            if is_rl and tries <= int(YF_MAX_RETRIES):
+                if VERBOSE_BOOTSTRAP_ERRORS:
+                    log(f"⚠️ YF rate limited for {symbol} (try {tries}/{YF_MAX_RETRIES}): {msg}")
+                time.sleep(backoff)
+                backoff = min(backoff * 1.8, 60.0)
+                continue
 
-        # Keep only the most recent max_days bars
-        return bars[-max_days:]
-
-    except Exception as e:
-        if VERBOSE_BOOTSTRAP_ERRORS:
-            log(f"⚠️ YF bootstrap failed for {symbol}: {e}")
-        return []
+            if VERBOSE_BOOTSTRAP_ERRORS:
+                log(f"⚠️ YF bootstrap failed for {symbol}: {e}")
+            return []
+        finally:
+            try:
+                sem.release()
+            except Exception:
+                pass
 
 
 def _unique_history_dates(hist: List[Dict[str, Any]]) -> set[str]:
