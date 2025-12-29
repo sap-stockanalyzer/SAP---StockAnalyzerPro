@@ -52,16 +52,25 @@ def _encode_non_numeric(X: pd.DataFrame) -> pd.DataFrame:
     This keeps training resilient if any feature is categorical (e.g. vol_bucket).
     """
     X2 = X.copy()
+    min_i64 = np.iinfo("int64").min
 
     for c in list(X2.columns):
         s = X2[c]
+
+        # Datetimes -> int64 (nan-safe). Avoid Series.view() deprecation warnings.
         if pd.api.types.is_datetime64_any_dtype(s):
-            # nan-safe int timestamp (ns)
-            X2[c] = s.view("int64").fillna(0).astype(np.int64)
+            try:
+                vals = s.astype("int64")
+                # Pandas encodes NaT as int64 min; map that to 0.
+                vals = vals.where(vals != min_i64, 0)
+                X2[c] = vals.astype(np.int64)
+            except Exception:
+                X2[c] = 0
             continue
 
-        if pd.api.types.is_object_dtype(s) or pd.api.types.is_categorical_dtype(s):
-            # category codes: unseen -> -1; shift to >=0
+        # Object/categorical -> category codes (>=0)
+        is_cat = isinstance(s.dtype, pd.CategoricalDtype)
+        if pd.api.types.is_object_dtype(s) or is_cat:
             codes = pd.Categorical(s).codes.astype(np.int32)
             codes = np.where(codes < 0, 0, codes)
             X2[c] = codes
@@ -148,13 +157,22 @@ def _train_lgb(
 
     dtrain = lgb.Dataset(X, label=y.values, weight=w)
     log(f"[train_lightgbm_intraday] 🚀 Training on {len(X):,} rows, {X.shape[1]} features...")
+    # LightGBM version compatibility:
+    #   - Some installs (notably newer ones) removed/changed `verbose_eval`.
+    #   - Logging is controlled via callbacks instead.
+    callbacks = []
+    try:
+        callbacks.append(lgb.log_evaluation(period=50))
+    except Exception:
+        callbacks = []
+
     booster = lgb.train(
         params,
         dtrain,
         num_boost_round=300,
         valid_sets=[dtrain],
         valid_names=["train"],
-        verbose_eval=50,
+        callbacks=callbacks,
     )
     log("[train_lightgbm_intraday] ✅ Training complete.")
     return booster
@@ -190,6 +208,10 @@ def _save_artifacts(booster: lgb.Booster, feature_names: List[str]) -> None:
 
 def train_lightgbm_intraday() -> Dict[str, Any]:
     """High-level entrypoint to train & persist the intraday LightGBM model."""
+    try:
+        log(f"[train_lightgbm_intraday] ℹ️ Using LightGBM v{getattr(lgb, '__version__', '?')}")
+    except Exception:
+        pass
     X, y = _load_training_data()
     booster = _train_lgb(X, y)
     _save_artifacts(booster, list(X.columns))
