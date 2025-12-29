@@ -48,7 +48,7 @@ SUMMARY_FILE = PATHS["logs"] / "nightly" / "last_nightly_summary.json"
 # -----------------------------
 # Recent-run guard (NEW)
 # -----------------------------
-MIN_HOURS_BETWEEN_RUNS = 8
+MIN_HOURS_BETWEEN_RUNS = 0
 
 
 def _recent_nightly_ran_within(hours: int) -> bool:
