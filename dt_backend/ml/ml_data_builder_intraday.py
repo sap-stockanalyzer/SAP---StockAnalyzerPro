@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import json
-import pandas as pd
 
 from dt_backend.core.config_dt import DT_PATHS  # type: ignore
 from dt_backend.core.data_pipeline_dt import _read_rolling, log
 
+def _lazy_pd():
+    import pandas as pd
+    return pd
 
 def _intraday_news_dir() -> Path:
     root = DT_PATHS.get("ml_data_dt") or DT_PATHS.get("root") or "ml_data_dt"
