@@ -8,23 +8,16 @@ Saves artifacts under: DT_PATHS["dtmodels"] / "lightgbm_intraday"
   - model.txt
   - feature_map.json
   - label_map.json
-
-Why this patch exists:
-- Your runtime loader expects: dt_backend/models/lightgbm_intraday/model.txt
-- Your previous trainer was saving into get_model_dir("lightgbm") which can point
-  somewhere else (often dt_backend/models/lightgbm/...), leaving the intraday
-  path stuck with a placeholder file and causing:
-  [LightGBM] [Fatal] Unknown model format or submodel type
-
-This version *always* writes to the intraday folder and writes atomically.
 """
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Dict, Any, Tuple, List
 
 import lightgbm as lgb
+import numpy as np
 import pandas as pd
 
 try:
@@ -35,7 +28,7 @@ except Exception:
         "dtmodels": Path("dt_backend") / "models",
     }
 
-from dt_backend.models import LABEL_ORDER, LABEL2ID, ID2LABEL
+from dt_backend.models import LABEL_ORDER, LABEL2ID, ID2LABEL, get_model_dir
 
 try:
     from dt_backend.core.data_pipeline_dt import log  # type: ignore
@@ -45,8 +38,42 @@ except Exception:
 
 
 def _resolve_training_data() -> Path:
-    base = Path(DT_PATHS.get("dtml_data", Path("ml_data_dt")))
-    return base / "training_data_intraday.parquet"
+    # Accept multiple keys to match refactors
+    for key in ("dtml_data", "ml_data_dt", "ml_data"):
+        base = DT_PATHS.get(key)
+        if base:
+            return Path(base) / "training_data_intraday.parquet"
+    return Path("ml_data_dt") / "training_data_intraday.parquet"
+
+
+def _encode_non_numeric(X: pd.DataFrame) -> pd.DataFrame:
+    """Convert object/category/datetime columns to numeric codes.
+
+    This keeps training resilient if any feature is categorical (e.g. vol_bucket).
+    """
+    X2 = X.copy()
+
+    for c in list(X2.columns):
+        s = X2[c]
+        if pd.api.types.is_datetime64_any_dtype(s):
+            # nan-safe int timestamp (ns)
+            X2[c] = s.view("int64").fillna(0).astype(np.int64)
+            continue
+
+        if pd.api.types.is_object_dtype(s) or pd.api.types.is_categorical_dtype(s):
+            # category codes: unseen -> -1; shift to >=0
+            codes = pd.Categorical(s).codes.astype(np.int32)
+            codes = np.where(codes < 0, 0, codes)
+            X2[c] = codes
+            continue
+
+    # Ensure everything is numeric
+    for c in list(X2.columns):
+        if not pd.api.types.is_numeric_dtype(X2[c]) and not pd.api.types.is_bool_dtype(X2[c]):
+            X2 = X2.drop(columns=[c])
+
+    X2 = X2.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return X2
 
 
 def _load_training_data() -> Tuple[pd.DataFrame, pd.Series]:
@@ -70,17 +97,21 @@ def _load_training_data() -> Tuple[pd.DataFrame, pd.Series]:
     else:
         raise ValueError("Training data must contain 'label' or 'label_id' column.")
 
-    X = df.drop(columns=[c for c in ("label", "label_id") if c in df.columns])
+    # Drop non-feature columns
+    drop_cols = [c for c in ("label", "label_id", "symbol") if c in df.columns]
+    X = df.drop(columns=drop_cols)
 
-    # Keep only numeric columns (LightGBM can handle categorical, but you must
-    # explicitly encode; safest default for intraday stability is numeric-only).
-    non_numeric = [c for c in X.columns if not pd.api.types.is_numeric_dtype(X[c])]
-    if non_numeric:
-        log(f"[train_lightgbm_intraday] ⚠️ Dropping non-numeric columns: {non_numeric[:10]}{'...' if len(non_numeric)>10 else ''}")
-        X = X.drop(columns=non_numeric)
+    # ts can be useful, but encode to int. If missing it's fine.
+    X = _encode_non_numeric(X)
 
-    if X.shape[1] == 0:
-        raise ValueError("No usable numeric feature columns found after filtering.")
+    # Ensure we have enough label variety for multiclass
+    uniq = sorted(set(int(v) for v in y.unique().tolist()))
+    if len(uniq) < 2:
+        raise ValueError(
+            f"Not enough label variety for training (unique labels={uniq}). "
+            "This usually means your dataset is too small or returns are flat. "
+            "Try building with more symbols or during active market hours."
+        )
 
     return X, y
 
@@ -101,18 +132,26 @@ def _train_lgb(
             "feature_fraction": 0.9,
             "bagging_fraction": 0.9,
             "bagging_freq": 1,
-            "min_data_in_leaf": 50,
+            "min_data_in_leaf": 20,
             "seed": 42,
             "verbosity": -1,
         }
 
-    dtrain = lgb.Dataset(X, label=y.values)
+    # class weights can help if quantiles aren't perfectly balanced
+    try:
+        counts = y.value_counts().to_dict()
+        total = float(len(y))
+        weights = {int(k): total / (len(counts) * float(v)) for k, v in counts.items() if v}
+        w = y.map(lambda k: weights.get(int(k), 1.0)).astype(float).values
+    except Exception:
+        w = None
 
+    dtrain = lgb.Dataset(X, label=y.values, weight=w)
     log(f"[train_lightgbm_intraday] 🚀 Training on {len(X):,} rows, {X.shape[1]} features...")
     booster = lgb.train(
         params,
         dtrain,
-        num_boost_round=400,
+        num_boost_round=300,
         valid_sets=[dtrain],
         valid_names=["train"],
         verbose_eval=50,
@@ -121,45 +160,28 @@ def _train_lgb(
     return booster
 
 
-def _model_dir_intraday() -> Path:
-    # IMPORTANT: Always match the runtime loader path
-    base = Path(DT_PATHS.get("dtmodels", Path("dt_backend") / "models"))
-    return base / "lightgbm_intraday"
-
-
-def _atomic_write_text(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
-
-
-def _save_artifacts(booster: lgb.Booster, feature_names: list[str]) -> None:
-    model_dir = _model_dir_intraday()
+def _save_artifacts(booster: lgb.Booster, feature_names: List[str]) -> None:
+    model_dir = get_model_dir("lightgbm")
     model_dir.mkdir(parents=True, exist_ok=True)
 
     model_path = model_dir / "model.txt"
     fmap_path = model_dir / "feature_map.json"
     label_map_path = model_dir / "label_map.json"
 
-    # Atomic model save: write to temp then rename
-    tmp_model = model_path.with_suffix(".txt.tmp")
-    booster.save_model(str(tmp_model))
-    tmp_model.replace(model_path)
-
-    _atomic_write_text(fmap_path, json.dumps(feature_names, ensure_ascii=False, indent=2))
-
-    _atomic_write_text(
-        label_map_path,
-        json.dumps(
+    booster.save_model(str(model_path))
+    with fmap_path.open("w", encoding="utf-8") as f:
+        json.dump(feature_names, f, ensure_ascii=False, indent=2)
+    with label_map_path.open("w", encoding="utf-8") as f:
+        json.dump(
             {
                 "label_order": LABEL_ORDER,
                 "label2id": LABEL2ID,
                 "id2label": ID2LABEL,
             },
+            f,
             ensure_ascii=False,
             indent=2,
-        ),
-    )
+        )
 
     log(f"[train_lightgbm_intraday] 💾 Saved model → {model_path}")
     log(f"[train_lightgbm_intraday] 💾 Saved feature_map → {fmap_path}")
@@ -175,7 +197,7 @@ def train_lightgbm_intraday() -> Dict[str, Any]:
         "n_rows": int(len(X)),
         "n_features": int(X.shape[1]),
         "label_order": LABEL_ORDER,
-        "model_dir": str(_model_dir_intraday()),
+        "labels": sorted(set(int(v) for v in y.unique().tolist())),
     }
     log(f"[train_lightgbm_intraday] 📊 Summary: {summary}")
     return summary

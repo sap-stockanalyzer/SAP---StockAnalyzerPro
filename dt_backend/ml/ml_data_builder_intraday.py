@@ -1,46 +1,32 @@
-# dt_backend/ml/ml_data_builder_intraday.py — v5.1.1 (NEWS-AWARE + SAFE + RUNNABLE)
-"""
-Builds the intraday *dataset parquet* used by train_lightgbm_intraday.py.
-
-What this produces:
-- A parquet file at: <DT_PATHS['dtml_data'] or DT_PATHS['ml_data_dt']>/training_data_intraday.parquet
-- Rows are built from rolling[symbol]['features_dt'] (plus merged intraday news features)
-- If your features_dt already contains 'label' or 'label_id', it will be included automatically.
-  (If it doesn't, training will fail later — see notes in the chat.)
-
-This file previously had two practical issues:
-1) pandas was never actually imported (pd was undefined) → it would crash when building.
-2) Path resolution only considered DT_PATHS['dtml_data'] and ignored DT_PATHS['ml_data_dt'].
-
-This version fixes both, and adds a CLI so you can run:
-  python -m dt_backend.ml.ml_data_builder_intraday
-"""
-
+# dt_backend/ml/ml_data_builder_intraday.py — v5.2 (LABEL-AWARE + SAFE)
 from __future__ import annotations
 
+import argparse
+import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import json
-
 from dt_backend.core.config_dt import DT_PATHS  # type: ignore
 from dt_backend.core.data_pipeline_dt import _read_rolling, log
-
 
 def _lazy_pd():
     import pandas as pd
     return pd
 
 
+# -------------------------------
+# Intraday news intel (optional)
+# -------------------------------
 def _intraday_news_dir() -> Path:
-    base = (
-        DT_PATHS.get("dtml_data")
-        or DT_PATHS.get("ml_data_dt")
+    root = (
+        DT_PATHS.get("ml_data_dt")
+        or DT_PATHS.get("dtml_data")
         or DT_PATHS.get("root")
         or "ml_data_dt"
     )
-    d = Path(base) / "news_intraday"
+    d = Path(root) / "news_intraday"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -84,18 +70,22 @@ def _merge_news_into_features(sym: str, feats: Dict[str, Any], intel: Dict[str, 
     feats["news_buzz_score"] = float(buzz.get("buzz_score", 0.0) or 0.0)
 
 
+# -------------------------------
+# Timestamp inference
+# -------------------------------
 def _infer_ts(node: Dict[str, Any]) -> datetime | None:
     feats = node.get("features_dt") or {}
     ts_raw = feats.get("ts") or feats.get("timestamp")
 
     if isinstance(ts_raw, str):
-        try:
-            return datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-        except Exception:
+        for fmt in ("%Y-%m-%d %H:%M:%S",):
             try:
-                return datetime.strptime(ts_raw.split(".")[0], "%Y-%m-%d %H:%M:%S")
+                return datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
             except Exception:
-                pass
+                try:
+                    return datetime.strptime(ts_raw.split(".")[0], fmt)
+                except Exception:
+                    pass
 
     if isinstance(ts_raw, (int, float)):
         try:
@@ -109,6 +99,7 @@ def _infer_ts(node: Dict[str, Any]) -> datetime | None:
         if not isinstance(bar, dict):
             continue
         cand = bar.get("ts") or bar.get("t") or bar.get("timestamp")
+        dt = None
         if isinstance(cand, str):
             try:
                 dt = datetime.fromisoformat(cand.replace("Z", "+00:00"))
@@ -116,55 +107,38 @@ def _infer_ts(node: Dict[str, Any]) -> datetime | None:
                 try:
                     dt = datetime.strptime(cand.split(".")[0], "%Y-%m-%d %H:%M:%S")
                 except Exception:
-                    continue
+                    dt = None
         elif isinstance(cand, (int, float)):
             try:
                 dt = datetime.utcfromtimestamp(float(cand))
             except Exception:
-                continue
-        else:
-            continue
+                dt = None
 
+        if dt is None:
+            continue
         if latest_ts is None or dt > latest_ts:
             latest_ts = dt
 
     return latest_ts or datetime.utcnow()
 
 
+# -------------------------------
+# Dataset paths
+# -------------------------------
 def _resolve_dataset_paths() -> List[Path]:
-    """
-    Return primary + mirror locations for the dataset parquet.
-
-    Priority:
-      1) DT_PATHS['dtml_intraday_dataset'] if present (explicit full path)
-      2) <DT_PATHS['dtml_data']>/training_data_intraday.parquet
-      3) <DT_PATHS['ml_data_dt']>/training_data_intraday.parquet
-      4) ./ml_data_dt/training_data_intraday.parquet
-    """
     paths: List[Path] = []
 
+    # canonical keys (we accept multiple to stay compatible with refactors)
     if "dtml_intraday_dataset" in DT_PATHS:
-        try:
-            paths.append(Path(DT_PATHS["dtml_intraday_dataset"]))
-        except Exception:
-            pass
-
+        paths.append(Path(DT_PATHS["dtml_intraday_dataset"]))
     if "dtml_data" in DT_PATHS:
-        try:
-            paths.append(Path(DT_PATHS["dtml_data"]) / "training_data_intraday.parquet")
-        except Exception:
-            pass
-
+        paths.append(Path(DT_PATHS["dtml_data"]) / "training_data_intraday.parquet")
     if "ml_data_dt" in DT_PATHS:
-        try:
-            paths.append(Path(DT_PATHS["ml_data_dt"]) / "training_data_intraday.parquet")
-        except Exception:
-            pass
+        paths.append(Path(DT_PATHS["ml_data_dt"]) / "training_data_intraday.parquet")
 
     if not paths:
         paths.append(Path("ml_data_dt") / "training_data_intraday.parquet")
 
-    # de-dupe while keeping order
     seen = set()
     out: List[Path] = []
     for p in paths:
@@ -179,7 +153,82 @@ def _resolve_dataset_paths() -> List[Path]:
     return out
 
 
+# -------------------------------
+# Label helpers (FAST / SAFE)
+# -------------------------------
+_LABEL2ID = {"SELL": 0, "HOLD": 1, "BUY": 2}
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        v = (os.environ.get(name, "") or "").strip()
+        return float(v) if v else float(default)
+    except Exception:
+        return float(default)
+
+def _auto_label_from_returns(df) -> None:
+    """Add label + label_id using a *cross-sectional* return signal.
+
+    Why this exists:
+      - Your current builder is a snapshot builder (one row per symbol).
+      - That means we don't have a forward-looking target without a replay store.
+      - But your pipeline needs a real LightGBM model file to avoid crashing.
+      - So we auto-label using returns across symbols (quantiles) as a bootstrap.
+
+    Source column priority:
+      1) pct_chg_from_open
+      2) intraday_return
+      3) last_price (fallback -> no labels)
+    """
+    if "label" in df.columns or "label_id" in df.columns:
+        return
+
+    src = None
+    for cand in ("pct_chg_from_open", "intraday_return"):
+        if cand in df.columns:
+            src = cand
+            break
+
+    if src is None:
+        return
+
+    r = df[src].astype(float)
+
+    # Quantile labeling produces all 3 classes for most real distributions.
+    # Safety thresholds allow you to widen/narrow HOLD band.
+    q_lo = _env_float("DT_LABEL_Q_LO", 0.33)
+    q_hi = _env_float("DT_LABEL_Q_HI", 0.67)
+    q_lo = max(0.05, min(0.49, q_lo))
+    q_hi = max(0.51, min(0.95, q_hi))
+
+    lo = float(r.quantile(q_lo))
+    hi = float(r.quantile(q_hi))
+
+    # If distribution is degenerate (lo==hi), fall back to sign-based.
+    if not (hi > lo):
+        mild = _env_float("DT_LABEL_MILD", 0.0015)
+        def _lab(x: float) -> str:
+            if x >= mild:
+                return "BUY"
+            if x <= -mild:
+                return "SELL"
+            return "HOLD"
+        labs = r.apply(lambda x: _lab(float(x)))
+    else:
+        def _lab(x: float) -> str:
+            if x <= lo:
+                return "SELL"
+            if x >= hi:
+                return "BUY"
+            return "HOLD"
+        labs = r.apply(lambda x: _lab(float(x)))
+
+    df["label"] = labs.astype(str)
+    df["label_id"] = df["label"].map(_LABEL2ID).astype(int)
+
+
 def build_intraday_dataset(max_symbols: int | None = None) -> Dict[str, Any]:
+    pd = _lazy_pd()
+
     rolling = _read_rolling()
     if not rolling:
         log("[dt_ml_builder] ⚠️ rolling empty, nothing to build.")
@@ -203,7 +252,7 @@ def build_intraday_dataset(max_symbols: int | None = None) -> Dict[str, Any]:
         if not isinstance(feats_raw, dict) or not feats_raw:
             continue
 
-        # ✅ IMPORTANT: copy so we do NOT mutate rolling[sym]["features_dt"]
+        # copy so we do NOT mutate rolling[sym]["features_dt"]
         feats = dict(feats_raw)
 
         _merge_news_into_features(sym, feats, intraday_news)
@@ -222,21 +271,21 @@ def build_intraday_dataset(max_symbols: int | None = None) -> Dict[str, Any]:
         log("[dt_ml_builder] ⚠️ no feature rows to write.")
         return {"status": "no_rows", "rows": 0, "symbols": 0}
 
-    pd = _lazy_pd()
     df = pd.DataFrame.from_records(rows)
+
+    # ✅ add labels (bootstrap) if they aren't already present
+    _auto_label_from_returns(df)
 
     paths = _resolve_dataset_paths()
 
     try:
         primary = paths[0]
+        cols = list(df.columns)
         for i, p in enumerate(paths):
             p.parent.mkdir(parents=True, exist_ok=True)
             df.to_parquet(p, index=False)
             if i == 0:
-                log(
-                    f"[dt_ml_builder] ✅ wrote primary dataset → {p} "
-                    f"(rows={len(df)}, symbols={df['symbol'].nunique()})"
-                )
+                log(f"[dt_ml_builder] ✅ wrote primary dataset → {p} (rows={len(df)}, symbols={df['symbol'].nunique()})")
             else:
                 log(f"[dt_ml_builder] ↳ mirrored dataset → {p}")
 
@@ -245,7 +294,8 @@ def build_intraday_dataset(max_symbols: int | None = None) -> Dict[str, Any]:
             "rows": int(len(df)),
             "symbols": int(df["symbol"].nunique()),
             "path": str(primary),
-            "columns": list(df.columns),
+            "columns": cols,
+            "labeled": bool(("label" in df.columns) or ("label_id" in df.columns)),
         }
     except Exception as e:
         log(f"[dt_ml_builder] ⚠️ failed to write dataset(s) {paths}: {e}")
@@ -253,11 +303,9 @@ def build_intraday_dataset(max_symbols: int | None = None) -> Dict[str, Any]:
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Build intraday dataset parquet for DT LightGBM training.")
-    parser.add_argument("--max_symbols", type=int, default=None, help="Optional cap for debugging (e.g. 500).")
+    parser = argparse.ArgumentParser(description="Build intraday ML dataset (snapshot) from rolling features_dt.")
+    parser.add_argument("--max_symbols", type=int, default=None)
     args = parser.parse_args()
 
-    out = build_intraday_dataset(max_symbols=args.max_symbols)
-    log(f"[dt_ml_builder] 📊 Result: {out}")
+    res = build_intraday_dataset(max_symbols=args.max_symbols)
+    log(f"[dt_ml_builder] 📊 Result: {res}")
