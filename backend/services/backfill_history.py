@@ -1,6 +1,6 @@
 # backend/services/backfill_history.py
 """
-backfill_history.py — v3.3 (+ universe auto-prune on YF miss)
+backfill_history.py — v3.4 (+ universe auto-prune on YF miss)
 (Rolling-Native, Normalized Batch StockAnalysis Bundle, YF History Bootstrap)
 
 Purpose:
@@ -743,7 +743,9 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
 
             # Ensure multi-day history via YF if too short
             hist = node.get("history") or []
-            hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
+            if mode != "fallback":
+                hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
+
 
             sa = sa_bundle.get(sym_u) if sa_bundle else None
             if not sa:
@@ -804,7 +806,8 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
 
             hist = node.get("history") or []
             # Ensure enough history first
-            hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
+            if mode != "fallback":
+                hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
 
             # If already have today's bar, skip
             if hist and str(hist[-1].get("date")) == today:
