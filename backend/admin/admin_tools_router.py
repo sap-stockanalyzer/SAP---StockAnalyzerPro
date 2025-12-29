@@ -8,14 +8,24 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from typing import List, Optional
 
 from backend.admin.deps import admin_required
 from backend.core.config import PATHS
+from config import ROOT
 from utils.live_log import tail_lines
+
+from admin_keys import SUPABASE_BUCKET, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_URL
+from backend.services.supabase_sync import sync_to_supabase, supabase_configured
 
 router = APIRouter(prefix="/admin/tools", tags=["admin-tools"])
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+class SupabaseSyncRequest(BaseModel):
+    dry_run: bool = False
+    targets: Optional[List[str]] = None
+
 
 from backend.historical_replay_swing.job_manager import REPLAY_STATE_PATH
 SWING_REPLAY_STATE = REPLAY_STATE_PATH
@@ -25,8 +35,10 @@ SWING_REPLAY_STATE = REPLAY_STATE_PATH
 # ------------------------------------------------------------------
 
 LOCK_DIRS = [
-    PROJECT_ROOT / "data" / "locks",
-    PROJECT_ROOT / "data" / "replay" / "locks",
+    ROOT / "data" / "locks",
+    ROOT / "data" / "replay" / "locks",
+    Path(PATHS.get("nightly_lock")).parent if PATHS.get("nightly_lock") else (ROOT / "da_brains"),
+    Path(PATHS.get("swing_replay_lock")).parent if PATHS.get("swing_replay_lock") else (ROOT / "data" / "replay" / "locks"),
 ]
 
 # ------------------------------------------------------------------
@@ -123,6 +135,34 @@ def refresh_universes_tool(user=Depends(admin_required)):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------
+# Supabase manual sync
+# --------------------------------------------------
+
+@router.get("/supabase/status")
+def supabase_status(_: None = Depends(admin_required)):
+    return {
+        "configured": bool(supabase_configured()),
+        "url_present": bool(SUPABASE_URL),
+        "service_key_present": bool(SUPABASE_SERVICE_ROLE_KEY),
+        "bucket": (SUPABASE_BUCKET or "aion"),
+    }
+
+
+@router.post("/supabase/sync")
+def supabase_sync(req: SupabaseSyncRequest, _: None = Depends(admin_required)):
+    res = sync_to_supabase(dry_run=bool(req.dry_run), targets=req.targets)
+    # dataclass -> jsonable dict
+    return {
+        "status": "ok" if not res.errors else "partial",
+        "uploaded": res.uploaded,
+        "skipped": res.skipped,
+        "missing": res.missing,
+        "errors": res.errors,
+    }
+
 
 # --------------------------------------------------
 # Git pull

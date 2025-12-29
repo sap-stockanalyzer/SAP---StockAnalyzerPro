@@ -54,6 +54,18 @@ except Exception:
     DT_PATHS = {}  # type: ignore
 
 try:
+    from admin_keys import ALPACA_API_KEY_ID as _ALPACA_KEY_ID, ALPACA_API_SECRET_KEY as _ALPACA_SECRET, ALPACA_PAPER_BASE_URL as _ALPACA_PAPER
+except Exception:
+    _ALPACA_KEY_ID = ""
+    _ALPACA_SECRET = ""
+    _ALPACA_PAPER = ""
+
+try:
+    from settings import BOT_KNOBS_DEFAULTS
+except Exception:
+    BOT_KNOBS_DEFAULTS = {}
+
+try:
     from backend.core.config import PATHS, TIMEZONE  # type: ignore
 except Exception:
     try:
@@ -107,6 +119,9 @@ ML_DATA_DT_DIR = PATHS.get("ml_data_dt", ROOT / "ml_data_dt")
 SIM_LOG_DIR = str(ML_DATA_DT_DIR / "sim_logs")
 SIM_SUMMARY_FILE = str(ML_DATA_DT_DIR / "sim_summary.json")
 
+# UI-facing intraday bot knobs store (edited via /api/intraday/configs)
+INTRADAY_UI_STORE = str(ML_DATA_DT_DIR / "config" / "intraday_bots_ui.json")
+
 # Universe cap (optional — to keep sim light)
 MAX_UNIVERSE = 2000  # consider only the first N symbols that have bars
 
@@ -116,9 +131,9 @@ STOP_FLAG_FILE = str(PATHS.get("logs", ROOT / "logs") / "bots" / "daytrader_stop
 # Execution mode + Alpaca config
 EXECUTION_MODE: str = "sim"  # "sim", "paper", "live"
 _ALPACA = None  # lazily initialized REST client
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
-ALPACA_PAPER_URL = os.getenv("ALPACA_PAPER_URL", "https://paper-api.alpaca.markets")
+ALPACA_API_KEY = (_ALPACA_KEY_ID or os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID"))
+ALPACA_SECRET_KEY = (_ALPACA_SECRET or os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY"))
+ALPACA_PAPER_URL = (_ALPACA_PAPER or os.getenv("ALPACA_PAPER_URL", "https://paper-api.alpaca.markets"))
 ALPACA_LIVE_URL = os.getenv("ALPACA_LIVE_URL", "https://api.alpaca.markets")
 
 # ----------------------------------------------------------------------
@@ -426,15 +441,106 @@ def _algo_send_order(
 # ----------------------------------------------------------------------
 
 
+
+
+# ----------------------------------------------------------------------
+# Intraday bots UI config store (knobs)
+# ----------------------------------------------------------------------
+
+def _load_intraday_ui_store() -> dict:
+    try:
+        p = INTRADAY_UI_STORE
+        if os.path.exists(p):
+            with open(p, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _get_intraday_defaults() -> dict:
+    try:
+        d = BOT_KNOBS_DEFAULTS.get("intraday", {}) if isinstance(BOT_KNOBS_DEFAULTS, dict) else {}
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _get_bot_ui_cfg(bot_name: str) -> dict:
+    store = _load_intraday_ui_store()
+    bots = store.get("bots") if isinstance(store, dict) else None
+    node = (bots or {}).get(bot_name) if isinstance(bots, dict) else None
+    if isinstance(node, dict):
+        return node
+    return {}
+
 class BaseSimBot:
     def __init__(self, name: str):
         self.name = name
         self.cash = START_CASH
+        # UI knobs (defaults can be overridden per bot via intraday_bots_ui.json)
+        d = _get_intraday_defaults()
+        self.enabled: bool = bool(d.get("enabled", True))
+        self.max_alloc_dollars: float = float(d.get("max_alloc", 0.0) or 0.0)
+        self.max_positions: int = int(d.get("max_positions", MAX_POSITIONS) or MAX_POSITIONS)
+        sl = float(d.get("stop_loss", abs(STOP_LOSS_PCT) * 100.0) or abs(STOP_LOSS_PCT) * 100.0)
+        tp = float(d.get("take_profit", abs(TAKE_PROFIT_PCT) * 100.0) or abs(TAKE_PROFIT_PCT) * 100.0)
+        self.stop_loss_pct: float = -abs(sl) / 100.0
+        self.take_profit_pct: float = abs(tp) / 100.0
+        self.min_confidence: float = float(d.get("min_confidence", 0.55) or 0.55)
+        self.max_daily_trades: int = int(d.get("max_daily_trades", 0) or 0)
+        self.position_size_pct: float = float(d.get("position_size_pct", POSITION_SIZE_PCT) or POSITION_SIZE_PCT)
         self.positions: Dict[str, dict] = {}  # {sym: {"qty": float, "entry": float, "stop": float, "target": float}}
         self.trades: List[dict] = []
         self.daily_equity: List[Tuple[str, float]] = []  # (iso_ts, equity)
-        self.max_positions = MAX_POSITIONS
         self._last_synced_trade_idx: int = 0  # for paper-sync
+
+
+    def apply_ui_cfg(self, ui: dict) -> None:
+        """Apply per-bot UI knobs from intraday_bots_ui.json."""
+        if not isinstance(ui, dict) or not ui:
+            return
+        if "enabled" in ui:
+            self.enabled = bool(ui.get("enabled", True))
+        if "max_alloc" in ui:
+            try:
+                self.max_alloc_dollars = float(ui.get("max_alloc") or 0.0)
+            except Exception:
+                pass
+        if "max_positions" in ui:
+            try:
+                self.max_positions = int(ui.get("max_positions") or self.max_positions)
+            except Exception:
+                pass
+        if "stop_loss" in ui:
+            try:
+                v = float(ui.get("stop_loss") or 0.0)
+                self.stop_loss_pct = -abs(v) / 100.0
+            except Exception:
+                pass
+        if "take_profit" in ui:
+            try:
+                v = float(ui.get("take_profit") or 0.0)
+                self.take_profit_pct = abs(v) / 100.0
+            except Exception:
+                pass
+        if "min_confidence" in ui:
+            try:
+                self.min_confidence = float(ui.get("min_confidence") or self.min_confidence)
+            except Exception:
+                pass
+        if "max_daily_trades" in ui:
+            try:
+                self.max_daily_trades = int(ui.get("max_daily_trades") or 0)
+            except Exception:
+                pass
+        # Optional: override sizing percent directly if provided
+        if "position_size_pct" in ui:
+            try:
+                self.position_size_pct = float(ui.get("position_size_pct") or self.position_size_pct)
+            except Exception:
+                pass
 
     # ------- portfolio helpers -------
     def equity(self, price_map: Dict[str, float]) -> float:
@@ -453,7 +559,18 @@ class BaseSimBot:
                 expo += pos["qty"] * px
         return expo
 
+    def _buy_count(self) -> int:
+        try:
+            return sum(1 for t in (self.trades or []) if str(t.get("action","")).upper() == "BUY")
+        except Exception:
+            return 0
+
+
     def can_open(self) -> bool:
+        if not self.enabled:
+            return False
+        if self.max_daily_trades and self._buy_count() >= self.max_daily_trades:
+            return False
         return len(self.positions) < self.max_positions
 
     def _enter(self, sym: str, price: float, reason: str, bar: Optional[dict] = None):
@@ -462,12 +579,14 @@ class BaseSimBot:
         # simple sizing by percentage of equity
         price_map = {sym: price}
         eq = self.equity(price_map)
-        risk_capital = eq * POSITION_SIZE_PCT
+        risk_capital = eq * float(self.position_size_pct or POSITION_SIZE_PCT)
+        if self.max_alloc_dollars and self.max_alloc_dollars > 0:
+            risk_capital = min(risk_capital, float(self.max_alloc_dollars))
         if risk_capital <= 0 or price <= 0:
             return
         qty = max(1.0, risk_capital / price)
-        stop = price * (1.0 + STOP_LOSS_PCT)
-        target = price * (1.0 + TAKE_PROFIT_PCT)
+        stop = price * (1.0 + float(self.stop_loss_pct))
+        target = price * (1.0 + float(self.take_profit_pct))
 
         self.cash -= qty * price
         self.positions[sym] = {"qty": qty, "entry": price, "stop": stop, "target": target}
@@ -631,7 +750,7 @@ class SignalFollowBot(BaseSimBot):
         sig = str(info.get("signal", "")).upper()
         conf = float(info.get("confidence") or 0.0)
         price = float(bar.get("price") or 0.0)
-        if sig == "BUY" and conf >= 0.55 and price > 0:
+        if sig == "BUY" and conf >= float(self.min_confidence or 0.0) and price > 0:
             self._enter(sym, price, f"AI_BUY_{conf:.2f}", bar)
 
     def maybe_exit(self, sym, bar, signals):
@@ -737,6 +856,8 @@ def _loop_once(bots: List[BaseSimBot]) -> bool:
 
     # Step bots
     for bot in bots:
+        if not getattr(bot, "enabled", True):
+            continue
         try:
             bot.step(market, signals)
             bot.sync_trades_to_broker(market)
@@ -812,6 +933,15 @@ def run_all_bots(exec_mode: str = "sim", run_minutes: Optional[int] = None) -> N
         BreakoutBot(),
         HybridBot(),
     ]
+
+    # Apply per-bot UI knobs (if present)
+    for b in bots:
+        try:
+            ui_cfg = _get_bot_ui_cfg(b.name)
+            b.apply_ui_cfg(ui_cfg)
+        except Exception:
+            continue
+
     log(f"🤖 SimTrader v3.0 started — mode={exec_mode.upper()} | bots={ [b.name for b in bots] } | start_cash=${START_CASH:.2f}")
 
     loops = 0

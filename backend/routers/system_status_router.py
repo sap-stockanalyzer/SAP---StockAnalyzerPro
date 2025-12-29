@@ -18,11 +18,13 @@ import pytz
 from backend.core.supervisor_agent import supervisor_verdict
 from backend.core.data_pipeline import _read_rolling
 from backend.core.config import PATHS
+from config import ROOT
+from settings import TIMEZONE
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
-LOG_DIR = Path("ml_data/logs")
-CST = pytz.timezone("America/Chicago")
+LOG_DIR = PATHS.get("nightly_logs", Path(PATHS.get("logs", ROOT / "logs")) / "nightly")
+TZ = TIMEZONE
 
 # Frequency windows (in hours)
 FREQ_HOURS = {
@@ -74,7 +76,7 @@ def get_system_status():
       - SupervisorAgent v3.0 verdict
       - Rolling coverage stats
     """
-    now = datetime.now(CST)
+    now = datetime.now(TZ)
     last_runs = parse_last_runs()
     data = []
 
@@ -88,7 +90,7 @@ def get_system_status():
 
         if last_ts_str:
             try:
-                last_dt = CST.localize(datetime.strptime(last_ts_str, "%Y-%m-%d %H:%M:%S"))
+                last_dt = TZ.localize(datetime.strptime(last_ts_str, "%Y-%m-%d %H:%M:%S"))
                 delta = (now - last_dt).total_seconds() / 3600
 
                 if delta <= freq + 1:
@@ -130,7 +132,7 @@ def get_system_status():
 
     return {
         "status": "ok",
-        "server_time": now.strftime("%Y-%m-%d %H:%M:%S CST"),
+        "server_time": now.strftime("%Y-%m-%d %H:%M:%S TZ"),
         "jobs": data,
         "supervisor": supervisor,
         "coverage": coverage,

@@ -82,6 +82,40 @@ INSIGHTS_DIR = Path(PATHS.get("insights", ROOT / "insights"))
 BOT_CONFIG_FILE = STOCK_CACHE / "master" / "bot" / "configs.json"
 
 
+# UI overrides store (enabled/aggression) — bots page controls.
+# Engine respects "enabled": false by skipping runs.
+_UI_OVERRIDES_PATH = None
+
+def _bot_ui_overrides_path() -> Path:
+    global _UI_OVERRIDES_PATH
+    if _UI_OVERRIDES_PATH is not None:
+        return _UI_OVERRIDES_PATH
+    try:
+        p = PATHS.get("bots_ui_overrides")
+        if p:
+            _UI_OVERRIDES_PATH = Path(p)
+            return _UI_OVERRIDES_PATH
+    except Exception:
+        pass
+    _UI_OVERRIDES_PATH = ML_DATA / "config" / "bots_ui_overrides.json"
+    return _UI_OVERRIDES_PATH
+
+
+def _bot_is_enabled(bot_key: str) -> bool:
+    p = _bot_ui_overrides_path()
+    try:
+        if p.exists():
+            obj = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(obj, dict):
+                node = obj.get(bot_key) or {}
+                if isinstance(node, dict) and ("enabled" in node):
+                    return bool(node.get("enabled"))
+    except Exception:
+        pass
+    return True
+
+
+
 # ---------------------------------------------------------------------
 # Utility helpers
 # ---------------------------------------------------------------------
@@ -882,6 +916,10 @@ class SwingBot:
         Dispatch method used by runners.
         mode ∈ {"full", "loop"}
         """
+        if not _bot_is_enabled(self.cfg.bot_key):
+            log(f"[{self.cfg.bot_key}] ⏸ Bot disabled via UI — skipping run.")
+            return
+
         if mode == "loop":
             self.run_loop()
         else:

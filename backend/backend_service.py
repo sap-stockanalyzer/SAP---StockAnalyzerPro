@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from backend.core.config import PATHS, TIMEZONE
+from config import ensure_project_structure
 
 # Scheduler runner (optional fallback)
 try:
@@ -35,6 +36,7 @@ except ImportError:
 # Routers (centralized from backend/routers/)
 # ----------------------------------------------
 from backend.routers.system_status_router import router as system_router
+from backend.routers.diagnostics_router import router as diagnostics_router
 from backend.routers.insights_router import router as insights_router
 from backend.routers.live_prices_router import router as live_prices_router
 from backend.routers.intraday_router import router as intraday_router
@@ -82,6 +84,7 @@ app.add_middleware(
 # -------------------------------------------------
 
 app.include_router(system_router)
+app.include_router(diagnostics_router)
 app.include_router(insights_router)
 app.include_router(live_prices_router)
 app.include_router(intraday_router)
@@ -144,6 +147,9 @@ def _scheduler_thread():
 
 
 def _print_root_path():
+
+    # Ensure required folders/files exist (locks, configs, logs, bots UI stores, etc.)
+    ensure_project_structure()
     try:
         root = PATHS.get("root")
         print(f"[Backend] 📦 Root path: {root}", flush=True)

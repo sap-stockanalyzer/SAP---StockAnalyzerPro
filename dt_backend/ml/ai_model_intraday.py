@@ -43,7 +43,7 @@ class LoadedModels:
 # ----- LightGBM loader -----
 
 def _load_lgbm() -> Tuple[Optional[lgb.Booster], Optional[list[str]]]:
-    model_dir = get_model_dir("lightgbm")
+    model_dir = get_model_dir("lightgbm_intraday")  # canonical intraday artifact folder
     model_path = model_dir / "model.txt"
     fmap_path = model_dir / "feature_map.json"
 

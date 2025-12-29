@@ -169,58 +169,9 @@ def _resolve_dataset_path(dataset_name: str) -> Path:
 
 
 # ==========================================================
-# FIX: missing underscore helpers (import * does NOT import _names)
+# Underscore helpers
+# (Imported from target_builder; do not redefine here — keep single source of truth.)
 # ==========================================================
-def _preflight_dataset_or_die(df_path: Path) -> None:
-    """
-    Fail fast if the dataset is missing/unreadable.
-
-    underscore-prefixed names are NOT imported via `from module import *`
-    unless explicitly re-exported in __all__.
-    """
-    try:
-        df_path = Path(df_path)
-        if not df_path.exists():
-            raise FileNotFoundError(f"dataset missing: {df_path}")
-
-        # Guard against "created but empty" artifacts
-        try:
-            sz = int(df_path.stat().st_size)
-            if sz < 1024:
-                raise RuntimeError(f"dataset too small / likely invalid: {df_path} ({sz} bytes)")
-        except Exception:
-            pass
-
-        # Prefer fast metadata read (no full scan)
-        try:
-            import pyarrow.parquet as pq  # type: ignore
-            pf = pq.ParquetFile(str(df_path))
-            n = getattr(pf.metadata, "num_rows", None)
-            if n is not None and int(n) <= 0:
-                raise RuntimeError(f"dataset has zero rows: {df_path}")
-        except Exception:
-            # Fallback: minimal read just to prove it's readable
-            try:
-                _ = pd.read_parquet(df_path, engine="pyarrow").head(1)
-            except Exception as e:
-                raise RuntimeError(f"dataset unreadable: {df_path} ({e})")
-
-    except Exception as e:
-        log(f"[ai_model] ❌ dataset preflight failed: {e}")
-        raise
-
-
-def _model_path(horizon: str, model_root: Path | None = None) -> Path:
-    """
-    Path for joblib model (.pkl) artifacts.
-    """
-    mr = Path(model_root) if model_root is not None else MODEL_ROOT
-    try:
-        mr.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    return mr / f"regressor_{str(horizon).strip()}.pkl"
-
 
 def train_model(
     dataset_name: str = "training_data_daily.parquet",
@@ -388,6 +339,7 @@ def train_model(
                     seed=42,
                     y_clip_low=float(y_clip_low),
                     y_clip_high=float(y_clip_high),
+                    symbol_whitelist=symbol_whitelist,
                 )
 
                 vdiag = _post_train_sanity(booster, Xv, yv, horizon=horizon, clip_limit=float(clip_lim))
@@ -858,8 +810,9 @@ def predict_all(
     context_state: Dict[str, Any] = {}
     try:
         mp = PATHS.get("market_state", ML_DATA_ROOT / "market_state.json")
-        if isinstance(mp, Path) and mp.exists():
-            context_state = json.loads(mp.read_text(encoding="utf-8"))
+        mp_path = Path(mp) if not isinstance(mp, Path) else mp
+        if mp_path.exists():
+            context_state = json.loads(mp_path.read_text(encoding="utf-8"))
             if not isinstance(context_state, dict):
                 context_state = {}
     except Exception:

@@ -200,14 +200,40 @@ def _iter_parquet_batches(
     if pa is None or ds is None:
         raise RuntimeError("pyarrow is required for streaming parquet batches")
 
+    # Normalize whitelist once (upper-case, de-duped)
+    wl: Optional[Set[str]] = None
+    if symbol_whitelist:
+        wl = {str(s).upper().strip() for s in symbol_whitelist if str(s).strip()}
+        if not wl:
+            wl = None
+
+    # If we're filtering by symbol, make sure "symbol" is actually available
+    # for filtering (either via scanner predicate or pandas fallback).
+    cols = list(columns) if columns else None
+    if wl is not None and cols is not None and "symbol" not in cols:
+        cols = ["symbol"] + cols
+
     dataset = ds.dataset(str(parquet_path), format="parquet")
-    scanner = dataset.scanner(columns=columns, batch_size=int(batch_size))
+
+    # Prefer Arrow-side filtering (way faster than pandas filtering)
+    scanner_kwargs: Dict[str, Any] = {
+        "columns": cols,
+        "batch_size": int(batch_size),
+    }
+    if wl is not None:
+        try:
+            scanner_kwargs["filter"] = ds.field("symbol").isin(sorted(wl))
+        except Exception:
+            # Some pyarrow versions can be picky; fall back to pandas filtering.
+            pass
+
+    scanner = dataset.scanner(**scanner_kwargs)
     for batch in scanner.to_batches():
         if batch.num_rows <= 0:
             continue
         df = batch.to_pandas()
-        if symbol_whitelist and "symbol" in df.columns:
-            df = df[df["symbol"].astype(str).str.upper().isin({str(s).upper() for s in symbol_whitelist})]
+        if wl is not None and "symbol" in df.columns:
+            df = df[df["symbol"].astype(str).str.upper().isin(wl)]
         if df is None or len(df) <= 0:
             continue
         yield df
@@ -247,8 +273,14 @@ def _stream_target_stats(
     usable = 0
     samples: List[float] = []
 
+    # NOTE: if a symbol whitelist is provided, we MUST include "symbol" in the
+    # scan columns, otherwise the whitelist filter can't be applied.
+    cols = [target_col]
+    if symbol_whitelist:
+        cols = ["symbol", target_col]
+
     try:
-        for df in _iter_parquet_batches(parquet_path, [target_col], batch_size=batch_size, symbol_whitelist=symbol_whitelist):
+        for df in _iter_parquet_batches(parquet_path, cols, batch_size=batch_size, symbol_whitelist=symbol_whitelist):
             if df is None or df.empty or target_col not in df.columns:
                 continue
             s = pd.to_numeric(df[target_col], errors="coerce").replace([np.inf, -np.inf], np.nan)
@@ -262,7 +294,8 @@ def _stream_target_stats(
             if len(samples) < int(max_samples):
                 take = min(int(max_samples) - len(samples), int(arr.size))
                 if take > 0:
-                    sl = np.clip(arr[:take], -2.0, 2.0)  # keep tails bounded while sampling
+                    # Keep tails bounded while sampling without distorting horizons.
+                    sl = np.clip(arr[:take], -float(HARD_MAX_ABS_RET), float(HARD_MAX_ABS_RET))
                     samples.extend([float(x) for x in sl])
 
     except Exception as e:
@@ -326,6 +359,10 @@ def _stream_validation_sample(
     rows_used = 0
 
     cols = list(feature_cols) + [target_col]
+    # Ensure "symbol" is present when whitelisting, otherwise filtering can't run
+    # at the scanner level (and may not run at all).
+    if symbol_whitelist and "symbol" not in cols:
+        cols = ["symbol"] + cols
 
     for df in _iter_parquet_batches(parquet_path, cols, batch_size=batch_size, symbol_whitelist=symbol_whitelist):
         if df is None or df.empty or target_col not in df.columns:

@@ -35,7 +35,7 @@ ALPACA_URL = os.getenv("ALPACA_DATA_BARS_URL", "https://data.alpaca.markets/v2/s
 MAX_CALLS_PER_MIN = 175
 BATCH_SIZE = 100
 
-UNIVERSE_FILE = Path(__file__).resolve().parents[1] / "universe" / "symbol_universe.json"
+UNIVERSE_FILE = Path(DT_PATHS["universe_file"])
 
 
 # ============================================================
@@ -64,8 +64,10 @@ def load_universe() -> List[str]:
         return []
 
     try:
-        data = json.loads(UNIVERSE_FILE.read_text())
-        syms = [str(s).upper().strip() for s in data if str(s).strip()]
+        data = json.loads(UNIVERSE_FILE.read_text(encoding='utf-8'))
+        if isinstance(data, dict) and 'symbols' in data:
+            data = data.get('symbols') or []
+        syms = [str(s).upper().strip() for s in (data or []) if str(s).strip()]
         log(f"[fetcher] Loaded {len(syms)} symbols")
         return syms
     except Exception as e:
@@ -187,3 +189,4 @@ def fetch_range(start: str, end: str, universe: Optional[List[str]] = None) -> L
         cur += timedelta(days=1)
 
     return days
+

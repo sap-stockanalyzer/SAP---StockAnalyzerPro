@@ -26,6 +26,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend.core.config import PATHS
+from settings import BOT_KNOBS_DEFAULTS
 
 router = APIRouter(prefix="/api/intraday", tags=["intraday-bot"])
 
@@ -111,36 +112,7 @@ def _ensure_intraday_defaults() -> None:
     if not isinstance(store, dict):
         store = {}
 
-    changed = False
-    for b in bots:
-        node = store.get(b)
-        if not isinstance(node, dict):
-            node = {}
-        if "enabled" not in node:
-            node["enabled"] = True
-            changed = True
-        if "aggression" not in node:
-            node["aggression"] = 0.5
-            changed = True
-        if "max_alloc" not in node:
-            node["max_alloc"] = 1000.0
-            changed = True
-        if "max_positions" not in node:
-            node["max_positions"] = 10
-            changed = True
-        if "stop_loss" not in node:
-            node["stop_loss"] = 0.02
-            changed = True
-        if "take_profit" not in node:
-            node["take_profit"] = 0.03
-            changed = True
-        if "penny_only" not in node:
-            node["penny_only"] = False
-            changed = True
-        store[b] = node
-
-    if changed:
-        _save_intraday_ui_configs(store)
+    _ensure_intraday_ui_defaults(bots, store)
 
 
 class IntradayConfigUpdateRequest(BaseModel):

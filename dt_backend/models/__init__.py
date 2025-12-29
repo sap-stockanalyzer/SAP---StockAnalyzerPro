@@ -31,10 +31,10 @@ __all__ = [
 # ---------------------------------------------------------------------
 
 # Intraday labels remain 3-class: SELL(-1), HOLD(0), BUY(+1)
-LABEL_ORDER = [-1, 0, 1]
-LABEL2ID = {-1: 0, 0: 1, 1: 2}
-ID2LABEL = {0: -1, 1: 0, 2: 1}
-
+LABEL_ORDER = ["SELL", "HOLD", "BUY"]
+# Accept both string labels and legacy numeric labels (-1/0/1)
+LABEL2ID = {"SELL": 0, "HOLD": 1, "BUY": 2, -1: 0, 0: 1, 1: 2}
+ID2LABEL = {0: "SELL", 1: "HOLD", 2: "BUY"}
 from pathlib import Path
 
 def get_model_dir(name: str = "") -> Path:

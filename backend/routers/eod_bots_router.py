@@ -62,6 +62,76 @@ HORIZONS = ["1w", "2w", "4w"]
 
 
 # -------------------------------------------------------------------
+# UI overrides store (enabled/aggression only)
+# -------------------------------------------------------------------
+
+_UI_STORE_DEFAULTS = {
+    "enabled": True,
+    "aggression": 0.50,
+}
+
+def _ui_overrides_path() -> Path:
+    # Canonical location is PATHS["bots_ui_overrides"], but tolerate older builds.
+    p = PATHS.get("bots_ui_overrides")
+    try:
+        if p:
+            return Path(p)
+    except Exception:
+        pass
+    return ML_DATA / "config" / "bots_ui_overrides.json"
+
+
+def _load_bot_ui_overrides() -> Dict[str, Any]:
+    p = _ui_overrides_path()
+    try:
+        if p.exists():
+            with p.open("r", encoding="utf-8") as f:
+                obj = json.load(f)
+            return obj if isinstance(obj, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _save_bot_ui_overrides(obj: Dict[str, Any]) -> None:
+    p = _ui_overrides_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _ensure_swing_ui_defaults(configs: Dict[str, Any]) -> None:
+    """Ensure UI overrides exist for all known swing bots."""
+    try:
+        from settings import BOT_KNOBS_DEFAULTS  # type: ignore
+        defaults = BOT_KNOBS_DEFAULTS.get("swing", {}) if isinstance(BOT_KNOBS_DEFAULTS, dict) else {}
+    except Exception:
+        defaults = {}
+
+    store = _load_bot_ui_overrides()
+    if not isinstance(store, dict):
+        store = {}
+
+    changed = False
+    for bot_key in configs.keys():
+        node = store.get(bot_key)
+        if not isinstance(node, dict):
+            node = {}
+        for k in ("enabled", "aggression"):
+            if k not in node:
+                node[k] = defaults.get(k, _UI_STORE_DEFAULTS.get(k))
+        if store.get(bot_key) != node:
+            store[bot_key] = node
+            changed = True
+
+    if changed:
+        _save_bot_ui_overrides(store)
+
+
+
+# -------------------------------------------------------------------
 # UI config overlays (enabled/aggression) + helpers
 # -------------------------------------------------------------------
 
@@ -337,10 +407,22 @@ async def eod_status():
 
             equity = cash + invested
 
-            # Allocation limit is a UI concept; default 0.95 if missing
-            max_alloc = ui.get("max_alloc", 0.95)
-            max_alloc_f = _safe_float(max_alloc, 0.95)
-            allocated = equity * max_alloc_f
+            # Allocation limit is per-position cap in dollars (UI uses dollars; engine uses max_weight_per_name).
+            # Prefer core config if available.
+            per_name_cap = None
+            try:
+                if cfg is not None:
+                    w = float(getattr(cfg, "max_weight_per_name", 0.0) or 0.0)
+                    if w > 0:
+                        per_name_cap = equity * w
+            except Exception:
+                per_name_cap = None
+
+            if per_name_cap is None:
+                # Legacy UI store may have max_alloc; treat it as dollars.
+                per_name_cap = _safe_float(ui.get("max_alloc"), 0.0)
+
+            allocated = float(per_name_cap or 0.0)
 
             last_updated = str(state.get("last_updated") or state.get("last_update") or "")
             if not last_updated:
@@ -552,56 +634,115 @@ def _get_bot_config(bot_key: str) -> SwingBotConfig:
         )
 
 
+
 class EodBotUiConfig(BaseModel):
     """UI-friendly bot rules.
 
-    We keep the bot engine's native SwingBotConfig untouched and layer
-    "enabled" + "aggression" as UI-only overrides.
+    UI shape is what /app/bots/page.tsx expects:
+      enabled, aggression,
+      max_alloc (dollars per position),
+      max_positions,
+      stop_loss (percent),
+      take_profit (percent),
+      min_confidence (0..1),
+      initial_cash
     """
 
     enabled: bool = True
     aggression: float = 0.50
 
-    # Trading rules
-    max_alloc: float = 0.0  # maps to SwingBotConfig.max_position_size
+    max_alloc: float = 0.0          # dollars (UI-facing)
     max_positions: int = 0
-    stop_loss: float = 0.0  # maps to SwingBotConfig.stop_pct
-    take_profit: float = 0.0  # maps to SwingBotConfig.take_profit_pct
+    stop_loss: float = 0.0          # percent (UI-facing)
+    take_profit: float = 0.0        # percent (UI-facing)
     min_confidence: float = 0.0
     initial_cash: float = 0.0
 
 
+def _bot_equity_for_ui(bot_key: str, cfg: SwingBotConfig) -> float:
+    """Best-effort equity estimate used only for UI $ conversions."""
+    state_path_gz = BOT_STATE_DIR / f"rolling_{bot_key}.json.gz"
+    state_path_js = BOT_STATE_DIR / f"rolling_{bot_key}.json"
+    state = _load_bot_state(state_path_gz) or _load_bot_state(state_path_js) or {}
+    if isinstance(state, dict):
+        eq = _safe_float(state.get("last_equity") or state.get("equity"), 0.0)
+        if eq > 0:
+            return eq
+        cash = _safe_float(state.get("cash"), 0.0)
+        if cash > 0:
+            return cash
+    return float(getattr(cfg, "initial_cash", 100.0) or 100.0)
+
+
 def _ui_config_from_core(bot_key: str, cfg: SwingBotConfig) -> Dict[str, Any]:
     ov = _load_bot_ui_overrides().get(bot_key, {})
-    enabled = bool(ov.get("enabled", True))
-    aggression = float(ov.get("aggression", 0.50) or 0.50)
+    enabled = bool((ov or {}).get("enabled", True))
+    aggression = float((ov or {}).get("aggression", 0.50) or 0.50)
+
+    equity = _bot_equity_for_ui(bot_key, cfg)
+
+    # Convert engine fields → UI-facing knobs
+    max_weight = float(getattr(cfg, "max_weight_per_name", 0.0) or 0.0)
+    max_alloc = max(0.0, float(equity * max_weight)) if max_weight > 0 else 0.0
+
+    stop_loss_pct = float(getattr(cfg, "stop_loss_pct", 0.0) or 0.0)  # negative fraction
+    take_profit_pct = float(getattr(cfg, "take_profit_pct", 0.0) or 0.0)
 
     return EodBotUiConfig(
         enabled=enabled,
         aggression=aggression,
-        max_alloc=float(getattr(cfg, "max_position_size", 0.0) or 0.0),
+        max_alloc=max_alloc,
         max_positions=int(getattr(cfg, "max_positions", 0) or 0),
-        stop_loss=float(getattr(cfg, "stop_pct", 0.0) or 0.0),
-        take_profit=float(getattr(cfg, "take_profit_pct", 0.0) or 0.0),
-        min_confidence=float(getattr(cfg, "min_confidence", 0.0) or 0.0),
+        stop_loss=abs(stop_loss_pct) * 100.0,
+        take_profit=abs(take_profit_pct) * 100.0,
+        min_confidence=float(getattr(cfg, "conf_threshold", 0.0) or 0.0),
         initial_cash=float(getattr(cfg, "initial_cash", 0.0) or 0.0),
     ).model_dump()
 
 
 def _apply_ui_config(bot_key: str, cfg: SwingBotConfig, ui: Dict[str, Any]) -> SwingBotConfig:
     # Core-mapped fields
-    if "max_alloc" in ui:
-        cfg.max_position_size = float(ui.get("max_alloc") or 0.0)
     if "max_positions" in ui:
         cfg.max_positions = int(ui.get("max_positions") or 0)
+
     if "stop_loss" in ui:
-        cfg.stop_pct = float(ui.get("stop_loss") or 0.0)
+        # UI is percent; engine stores negative fraction
+        try:
+            v = float(ui.get("stop_loss") or 0.0)
+            cfg.stop_loss_pct = -abs(v) / 100.0
+        except Exception:
+            pass
+
     if "take_profit" in ui:
-        cfg.take_profit_pct = float(ui.get("take_profit") or 0.0)
+        try:
+            v = float(ui.get("take_profit") or 0.0)
+            cfg.take_profit_pct = abs(v) / 100.0
+        except Exception:
+            pass
+
     if "min_confidence" in ui:
-        cfg.min_confidence = float(ui.get("min_confidence") or 0.0)
+        try:
+            v = float(ui.get("min_confidence") or 0.0)
+            cfg.conf_threshold = max(0.0, min(1.0, v))
+        except Exception:
+            pass
+
     if "initial_cash" in ui:
-        cfg.initial_cash = float(ui.get("initial_cash") or 0.0)
+        try:
+            cfg.initial_cash = float(ui.get("initial_cash") or cfg.initial_cash)
+        except Exception:
+            pass
+
+    if "max_alloc" in ui:
+        # UI is dollars per position; engine stores max_weight_per_name.
+        try:
+            equity = _bot_equity_for_ui(bot_key, cfg)
+            dollars = float(ui.get("max_alloc") or 0.0)
+            if equity > 0:
+                w = max(0.0, min(1.0, dollars / equity))
+                cfg.max_weight_per_name = w
+        except Exception:
+            pass
 
     # UI-only overrides
     ov = _load_bot_ui_overrides()
@@ -616,6 +757,7 @@ def _apply_ui_config(bot_key: str, cfg: SwingBotConfig, ui: Dict[str, Any]) -> S
     if node:
         ov[bot_key] = node
         _save_bot_ui_overrides(ov)
+
     return cfg
 
 
