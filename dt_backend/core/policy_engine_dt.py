@@ -278,12 +278,25 @@ def _stabilize_with_hysteresis(
     return final_action, state, note
 
 
-def apply_intraday_policy(cfg: PolicyConfig | None = None) -> Dict[str, Any]:
+def apply_intraday_policy(
+    cfg: PolicyConfig | None = None,
+    *,
+    max_positions: int | None = None,
+    **_kwargs: Any,
+) -> Dict[str, Any]:
     cfg = cfg or PolicyConfig()
     rolling = _read_rolling()
     if not rolling:
         log("[policy_dt] ⚠️ rolling empty.")
         return {"symbols": 0, "updated": 0}
+
+    # normalize max_positions
+    try:
+        max_positions_n = int(max_positions) if max_positions is not None else None
+        if max_positions_n is not None and max_positions_n <= 0:
+            max_positions_n = None
+    except Exception:
+        max_positions_n = None
 
     global_regime = _get_global_regime(rolling)
     regime_label = str(global_regime.get("label") or "unknown")
@@ -310,13 +323,10 @@ def apply_intraday_policy(cfg: PolicyConfig | None = None) -> Dict[str, Any]:
         p_sell = float(proba.get("SELL", 0.0))
 
         proposed_intent, base_conf, edge = _raw_intent_from_edge(p_buy, p_hold, p_sell, cfg)
-
         trend, vol_bkt = _trend_and_vol(ctx)
 
-        # Adjust confidence by context/regime
         conf_adj, adj_detail = _adjust_conf(base_conf, proposed_intent, trend, vol_bkt, regime_label, cfg)
 
-        # Safety stand-down
         r = regime_label.lower()
         if cfg.stand_down_in_crash and r in {"crash", "stress"}:
             action = "STAND_DOWN"
@@ -331,15 +341,11 @@ def apply_intraday_policy(cfg: PolicyConfig | None = None) -> Dict[str, Any]:
             trade_gate = False
             reason = f"regime={regime_label} stand_down_unknown"
         else:
-            # Convert edge to signed score (executor ranks by abs(score))
-            # score = (p_buy - p_sell) scaled by confidence
             score = float(edge) * float(conf_adj)
 
-            # Minimum confidence gate for acting
             if proposed_intent in {"BUY", "SELL"} and conf_adj < cfg.min_confidence:
                 proposed_intent = "HOLD"
 
-            # Hysteresis stabilization
             stabilized_action, new_state, hyst_note = _stabilize_with_hysteresis(
                 node=node,
                 proposed=proposed_intent,
@@ -350,8 +356,6 @@ def apply_intraday_policy(cfg: PolicyConfig | None = None) -> Dict[str, Any]:
 
             action = stabilized_action
             conf_final = float(conf_adj) if action in {"BUY", "SELL"} else 0.0
-
-            # Trade gate: allow only when actionable and confident
             trade_gate = bool(action in {"BUY", "SELL"} and conf_final >= cfg.min_confidence)
 
             reason = (
@@ -362,7 +366,7 @@ def apply_intraday_policy(cfg: PolicyConfig | None = None) -> Dict[str, Any]:
 
             node["policy_dt"] = {
                 "action": action,
-                "intent": action,  # legacy compatibility
+                "intent": action,
                 "confidence": float(conf_final),
                 "score": float(score),
                 "trade_gate": bool(trade_gate),
@@ -394,6 +398,55 @@ def apply_intraday_policy(cfg: PolicyConfig | None = None) -> Dict[str, Any]:
         rolling[sym] = node
         updated += 1
 
+    # ------------------------------------------------------------
+    # Hard cap: allow only top N trade candidates by |score|
+    # (Safety: if capped out, force HOLD + trade_gate False)
+    # ------------------------------------------------------------
+    capped = 0
+    if max_positions_n is not None:
+        candidates = []
+        for sym, node in rolling.items():
+            if not isinstance(sym, str) or sym.startswith("_"):
+                continue
+            if not isinstance(node, dict):
+                continue
+            p = node.get("policy_dt")
+            if not isinstance(p, dict):
+                continue
+            if p.get("trade_gate") is True and str(p.get("action")).upper() in {"BUY", "SELL"}:
+                candidates.append((sym, abs(float(p.get("score") or 0.0))))
+
+        candidates.sort(key=lambda t: t[1], reverse=True)
+        keep = set(sym for sym, _ in candidates[:max_positions_n])
+
+        for sym, _ in candidates[max_positions_n:]:
+            node = rolling.get(sym)
+            if not isinstance(node, dict):
+                continue
+            p = node.get("policy_dt")
+            if not isinstance(p, dict):
+                continue
+
+            st = p.get("_state")
+            if not isinstance(st, dict):
+                st = {}
+            st["capped_action"] = str(p.get("action") or "").upper()
+            st["capped_score"] = float(p.get("score") or 0.0)
+            p["_state"] = st
+
+            p["action"] = "HOLD"
+            p["intent"] = "HOLD"
+            p["trade_gate"] = False
+            p["confidence"] = 0.0
+            p["score"] = 0.0
+            p["reason"] = (str(p.get("reason") or "") + f"; cap=max_positions({max_positions_n})").strip()
+            p["ts"] = _utc_now_iso()
+
+            node["policy_dt"] = p
+            rolling[sym] = node
+            capped += 1
+
     save_rolling(rolling)
-    log(f"[policy_dt] ✅ updated policy_dt for {updated} symbols (regime={regime_label}).")
-    return {"symbols": len(rolling), "updated": updated, "regime": regime_label}
+    extra = f", capped={capped}, max_positions={max_positions_n}" if max_positions_n is not None else ""
+    log(f"[policy_dt] ✅ updated policy_dt for {updated} symbols (regime={regime_label}){extra}.")
+    return {"symbols": len(rolling), "updated": updated, "regime": regime_label, "capped": capped, "max_positions": max_positions_n}
