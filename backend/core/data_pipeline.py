@@ -67,6 +67,10 @@ BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 HORIZONS = ["1d", "3d", "1w", "2w", "4w", "13w", "26w", "52w"]
 
+# Log read summaries (counts) can be noisy when UI polls /api/system/status.
+# Set AION_LOG_READ_SUMMARY=1 to re-enable these per-read logs.
+AION_LOG_READ_SUMMARY = os.getenv("AION_LOG_READ_SUMMARY", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
+
 
 # -------------------------------------------------------------
 # Helpers
@@ -199,7 +203,8 @@ def _norm_dict_block(x: Any) -> Dict[str, Any]:
 def _read_rolling() -> Dict[str, Any]:
     """Load the canonical rolling snapshot."""
     data = _load_json_gz(ROLLING_BODY_PATH)
-    log(f"[data_pipeline] ℹ️ _read_rolling → {len(data)} keys from {ROLLING_BODY_PATH}")
+    if AION_LOG_READ_SUMMARY:
+        log(f"[data_pipeline] ℹ️ _read_rolling → {len(data)} keys from {ROLLING_BODY_PATH}")
     return data
 
 
@@ -212,7 +217,8 @@ def _read_brain() -> Dict[str, Any]:
             ROOT/da_brains/core/rolling_brain.json.gz
     """
     data = _load_json_gz(BRAIN_PATH)
-    log(f"[data_pipeline] ℹ️ _read_brain → {len(data)} keys from {BRAIN_PATH}")
+    if AION_LOG_READ_SUMMARY:
+        log(f"[data_pipeline] ℹ️ _read_brain → {len(data)} keys from {BRAIN_PATH}")
     return data
 
 
@@ -227,7 +233,8 @@ def _read_aion_brain() -> Dict[str, Any]:
       - regime-level modifiers
     """
     data = _load_json_gz(AION_BRAIN_PATH)
-    log(f"[data_pipeline] ℹ️ _read_aion_brain → {len(data)} keys from {AION_BRAIN_PATH}")
+    if AION_LOG_READ_SUMMARY:
+        log(f"[data_pipeline] ℹ️ _read_aion_brain → {len(data)} keys from {AION_BRAIN_PATH}")
     return data
 
 
@@ -397,7 +404,8 @@ def _read_rolling_nervous() -> Dict[str, Any]:
         with gzip.open(ROLLING_NERVOUS_PATH, "rt", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
-            log(f"[data_pipeline] ℹ️ _read_rolling_nervous → {len(data)} keys from {ROLLING_NERVOUS_PATH}")
+            if AION_LOG_READ_SUMMARY:
+                log(f"[data_pipeline] ℹ️ _read_rolling_nervous → {len(data)} keys from {ROLLING_NERVOUS_PATH}")
             return data
     except Exception as e:
         log(f"[data_pipeline] ⚠️ Failed to load {ROLLING_NERVOUS_PATH}: {e}")
@@ -442,7 +450,7 @@ def save_rolling(rolling: Dict[str, Any], *, allow_empty: bool = False):
     rolling = _normalize_rolling(rolling)
     _backup_file(ROLLING_BODY_PATH)
     _save_json_gz(ROLLING_BODY_PATH, rolling)
-    log(f"[data_pipeline] 💾 {ROLLING_BODY_PATH.name} updated ({len(rolling)} symbols)")
+    log(f"[data_pipeline] 💾 rolling.json.gz updated ({len(rolling)} symbols)")
 
 
 def save_brain(brain: Dict[str, Any]):

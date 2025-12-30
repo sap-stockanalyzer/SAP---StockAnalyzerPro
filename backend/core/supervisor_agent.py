@@ -31,12 +31,55 @@ from __future__ import annotations
 from typing import Dict, Any, List, Tuple, Optional
 import json
 import datetime
+import os
+import time
 from pathlib import Path
 from statistics import mean, pstdev
 
 from backend.core.config import PATHS, TIMEZONE
 from backend.core.data_pipeline import _read_rolling, _read_brain, _read_aion_brain, safe_float
 from utils.logger import log
+
+# -------------------------------------------------------------
+# Logging controls (to avoid log spam when UI polls /api/system/status)
+# -------------------------------------------------------------
+
+# Set AION_SUPERVISOR_VERBOSE=1 to log every evaluation/verdict call
+AION_SUPERVISOR_VERBOSE = os.getenv('AION_SUPERVISOR_VERBOSE', '0').strip().lower() in {'1','true','yes','y','on'}
+
+# By default, only log when the overall verdict / overrides change (or once per minute)
+AION_SUPERVISOR_LOG_ON_CHANGE = os.getenv('AION_SUPERVISOR_LOG_ON_CHANGE', '1').strip().lower() in {'1','true','yes','y','on'}
+AION_SUPERVISOR_LOG_EVERY_SECS = float(os.getenv('AION_SUPERVISOR_LOG_EVERY_SECS', '0') or '0')
+
+_LAST_SUPERVISOR_LOG_TS = 0.0
+_LAST_SUPERVISOR_SIG = ''
+
+
+def _maybe_log_supervisor(msg: str, sig: str = '') -> None:
+    """Throttled supervisor logging to keep stdout usable."""
+    global _LAST_SUPERVISOR_LOG_TS, _LAST_SUPERVISOR_SIG
+    if AION_SUPERVISOR_VERBOSE:
+        log(msg)
+        _LAST_SUPERVISOR_LOG_TS = time.time()
+        _LAST_SUPERVISOR_SIG = sig or _LAST_SUPERVISOR_SIG
+        return
+
+    now = time.time()
+    changed = bool(sig) and (sig != _LAST_SUPERVISOR_SIG)
+
+    if AION_SUPERVISOR_LOG_ON_CHANGE and changed:
+        log(msg)
+        _LAST_SUPERVISOR_LOG_TS = now
+        _LAST_SUPERVISOR_SIG = sig
+        return
+
+    # Optional heartbeat log (default: once per 60s). Set to 0 to fully silence.
+    if AION_SUPERVISOR_LOG_EVERY_SECS > 0 and (now - _LAST_SUPERVISOR_LOG_TS) >= AION_SUPERVISOR_LOG_EVERY_SECS:
+        log(msg)
+        _LAST_SUPERVISOR_LOG_TS = now
+        if sig:
+            _LAST_SUPERVISOR_SIG = sig
+
 
 def _latest_with_prefix(dirpath: Path, prefix: str) -> Path | None:
     try:
@@ -112,9 +155,20 @@ def _status_from_age(age_min: float, warn: float, crit: float) -> str:
 
 
 def _save_overrides(js: dict) -> None:
+    """Write overrides, but avoid needless rewrites (helps when status is polled frequently)."""
     try:
         OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(OVERRIDES_PATH, "w", encoding="utf-8") as f:
+
+        # Skip write if unchanged
+        if OVERRIDES_PATH.exists():
+            try:
+                existing = json.loads(OVERRIDES_PATH.read_text(encoding='utf-8'))
+                if existing == js:
+                    return
+            except Exception:
+                pass
+
+        with open(OVERRIDES_PATH, 'w', encoding='utf-8') as f:
             json.dump(js, f, indent=2)
     except Exception as e:
         log(f"[supervisor_agent] ⚠️ Failed to save overrides: {e}")
@@ -668,7 +722,7 @@ def supervisor_verdict() -> Dict[str, Any]:
           "overrides": {...}
         }
     """
-    log("[supervisor_agent] 🔍 Evaluating system health (v1.2 truth-loop)…")
+    _maybe_log_supervisor("[supervisor_agent] 🔍 Evaluating system health (v1.2 truth-loop)…")
 
     dataset = _check_dataset_health()
     models = _check_model_health()
@@ -731,7 +785,8 @@ def supervisor_verdict() -> Dict[str, Any]:
         "generated_at": datetime.datetime.now(TIMEZONE).isoformat(),
     }
 
-    log(f"[supervisor_agent] 🧭 Supervisor verdict: {overall} | overrides={truth_overrides}")
+    sig = json.dumps({'status': overall, 'overrides': truth_overrides}, sort_keys=True, default=str)
+    _maybe_log_supervisor(f"[supervisor_agent] 🧭 Supervisor verdict: {overall} | overrides={truth_overrides}", sig=sig)
     return verdict
 
 
