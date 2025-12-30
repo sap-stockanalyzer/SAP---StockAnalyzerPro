@@ -53,6 +53,7 @@ from backend.routers.intraday_stream_router import router as stream_router
 from backend.routers.system_run_router import router as system_run_router
 from backend.admin.routes import router as admin_router
 from backend.admin.admin_tools_router import router as admin_tools_router
+from backend.routers import eod_bots_router, intraday_logs_router, intraday_router
 
 # Optional cloud sync
 try:
@@ -101,6 +102,9 @@ app.include_router(stream_router)
 app.include_router(system_run_router)
 app.include_router(admin_router)
 app.include_router(admin_tools_router)
+app.include_router(eod_bots_router.router)
+app.include_router(intraday_logs_router.router)
+app.include_router(intraday_router.router)
 
 # -------------------------------------------------
 # Basic Endpoints
