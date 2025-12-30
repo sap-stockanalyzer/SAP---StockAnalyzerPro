@@ -1,24 +1,24 @@
 # backend/services/backfill_history.py
 """
-backfill_history.py — v3.5
+backfill_history.py — v3.6
 (Rolling-Native, Normalized Batch StockAnalysis Bundle, HF History Bootstrap + yfinance Fallback)
 
 Purpose
-- Refreshes and repairs ticker data directly inside Rolling cache.
+- Refreshes and repairs ticker data directly inside Rolling cache (rolling_body.json.gz).
 - BATCH fetches metrics from StockAnalysis (parallel /s/d/<metric> requests).
 - Uses /s/i only for basic metadata (symbol, name, price, volume, marketCap, peRatio, industry).
 - Uses /s/d/<metric> for everything else (incl. open/high/low/close, rsi, growth, etc.).
 - Normalizes all fetched field names before saving (camelCase → snake_case, rsi → rsi_14).
-- Writes directly into rolling.json.gz using backend.core.data_pipeline helpers.
+- Writes directly into rolling_body.json.gz using backend.core.data_pipeline helpers.
 
 History bootstrap (when history is too short)
-- Preferred: Hugging Face dataset "bwzheng2010/yahoo-finance-data" queried via DuckDB over Parquet.
-  This mirrors the *logic* used by defeatbeta-api (DuckDB + httpfs + local caching),
-  but does NOT depend on that repository/package.
+- Preferred: Hugging Face dataset "bwzheng2010/yahoo-finance-data" queried via DuckDB over remote Parquet.
+  NEW in v3.6: **batched HF bootstrap** — pulls many symbols per DuckDB query to amortize remote Parquet overhead.
 - Fallback: yfinance with a hard global rate limiter (default ~20 calls/min) + retry backoff.
 
-Notes
+Safety / invariants
 - History is append-only with per-date dedupe (never wipes existing history).
+- Rolling cache is never pruned by this service. (We may LIMIT what we fetch from HF/YF, but we never delete data already stored.)
 - StockAnalysis is still used to write a "today" bar and fresh snapshot fields.
 - Recent-day patching via yfinance is available but OFF by default (see env vars below).
 
@@ -35,9 +35,9 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import requests
 import yfinance as yf
@@ -70,6 +70,13 @@ HF_STOCK_PRICES_PARQUET = os.getenv(
 # Limit concurrent HF queries (to avoid bandwidth spikes). 0/1 = effectively serial.
 HF_MAX_CONCURRENCY = int(os.getenv("AION_HF_MAX_CONCURRENCY", "2"))
 _HF_SEMA = threading.Semaphore(max(1, HF_MAX_CONCURRENCY))
+
+# NEW: batched HF bootstrap (amortize remote Parquet overhead).
+HF_BATCH_SIZE = int(os.getenv("AION_HF_BATCH_SIZE", "75"))  # symbols per DuckDB query
+HF_PREFETCH_ENABLED = os.getenv("AION_HF_PREFETCH_ENABLED", "1").strip() not in {"0", "false", "False"}
+
+# How far back we scan in HF dataset (bounds remote scan work).
+HF_LOOKBACK_YEARS = int(os.getenv("AION_HF_LOOKBACK_YEARS", "6"))
 
 # yfinance global rate limiter:
 #  - default: ~1 call / 3.2s ≈ 18.75 calls/min
@@ -105,12 +112,37 @@ SA_METRICS = [
     "open", "high", "low", "close",
 ]
 
-# How many days of history to keep in rolling (≈ 3 trading years)
-MAX_HISTORY_DAYS = 750
+# How many days of history to FETCH from HF/YF when bootstrapping.
+# NOTE: This does NOT prune rolling. It only limits bootstrap fetch volume.
+MAX_HISTORY_DAYS = int(os.getenv("AION_BOOTSTRAP_MAX_DAYS", "750"))
 
 # Directory for audit bundle
 METRICS_BUNDLE_DIR = Path("data") / "metrics_cache" / "bundle"
 METRICS_BUNDLE_DIR.mkdir(parents=True, exist_ok=True)
+
+# Thread-safety: rolling is a shared dict mutated by multiple workers.
+_ROLLING_LOCK = threading.Lock()
+
+
+# -------------------------------------------------------------------
+# Rolling read retry (prevents transient empty reads during atomic replace)
+# -------------------------------------------------------------------
+def _read_rolling_with_retry(attempts: int = 5, sleep_secs: float = 0.5) -> Dict[str, Any]:
+    last: Dict[str, Any] = {}
+    for i in range(max(1, int(attempts))):
+        last = _read_rolling() or {}
+        if last:
+            return last
+        try:
+            rp = Path(PATHS.get("rolling_body") or PATHS.get("rolling") or "")
+            if rp and rp.exists() and rp.stat().st_size > 0:
+                log(f"[backfill_history] ⏳ rolling_body present but empty-read (attempt {i+1}/{attempts}); retrying…")
+            else:
+                return {}
+        except Exception:
+            return {}
+        time.sleep(float(sleep_secs))
+    return last or {}
 
 
 # -------------------------------------------------------------------
@@ -396,6 +428,7 @@ def _bootstrap_history_yf(symbol: str, max_days: int = MAX_HISTORY_DAYS, period:
                     }
                 )
 
+            # This is a FETCH LIMIT, not a rolling prune.
             return bars[-max_days:] if bars else []
 
         except Exception as e:
@@ -415,8 +448,6 @@ def _bootstrap_history_yf(symbol: str, max_days: int = MAX_HISTORY_DAYS, period:
 
 # ---------------- HF / DuckDB ----------------
 
-_HF_DUCKDB_LOCK = threading.Lock()
-_HF_DUCKDB_READY = False
 _HF_DUCKDB_ERR = None
 
 # Thread-local DuckDB connections (safer with ThreadPoolExecutor)
@@ -428,7 +459,7 @@ def _hf_duckdb_conn():
     Create/get a per-thread DuckDB connection.
     Uses DuckDB httpfs extension when possible.
     """
-    global _HF_DUCKDB_READY, _HF_DUCKDB_ERR
+    global _HF_DUCKDB_ERR
     con = getattr(_HF_LOCAL, "con", None)
     if con is not None:
         return con
@@ -468,29 +499,37 @@ def _hf_duckdb_conn():
         return None
 
 
+def _to_date_str(x: Any) -> str:
+    try:
+        if hasattr(x, "strftime"):
+            return x.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return str(x)[:10]
+
+
+def _f(x: Any) -> float:
+    try:
+        v = float(x)
+        return 0.0 if (not math.isfinite(v)) else v
+    except Exception:
+        return 0.0
+
+
 def _bootstrap_history_hf(symbol: str, max_days: int = MAX_HISTORY_DAYS) -> List[Dict[str, Any]]:
     """
-    Preferred bootstrap via Hugging Face dataset queried with DuckDB over Parquet.
-
-    This is the same core trick as defeatbeta-api (DuckDB + httpfs + caching),
-    but implemented inline to avoid an external dependency.
-
-    Returns list of {date, open, high, low, close, volume}.
+    Per-symbol HF bootstrap (kept for compatibility / fallback).
+    Prefer using batched prefetch in v3.6.
     """
     symbol = symbol.upper()
-
-    # Limit HF concurrency to avoid a thundering herd of HTTPS range requests.
     with _HF_SEMA:
         con = _hf_duckdb_conn()
         if con is None:
             return []
 
-        # Filter a bounded date range to reduce scan work.
-        # We keep a bit more than needed to ensure >= max_days even with holidays.
-        start_date = (datetime.utcnow().date() - timedelta(days=365 * 6)).isoformat()
+        start_date = (datetime.utcnow().date() - timedelta(days=365 * max(1, int(HF_LOOKBACK_YEARS)))).isoformat()
 
         try:
-            # Query newest first and limit, then reverse in Python.
             rows = con.execute(
                 """
                 SELECT report_date, open, high, low, close, volume
@@ -502,7 +541,6 @@ def _bootstrap_history_hf(symbol: str, max_days: int = MAX_HISTORY_DAYS) -> List
                 [HF_STOCK_PRICES_PARQUET, symbol, start_date, int(max_days)],
             ).fetchall()
         except Exception as e:
-            # If HF path fails, treat as unavailable and fall back to yfinance.
             if VERBOSE_BOOTSTRAP_ERRORS:
                 log(f"⚠️ HF/DuckDB bootstrap failed for {symbol}: {e}")
             return []
@@ -511,36 +549,156 @@ def _bootstrap_history_hf(symbol: str, max_days: int = MAX_HISTORY_DAYS) -> List
             return []
 
         bars: List[Dict[str, Any]] = []
-        # rows are newest->oldest
         for report_date, open_, high, low, close, volume in reversed(rows):
-            # report_date could be a date/datetime
-            try:
-                if hasattr(report_date, "strftime"):
-                    d = report_date.strftime("%Y-%m-%d")
-                else:
-                    d = str(report_date)[:10]
-            except Exception:
-                d = str(report_date)[:10]
-
-            def f(x: Any) -> float:
-                try:
-                    v = float(x)
-                    return 0.0 if (not math.isfinite(v)) else v
-                except Exception:
-                    return 0.0
-
             bars.append(
                 {
-                    "date": d,
-                    "open": f(open_),
-                    "high": f(high),
-                    "low": f(low),
-                    "close": f(close),
-                    "volume": f(volume),
+                    "date": _to_date_str(report_date),
+                    "open": _f(open_),
+                    "high": _f(high),
+                    "low": _f(low),
+                    "close": _f(close),
+                    "volume": _f(volume),
                 }
             )
 
+        # This is a FETCH LIMIT, not a rolling prune.
         return bars[-max_days:] if bars else []
+
+
+def _bootstrap_histories_hf_batch(symbols: Sequence[str], max_days: int = MAX_HISTORY_DAYS) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Batched HF bootstrap: fetch history for many symbols in ONE DuckDB query.
+
+    Returns mapping: SYMBOL -> list[{date, open, high, low, close, volume}] sorted ascending by date.
+    """
+    syms = [str(s).upper() for s in symbols if str(s).strip()]
+    if not syms:
+        return {}
+
+    # Limit HF concurrency to avoid a thundering herd of HTTPS range requests.
+    with _HF_SEMA:
+        con = _hf_duckdb_conn()
+        if con is None:
+            return {}
+
+        start_date = (datetime.utcnow().date() - timedelta(days=365 * max(1, int(HF_LOOKBACK_YEARS)))).isoformat()
+
+        # Build IN (?, ?, ...) safely for this batch.
+        placeholders = ", ".join(["?"] * len(syms))
+        sql = f"""
+        WITH t AS (
+            SELECT
+                symbol,
+                report_date,
+                open, high, low, close, volume,
+                row_number() OVER (PARTITION BY symbol ORDER BY report_date DESC) AS rn
+            FROM read_parquet(?, columns=['symbol','report_date','open','high','low','close','volume'])
+            WHERE symbol IN ({placeholders}) AND report_date >= ?
+        )
+        SELECT symbol, report_date, open, high, low, close, volume
+        FROM t
+        WHERE rn <= ?
+        ORDER BY symbol, report_date
+        """
+
+        params: List[Any] = [HF_STOCK_PRICES_PARQUET]
+        params.extend(syms)
+        params.append(start_date)
+        params.append(int(max_days))
+
+        try:
+            rows = con.execute(sql, params).fetchall()
+        except Exception as e:
+            if VERBOSE_BOOTSTRAP_ERRORS:
+                log(f"⚠️ HF/DuckDB batch bootstrap failed for batch(size={len(syms)}): {e}")
+            return {}
+
+    out: Dict[str, List[Dict[str, Any]]] = {s: [] for s in syms}
+    for sym, report_date, open_, high, low, close, volume in rows or []:
+        su = str(sym).upper()
+        if su not in out:
+            out[su] = []
+        out[su].append(
+            {
+                "date": _to_date_str(report_date),
+                "open": _f(open_),
+                "high": _f(high),
+                "low": _f(low),
+                "close": _f(close),
+                "volume": _f(volume),
+            }
+        )
+    # out lists are already ascending by date due to ORDER BY symbol, report_date
+    return out
+
+
+def _chunk(seq: Sequence[str], n: int) -> List[List[str]]:
+    n = max(1, int(n))
+    return [list(seq[i:i+n]) for i in range(0, len(seq), n)]
+
+
+def _prefetch_hf_bootstrap_map(
+    symbols: Sequence[str],
+    *,
+    batch_size: int = HF_BATCH_SIZE,
+    max_workers: int = HF_MAX_CONCURRENCY,
+    max_days: int = MAX_HISTORY_DAYS,
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Prefetch HF histories for the given symbols using batched DuckDB queries.
+    Designed to only be called for symbols that are actually missing enough history.
+    """
+    syms = [str(s).upper() for s in symbols if str(s).strip()]
+    if not syms:
+        return {}
+
+    batches = _chunk(syms, max(1, int(batch_size)))
+    workers = max(1, int(max_workers))
+    workers = min(workers, len(batches))
+
+    log(f"[backfill_history] 🧠 HF batched prefetch: symbols={len(syms)}, batch_size={batch_size}, batches={len(batches)}, workers={workers}")
+
+    out: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _job(batch_syms: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        return _bootstrap_histories_hf_batch(batch_syms, max_days=max_days)
+
+    # Parallelize batches (bounded by HF_MAX_CONCURRENCY)
+    if workers <= 1 or len(batches) <= 1:
+        for b in batches:
+            out.update(_job(b))
+        return out
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_job, b) for b in batches]
+        for fut in progress_bar(as_completed(futs), desc="HF Prefetch", unit="batch", total=len(futs)):
+            try:
+                res = fut.result() or {}
+                out.update(res)
+            except Exception:
+                continue
+    return out
+
+
+def _history_unique_days_at_least(hist: List[Dict[str, Any]], n: int) -> bool:
+    """
+    Fast-ish: count distinct dates and early-exit once >= n.
+    Avoids building a giant set when histories are very long.
+    """
+    n = int(n)
+    if n <= 0:
+        return True
+    seen: set[str] = set()
+    for b in hist or []:
+        d = b.get("date")
+        if not d:
+            continue
+        ds = str(d)
+        if ds not in seen:
+            seen.add(ds)
+            if len(seen) >= n:
+                return True
+    return False
 
 
 def _unique_history_dates(hist: List[Dict[str, Any]]) -> set[str]:
@@ -550,8 +708,10 @@ def _unique_history_dates(hist: List[Dict[str, Any]]) -> set[str]:
 def _merge_histories_prefer_existing(base: List[Dict[str, Any]], existing: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Merge two histories by date.
-    - base: usually HF/YF bars (fallback data)
+    - base: usually HF/YF bars (bootstrap data)
     - existing: bars already in rolling (preferred if conflict)
+
+    IMPORTANT: Never prunes. (Append-only + dedupe, then sort.)
     """
     by_date: Dict[str, Dict[str, Any]] = {}
     for bar in base or []:
@@ -564,7 +724,7 @@ def _merge_histories_prefer_existing(base: List[Dict[str, Any]], existing: List[
             by_date[d] = bar  # overwrite with existing
     merged = list(by_date.values())
     merged.sort(key=lambda x: x.get("date") or "")
-    return merged[-MAX_HISTORY_DAYS:]
+    return merged
 
 
 def _patch_recent_days_yf(symbol: str, hist: List[Dict[str, Any]], days: int) -> List[Dict[str, Any]]:
@@ -581,23 +741,34 @@ def _patch_recent_days_yf(symbol: str, hist: List[Dict[str, Any]], days: int) ->
     return _merge_histories_prefer_existing(base=yf_bars, existing=hist)
 
 
-def _ensure_bootstrap_history_if_needed(symbol: str, hist: List[Dict[str, Any]], min_days: int) -> List[Dict[str, Any]]:
+def _ensure_bootstrap_history_if_needed(
+    symbol: str,
+    hist: List[Dict[str, Any]],
+    min_days: int,
+    *,
+    hf_prefetched: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> List[Dict[str, Any]]:
     """
     If history is too short (< min_days unique dates), bootstrap.
 
     Order:
-      1) HF dataset via DuckDB/Parquet (if enabled)
+      1) HF dataset via DuckDB/Parquet (batched prefetch map if provided)
       2) yfinance (rate-limited) fallback
       3) Optional recent-day patching via yfinance (OFF by default)
+
+    NEVER prunes rolling history.
     """
     symbol = symbol.upper()
-    existing_dates = _unique_history_dates(hist)
-    if len(existing_dates) >= min_days:
+    if _history_unique_days_at_least(hist, int(min_days)):
         return hist
 
     bootstrap_bars: List[Dict[str, Any]] = []
+
     if USE_HF_BOOTSTRAP:
-        bootstrap_bars = _bootstrap_history_hf(symbol, max_days=MAX_HISTORY_DAYS)
+        if hf_prefetched and symbol in hf_prefetched:
+            bootstrap_bars = hf_prefetched.get(symbol) or []
+        else:
+            bootstrap_bars = _bootstrap_history_hf(symbol, max_days=MAX_HISTORY_DAYS)
 
     if not bootstrap_bars:
         bootstrap_bars = _bootstrap_history_yf(symbol, max_days=MAX_HISTORY_DAYS, period="3y")
@@ -611,7 +782,7 @@ def _ensure_bootstrap_history_if_needed(symbol: str, hist: List[Dict[str, Any]],
         merged = _patch_recent_days_yf(symbol, merged, days=YF_PATCH_RECENT_DAYS)
 
     if VERBOSE_BOOTSTRAP:
-        log(f"🧪 Bootstrapped history for {symbol}: {len(merged)} days.")
+        log(f"🧪 Bootstrapped history for {symbol}: {len(merged)} total days (append-only).")
 
     return merged
 
@@ -634,17 +805,24 @@ def _ensure_symbol_node(rolling: Dict[str, Any], sym_u: str) -> Dict[str, Any]:
 # Main backfill routine (same external API)
 # -------------------------------------------------------------------
 def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int = 8) -> int:
-    rolling = _read_rolling() or {}
+    """
+    Backfill routine:
+      - Always reads rolling_body first.
+      - Only bootstraps HF/YF for symbols missing enough history.
+      - Never prunes rolling history.
+    """
+    rolling = _read_rolling_with_retry() or {}
     today = datetime.utcnow().strftime("%Y-%m-%d")
     mode = "full"
     if not rolling:
         mode = "fallback"
-        log("⚠️ Rolling cache missing — forcing full rebuild.")
+        log("⚠️ Rolling cache missing/empty — running in fallback mode (will not overwrite existing rolling with empty).")
     log(f"🧩 Backfill mode: {mode.upper()} | Date: {today}")
 
     if not symbols:
-        symbols = [s for s in rolling.keys() if not s.startswith("_")]
+        symbols = [s for s in rolling.keys() if not str(s).startswith("_")]
 
+    symbols = [str(s).upper() for s in symbols if str(s).strip()]
     total = len(symbols)
     if not total:
         log("⚠️ No symbols to backfill.")
@@ -653,9 +831,32 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
     updated = 0
     start = time.time()
 
+    # Determine which symbols actually need HF/YF bootstrap (missing history).
+    need_bootstrap: List[str] = []
+    for s in symbols:
+        node = rolling.get(s)
+        hist = node.get("history") if isinstance(node, dict) else []
+        if not isinstance(hist, list):
+            hist = []
+        if not _history_unique_days_at_least(hist, int(min_days)):
+            need_bootstrap.append(s)
+
+    hf_prefetched: Dict[str, List[Dict[str, Any]]] = {}
+    if USE_HF_BOOTSTRAP and HF_PREFETCH_ENABLED and need_bootstrap:
+        try:
+            hf_prefetched = _prefetch_hf_bootstrap_map(
+                need_bootstrap,
+                batch_size=HF_BATCH_SIZE,
+                max_workers=max(1, HF_MAX_CONCURRENCY),
+                max_days=MAX_HISTORY_DAYS,
+            ) or {}
+        except Exception as e:
+            hf_prefetched = {}
+            log(f"[backfill_history] ⚠️ HF prefetch failed (continuing with per-symbol HF/YF): {e}")
+
     # FULL / FALLBACK MODE — bundle-based refresh + bootstrap
     if mode in ("full", "fallback"):
-        log(f"🔧 Starting full rolling backfill for {total} symbols (batch SA fetch + HF/YF bootstrap)…")
+        log(f"🔧 Starting rolling backfill for {total} symbols (batch SA fetch + HF/YF bootstrap where missing)…")
         sa_bundle = fetch_sa_bundle_parallel(max_workers=max_workers)
         if sa_bundle:
             try:
@@ -671,12 +872,16 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
                 patch_symbols.add(str(s).upper())
             log(f"🩹 YF recent patch enabled: days={YF_PATCH_RECENT_DAYS}, max_symbols={len(patch_symbols)}")
 
-        def _process(sym: str) -> int:
-            sym_u = str(sym).upper()
-            node = _ensure_symbol_node(rolling, sym_u)
+        def _process(sym_u: str) -> int:
+            # Work off a local node copy to reduce shared-state hazards; write back under lock.
+            with _ROLLING_LOCK:
+                node = _ensure_symbol_node(rolling, sym_u)
+                node_local = dict(node)
 
-            hist = node.get("history") or []
-            hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
+            hist = node_local.get("history") or []
+            if not isinstance(hist, list):
+                hist = []
+            hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days, hf_prefetched=hf_prefetched)
 
             if sym_u in patch_symbols:
                 hist = _patch_recent_days_yf(sym_u, hist, days=YF_PATCH_RECENT_DAYS)
@@ -684,15 +889,18 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
             sa = sa_bundle.get(sym_u) if sa_bundle else None
             if not sa:
                 if hist:
-                    node["history"] = hist
+                    node_local["history"] = hist
                     try:
                         last_bar = hist[-1]
-                        node["close"] = last_bar.get("close")
-                        node.setdefault("price", last_bar.get("close"))
+                        node_local["close"] = last_bar.get("close")
+                        node_local.setdefault("price", last_bar.get("close"))
                     except Exception:
                         pass
-                    rolling[sym_u] = node
+                    with _ROLLING_LOCK:
+                        rolling[sym_u] = node_local
                     return 1
+                with _ROLLING_LOCK:
+                    rolling[sym_u] = node_local
                 return 0
 
             latest_bar = {
@@ -704,7 +912,7 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
                 "volume": sa.get("volume"),
             }
 
-            # Append-only + per-date dedupe
+            # Append-only + per-date dedupe (never prune).
             by_date: Dict[str, Dict[str, Any]] = {}
             for bar in hist or []:
                 d = str(bar.get("date") or "")
@@ -713,45 +921,60 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
             by_date[today] = latest_bar
             hist_new = list(by_date.values())
             hist_new.sort(key=lambda x: x.get("date") or "")
-            hist_new = hist_new[-MAX_HISTORY_DAYS:]
 
-            node["history"] = hist_new
-            node["close"] = latest_bar.get("close")
-            node.update(sa)
-            rolling[sym_u] = node
+            node_local["history"] = hist_new
+            node_local["close"] = latest_bar.get("close")
+            # Merge SA snapshot fields (never deletes unknown keys)
+            try:
+                node_local.update(sa)
+            except Exception:
+                pass
+
+            with _ROLLING_LOCK:
+                rolling[sym_u] = node_local
             return 1
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futs = {ex.submit(_process, s): s for s in symbols}
             for fut in progress_bar(as_completed(futs), desc="Backfill (bundle+HF/YF)", unit="sym", total=total):
-                updated += fut.result()
+                try:
+                    updated += int(fut.result() or 0)
+                except Exception:
+                    continue
 
     # INCREMENTAL MODE — per-symbol repair (kept for compatibility)
     else:
-        def _process(sym: str) -> int:
-            sym_u = str(sym).upper()
-            node = _ensure_symbol_node(rolling, sym_u)
+        def _process(sym_u: str) -> int:
+            with _ROLLING_LOCK:
+                node = _ensure_symbol_node(rolling, sym_u)
+                node_local = dict(node)
 
-            hist = node.get("history") or []
-            hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days)
+            hist = node_local.get("history") or []
+            if not isinstance(hist, list):
+                hist = []
+            hist = _ensure_bootstrap_history_if_needed(sym_u, hist, min_days=min_days, hf_prefetched=hf_prefetched)
 
             if hist and str(hist[-1].get("date")) == today:
-                node["history"] = hist
-                rolling[sym_u] = node
+                node_local["history"] = hist
+                with _ROLLING_LOCK:
+                    rolling[sym_u] = node_local
                 return 0
 
             sa = _fetch_from_stockanalysis(sym_u)
             if not sa:
                 if hist:
-                    node["history"] = hist
+                    node_local["history"] = hist
                     try:
                         last_bar = hist[-1]
-                        node["close"] = last_bar.get("close")
-                        node.setdefault("price", last_bar.get("close"))
+                        node_local["close"] = last_bar.get("close")
+                        node_local.setdefault("price", last_bar.get("close"))
                     except Exception:
                         pass
-                    rolling[sym_u] = node
+                    with _ROLLING_LOCK:
+                        rolling[sym_u] = node_local
                     return 1
+                with _ROLLING_LOCK:
+                    rolling[sym_u] = node_local
                 return 0
 
             latest_bar = {
@@ -771,27 +994,38 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
             by_date[today] = latest_bar
             hist_new = list(by_date.values())
             hist_new.sort(key=lambda x: x.get("date") or "")
-            hist_new = hist_new[-MAX_HISTORY_DAYS:]
 
-            node["history"] = hist_new
-            node["close"] = latest_bar.get("close") or sa.get("close")
-            node["marketCap"] = sa.get("marketCap", node.get("marketCap"))
-            node.update(sa)
-            rolling[sym_u] = node
+            node_local["history"] = hist_new
+            node_local["close"] = latest_bar.get("close") or sa.get("close")
+            node_local["marketCap"] = sa.get("marketCap", node_local.get("marketCap"))
+            try:
+                node_local.update(sa)
+            except Exception:
+                pass
+
+            with _ROLLING_LOCK:
+                rolling[sym_u] = node_local
             return 1
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futs = {ex.submit(_process, s): s for s in symbols}
             for fut in progress_bar(as_completed(futs), desc="Backfill (incremental)", unit="sym", total=total):
-                updated += fut.result()
+                try:
+                    updated += int(fut.result() or 0)
+                except Exception:
+                    continue
 
+    # Save to rolling_body (data_pipeline points save_rolling to PATHS["rolling_body"])
     save_rolling(rolling)
 
     dur = time.time() - start
     log(f"✅ Backfill ({mode}) complete — {updated}/{total} updated in {dur:.1f}s.")
+    log("ℹ️ Rolling safety: this backfill never prunes or deletes existing rolling history.")
     if USE_HF_BOOTSTRAP:
         log(f"ℹ️ HF bootstrap enabled via DuckDB/Parquet: {HF_STOCK_PRICES_PARQUET}")
-        log(f"ℹ️ HF concurrency cap: {max(1, HF_MAX_CONCURRENCY)}")
+        log(f"ℹ️ HF prefetch: enabled={HF_PREFETCH_ENABLED}, batch_size={HF_BATCH_SIZE}, max_concurrency={max(1, HF_MAX_CONCURRENCY)}")
+        if _HF_DUCKDB_ERR is not None:
+            log(f"ℹ️ HF DuckDB note: last import/init error seen: {_HF_DUCKDB_ERR}")
     if YF_PATCH_RECENT_DAYS > 0:
         log(f"ℹ️ YF recent patch days={YF_PATCH_RECENT_DAYS}, max_symbols={YF_PATCH_MAX_SYMBOLS} (see env vars).")
     return updated
@@ -803,7 +1037,7 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="AION Rolling Backfill (Batch SA + HF/YF Bootstrap, New Core)")
+    parser = argparse.ArgumentParser(description="AION Rolling Backfill (Batch SA + Batched HF Bootstrap + YF Fallback)")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--min_days", type=int, default=180)
     args = parser.parse_args()

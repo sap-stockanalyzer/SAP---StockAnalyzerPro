@@ -442,7 +442,7 @@ def save_rolling(rolling: Dict[str, Any], *, allow_empty: bool = False):
     rolling = _normalize_rolling(rolling)
     _backup_file(ROLLING_BODY_PATH)
     _save_json_gz(ROLLING_BODY_PATH, rolling)
-    log(f"[data_pipeline] 💾 rolling.json.gz updated ({len(rolling)} symbols)")
+    log(f"[data_pipeline] 💾 {ROLLING_BODY_PATH.name} updated ({len(rolling)} symbols)")
 
 
 def save_brain(brain: Dict[str, Any]):
