@@ -75,17 +75,21 @@ def clear_locks(_: None = Depends(admin_required)):
             except Exception:
                 pass
 
-    # 2️⃣ Remove locks inside known lock directories
+# 2️⃣ Remove locks inside known lock directories (SAFETY: only *.lock files)
     for lock_dir in LOCK_DIRS:
-        if lock_dir.exists():
-            for p in lock_dir.glob("*"):
-                try:
+        if not lock_dir.exists():
+            continue
+
+        # Only remove lock files, never arbitrary files
+        for p in lock_dir.glob("*.lock"):
+            try:
+                if p.is_file() or p.is_symlink():
                     p.unlink()
                     removed.append(str(p))
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
-    # 3️⃣ Reset replay state
+# 3️⃣ Reset replay state
     if SWING_REPLAY_STATE.exists():
         clean_state = {
             "status": "idle",
