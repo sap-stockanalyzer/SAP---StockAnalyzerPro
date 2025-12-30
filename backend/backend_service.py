@@ -56,6 +56,7 @@ from backend.admin.admin_tools_router import router as admin_tools_router
 import backend.routers.eod_bots_router as eod_bots_router
 import backend.routers.intraday_logs_router as intraday_logs_router
 import backend.routers.intraday_router as intraday_router
+from backend.routers.intraday_tape_router import router as intraday_tape_router
 
 # Optional cloud sync
 try:
@@ -107,6 +108,7 @@ app.include_router(admin_tools_router)
 app.include_router(eod_bots_router)
 app.include_router(intraday_logs_router)
 app.include_router(intraday_router)
+app.include_router(intraday_tape_router)
 
 # -------------------------------------------------
 # Basic Endpoints
