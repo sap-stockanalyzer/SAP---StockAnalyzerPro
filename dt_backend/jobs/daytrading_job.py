@@ -1,4 +1,4 @@
-# dt_backend/jobs/daytrading_job.py — v3.0 (SINGLE-ROLLING, LINUX-SAFE)
+# dt_backend/jobs/daytrading_job.py — v3.1 (SINGLE-ROLLING + SAFE DEFAULT LOCK)
 """Main intraday trading loop for AION dt_backend.
 
 This job wires together the intraday pipeline:
@@ -15,11 +15,15 @@ We use a **single** rolling cache file (DT_PATHS['rolling_intraday_file']).
 * Long-lived learning should live in a separate dt_brain artifact (see
   dt_backend/core/dt_brain.py), not in rolling.
 
-Windows note
+Safety notes
 ------------
-If you ever need to split market bars into a separate rolling again (Windows
-contention), you must also add an explicit merge/bridge step. On Linux we keep
-this simple.
+- We do NOT embed model-training code in this job file.
+- Rolling writes are atomic, but atomic replace does not prevent "lost updates"
+  when multiple processes read-modify-write at the same time. So we default the
+  rolling lock ON for this process unless the environment explicitly disables it.
+
+    DT_USE_LOCK=1   (default here)
+    DT_USE_LOCK=0   (disable if you truly know it's single-writer)
 """
 
 from __future__ import annotations
@@ -45,24 +49,14 @@ def run_daytrading_cycle(
     max_positions: int = 50,
     execution_cfg: ExecutionConfig | None = None,
 ) -> Dict[str, Any]:
-    """Run one full intraday cycle.
-
-    Parameters
-    ----------
-    execute:
-        If True, submit orders using the configured broker API (paper by default).
-    max_symbols:
-        Optional cap on number of symbols processed for features/scoring.
-    max_positions:
-        Max symbols selected by policy (ranking step).
-    execution_cfg:
-        Optional execution sizing / safety config.
-    """
+    """Run one full intraday cycle."""
     log("[daytrading_job] 🚀 starting intraday cycle")
 
-    # Single rolling file. Lock is optional; safe on Linux with atomic rename.
-    os.environ.setdefault("DT_USE_LOCK", os.getenv("DT_USE_LOCK", "0") or "0")
+    # Single rolling file: disallow per-process split unless explicitly set elsewhere.
     os.environ.pop("DT_ROLLING_PATH", None)
+
+    # Default rolling lock ON for this job (prevents read-modify-write stomps across processes).
+    os.environ.setdefault("DT_USE_LOCK", (os.getenv("DT_USE_LOCK") or "1"))
 
     ctx_summary = build_intraday_context()
     feat_summary = build_intraday_features(max_symbols=max_symbols)
@@ -70,7 +64,6 @@ def run_daytrading_cycle(
     regime_summary = classify_intraday_regime()
     policy_summary = apply_intraday_policy(max_positions=max_positions)
 
-    # Convert policy → execution intents
     exec_dt_summary = run_execution_intraday()
     signals_summary = build_intraday_signals()
 

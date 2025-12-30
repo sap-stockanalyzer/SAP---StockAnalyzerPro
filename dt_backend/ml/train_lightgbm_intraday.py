@@ -1,22 +1,19 @@
+# dt_backend/ml/train_lightgbm_intraday.py — v1.1 (ATOMIC SAVE + BACKUP + LOCK)
 """Train a fast 3-class LightGBM intraday model.
 
-Expects a parquet built by ml_data_builder_intraday.py with:
-  - feature columns
-  - label column: 'label' (SELL/HOLD/BUY) or 'label_id' (0/1/2)
+Writes:
+  dt_backend/models/lightgbm_intraday/model.txt
+  dt_backend/models/lightgbm_intraday/model.txt.bak
 
-Saves artifacts under: DT_PATHS["dtmodels"] / "lightgbm_intraday"
-  - model.txt
-  - feature_map.json
-  - label_map.json
-
-Important:
-- Your scheduler is reading:
-    dt_backend/models/lightgbm_intraday/model.txt
-  So training MUST write there (not dt_backend/models/lightgbm/model.txt).
+Run:
+  python -m dt_backend.ml.train_lightgbm_intraday
 """
+
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional
 
@@ -41,6 +38,68 @@ except Exception:
         print(msg, flush=True)
 
 
+def _model_lock_path(model_dir: Path) -> Path:
+    return model_dir / ".model_write.lock"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return True
+
+
+def _read_lock_pid(lock: Path) -> int:
+    try:
+        raw = lock.read_text(encoding="utf-8", errors="ignore").strip()
+        parts = raw.split()
+        return int(parts[0]) if parts else -1
+    except Exception:
+        return -1
+
+
+def _acquire_model_lock(lock: Path, timeout_s: float = 180.0) -> bool:
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.time() + max(0.0, float(timeout_s))
+
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                payload = f"{os.getpid()} {time.time():.3f}"
+                os.write(fd, payload.encode("utf-8", errors="ignore"))
+            finally:
+                os.close(fd)
+            return True
+        except FileExistsError:
+            pid = _read_lock_pid(lock)
+            if pid > 0 and not _pid_alive(pid):
+                try:
+                    lock.unlink(missing_ok=True)  # type: ignore[arg-type]
+                    continue
+                except Exception:
+                    pass
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.2)
+        except Exception:
+            return False
+
+
+def _release_model_lock(lock: Path) -> None:
+    try:
+        lock.unlink(missing_ok=True)  # type: ignore[arg-type]
+    except Exception:
+        pass
+
+
 def _resolve_training_data() -> Path:
     root = (
         DT_PATHS.get("ml_data_dt")
@@ -52,13 +111,11 @@ def _resolve_training_data() -> Path:
 
 
 def _coerce_features(X: pd.DataFrame) -> pd.DataFrame:
-    """Convert arbitrary feature dataframe into numeric matrix for LightGBM."""
     X2 = pd.DataFrame(index=X.index)
 
     for c in X.columns:
         s = X[c]
 
-        # datetime-like
         if pd.api.types.is_datetime64_any_dtype(s) or pd.api.types.is_datetime64tz_dtype(s):
             try:
                 if pd.api.types.is_datetime64tz_dtype(s):
@@ -68,23 +125,19 @@ def _coerce_features(X: pd.DataFrame) -> pd.DataFrame:
                 X2[c] = 0
             continue
 
-        # bool
         if pd.api.types.is_bool_dtype(s):
             X2[c] = s.fillna(False).astype(np.int8)
             continue
 
-        # category / object -> factorize
         if pd.api.types.is_object_dtype(s) or isinstance(s.dtype, pd.CategoricalDtype):
             codes, _ = pd.factorize(s.astype("string"), sort=True)
             X2[c] = pd.Series(codes, index=X.index).astype(np.int32)
             continue
 
-        # numeric
         if pd.api.types.is_numeric_dtype(s):
             X2[c] = pd.to_numeric(s, errors="coerce").fillna(0.0).astype(np.float32)
             continue
 
-        # fallback
         X2[c] = pd.to_numeric(s.astype("string"), errors="coerce").fillna(0.0).astype(np.float32)
 
     return X2
@@ -94,12 +147,12 @@ def _load_training_data() -> Tuple[pd.DataFrame, pd.Series]:
     path = _resolve_training_data()
     if not path.exists():
         raise FileNotFoundError(f"Intraday training data not found at {path}")
+
     log(f"[train_lightgbm_intraday] 📦 Loading training data from {path}")
     df = pd.read_parquet(path)
     if df.empty:
         raise ValueError(f"Training dataframe at {path} is empty.")
 
-    # Labels
     if "label_id" in df.columns:
         y = df["label_id"].astype(int)
     elif "label" in df.columns:
@@ -114,19 +167,13 @@ def _load_training_data() -> Tuple[pd.DataFrame, pd.Series]:
     drop_cols = [c for c in ("label", "label_id") if c in df.columns]
     X = df.drop(columns=drop_cols)
 
-    # Prevent ticker memorization
     if "symbol" in X.columns:
         X = X.drop(columns=["symbol"])
 
-    X = _coerce_features(X)
-    return X, y
+    return _coerce_features(X), y
 
 
-def _train_lgb(
-    X: pd.DataFrame,
-    y: pd.Series,
-    params: Optional[Dict[str, Any]] = None,
-) -> lgb.Booster:
+def _train_lgb(X: pd.DataFrame, y: pd.Series, params: Optional[Dict[str, Any]] = None) -> lgb.Booster:
     if params is None:
         params = {
             "objective": "multiclass",
@@ -144,22 +191,16 @@ def _train_lgb(
         }
 
     dtrain = lgb.Dataset(X, label=y.values)
-
-    try:
-        log(f"[train_lightgbm_intraday] ℹ️ Using LightGBM v{getattr(lgb, '__version__', '?')}")
-    except Exception:
-        pass
-
+    log(f"[train_lightgbm_intraday] ℹ️ Using LightGBM v{getattr(lgb, '__version__', '?')}")
     log(f"[train_lightgbm_intraday] 🚀 Training on {len(X):,} rows, {X.shape[1]} features...")
 
-    callbacks = [lgb.log_evaluation(period=50)]
     booster = lgb.train(
         params,
         dtrain,
         num_boost_round=400,
         valid_sets=[dtrain],
         valid_names=["train"],
-        callbacks=callbacks,
+        callbacks=[lgb.log_evaluation(period=50)],
     )
     log("[train_lightgbm_intraday] ✅ Training complete.")
     return booster
@@ -170,47 +211,53 @@ def _resolve_model_dir() -> Path:
     return Path(base) / "lightgbm_intraday"
 
 
-def _save_artifacts(booster: lgb.Booster, feature_names: list[str]) -> None:
-    model_dir = _resolve_model_dir()
-    model_dir.mkdir(parents=True, exist_ok=True)
+def _atomic_write_json(path: Path, obj: Any) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
-    model_path = model_dir / "model.txt"
-    fmap_path = model_dir / "feature_map.json"
-    label_map_path = model_dir / "label_map.json"
 
-    booster.save_model(str(model_path))
+def _save_model_atomic(booster: lgb.Booster, model_path: Path) -> None:
+    bak = model_path.with_name(model_path.name + ".bak")
+    tmp = model_path.with_name(model_path.name + ".tmp")
+    model_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with fmap_path.open("w", encoding="utf-8") as f:
-        json.dump(feature_names, f, ensure_ascii=False, indent=2)
+    if model_path.exists():
+        try:
+            bak.write_bytes(model_path.read_bytes())
+        except Exception:
+            pass
 
-    with label_map_path.open("w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "label_order": LABEL_ORDER,
-                "label2id": LABEL2ID,
-                "id2label": ID2LABEL,
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+    booster.save_model(str(tmp))
+    os.replace(tmp, model_path)
 
-    log(f"[train_lightgbm_intraday] 💾 Saved model → {model_path}")
-    log(f"[train_lightgbm_intraday] 💾 Saved feature_map → {fmap_path}")
-    log(f"[train_lightgbm_intraday] 💾 Saved label_map → {label_map_path}")
+    # Verify it loads (catches truncated garbage)
+    _ = lgb.Booster(model_file=str(model_path))
 
 
 def train_lightgbm_intraday() -> Dict[str, Any]:
     X, y = _load_training_data()
     booster = _train_lgb(X, y)
-    _save_artifacts(booster, list(X.columns))
-    summary = {
-        "n_rows": int(len(X)),
-        "n_features": int(X.shape[1]),
-        "label_order": LABEL_ORDER,
-        "labels": sorted(set(int(v) for v in np.unique(y.values))),
-        "model_dir": str(_resolve_model_dir()),
-    }
+
+    model_dir = _resolve_model_dir()
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    lock = _model_lock_path(model_dir)
+    if not _acquire_model_lock(lock, timeout_s=float(os.getenv("DT_MODEL_LOCK_TIMEOUT", "180"))):
+        raise TimeoutError(f"Timed out acquiring model lock: {lock}")
+
+    try:
+        _save_model_atomic(booster, model_dir / "model.txt")
+        _atomic_write_json(model_dir / "feature_map.json", list(X.columns))
+        _atomic_write_json(
+            model_dir / "label_map.json",
+            {"label_order": LABEL_ORDER, "label2id": LABEL2ID, "id2label": ID2LABEL},
+        )
+    finally:
+        _release_model_lock(lock)
+
+    summary = {"n_rows": int(len(X)), "n_features": int(X.shape[1]), "model_dir": str(model_dir)}
     log(f"[train_lightgbm_intraday] 📊 Summary: {summary}")
     return summary
 

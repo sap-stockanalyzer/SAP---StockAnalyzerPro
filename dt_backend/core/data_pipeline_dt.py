@@ -1,19 +1,26 @@
-# dt_backend/core/data_pipeline_dt.py — v1.1
+# dt_backend/core/data_pipeline_dt.py — v1.2
 """
 Lightweight I/O helpers for dt_backend intraday engine.
 
 Guarantees:
   • never raises in normal use (best-effort)
   • atomic writes for rolling cache
+  • optional lock to prevent cross-process read-modify-write stomps
   • stable node schema via ensure_symbol_node
 
-Key API:
-  • log(msg)
-  • _read_rolling()
-  • save_rolling(rolling)
-  • load_universe()
-  • ensure_symbol_node(rolling, symbol)
+Locking
+-------
+Atomic rename prevents gzip corruption, but it does NOT prevent lost updates when
+multiple processes do: read → modify → save.
+
+So we support a simple lock file:
+  - Enabled when DT_USE_LOCK is truthy ("1", "true", "yes", "on").
+  - Default is ON unless you explicitly set DT_USE_LOCK=0.
+
+Stale-lock handling:
+  - If the lock file exists but the recorded PID is not alive, we remove it.
 """
+
 from __future__ import annotations
 
 import gzip
@@ -27,15 +34,7 @@ from .config_dt import DT_PATHS
 from .logger_dt import log
 
 
-# ---------------------------------------------------------------------------
-# Rolling cache helpers
-# ---------------------------------------------------------------------------
-
 def _rolling_path() -> Path:
-    # Allow per-process override. This is how we keep "bars rolling" and
-    # "dt engine rolling" separate on Windows (avoids gzip corruption).
-    #
-    # If DT_ROLLING_PATH is set, it wins.
     override = os.getenv("DT_ROLLING_PATH", "").strip()
     if override:
         return Path(override)
@@ -43,43 +42,75 @@ def _rolling_path() -> Path:
 
 
 def _lock_path() -> Path:
-    # If DT_LOCK_PATH is set, it wins; otherwise use config default.
     override = os.getenv("DT_LOCK_PATH", "").strip()
     if override:
         return Path(override)
-    return Path(DT_PATHS.get("rolling_dt_lock_file") or (Path(DT_PATHS["rolling_intraday_dir"]) / ".rolling_intraday_dt.lock"))
+    return Path(
+        DT_PATHS.get("rolling_dt_lock_file")
+        or (Path(DT_PATHS["rolling_intraday_dir"]) / ".rolling_intraday_dt.lock")
+    )
 
 
 def _should_lock() -> bool:
-    return str(os.getenv("DT_USE_LOCK", "0")).strip().lower() in ("1", "true", "yes", "y", "on")
+    # Default ON (safer for multi-process schedulers). Set DT_USE_LOCK=0 to disable.
+    return str(os.getenv("DT_USE_LOCK", "1")).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return True
+
+
+def _read_lock_pid(lock: Path) -> int:
+    try:
+        raw = lock.read_text(encoding="utf-8", errors="ignore").strip()
+        parts = raw.split()
+        return int(parts[0]) if parts else -1
+    except Exception:
+        return -1
 
 
 def _acquire_lock(timeout_s: float = 30.0) -> bool:
-    """Best-effort lock via exclusive file create.
-
-    Windows-friendly: avoids relying on POSIX-only file locks.
-    """
     if not _should_lock():
         return True
 
     lock = _lock_path()
+    lock.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + max(0.0, float(timeout_s))
 
     while True:
         try:
-            # O_EXCL ensures we fail if it already exists.
             fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             try:
-                os.write(fd, str(os.getpid()).encode("utf-8", errors="ignore"))
+                payload = f"{os.getpid()} {time.time():.3f}"
+                os.write(fd, payload.encode("utf-8", errors="ignore"))
             finally:
                 os.close(fd)
             return True
+
         except FileExistsError:
+            pid = _read_lock_pid(lock)
+            if pid > 0 and not _pid_alive(pid):
+                try:
+                    lock.unlink(missing_ok=True)  # type: ignore[arg-type]
+                    continue
+                except Exception:
+                    pass
+
             if time.time() >= deadline:
                 return False
             time.sleep(0.15)
+
         except Exception:
-            # If lock fails for any reason, do not crash.
             return False
 
 
@@ -100,55 +131,38 @@ def _read_rolling() -> Dict[str, Any]:
     try:
         with gzip.open(path, "rt", encoding="utf-8") as f:
             data = json.load(f)
-        if not isinstance(data, dict):
-            log(f"⚠️ rolling cache at {path} is not a dict, resetting.")
-            return {}
-        return data
+        return data if isinstance(data, dict) else {}
     except Exception as e:
         log(f"⚠️ failed to read rolling cache {path}: {e}")
         return {}
 
 
 def save_rolling(rolling: Dict[str, Any]) -> None:
-    """
-    Atomically write intraday rolling cache as JSON.GZ.
-
-    IMPORTANT:
-      Path.with_suffix(".tmp") breaks names like *.json.gz.
-      We use "<filename>.tmp" next to the target file.
-    """
     path = _rolling_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-
     tmp = path.with_name(path.name + ".tmp")
 
     try:
-        if not _acquire_lock(timeout_s=float(os.getenv("DT_LOCK_TIMEOUT", "30"))):
+        if not _acquire_lock(timeout_s=float(os.getenv("DT_LOCK_TIMEOUT", "60"))):
             log(f"⚠️ rolling lock timeout; skipping save: {path}")
             return
+
         with gzip.open(tmp, "wt", encoding="utf-8") as f:
             json.dump(rolling or {}, f, ensure_ascii=False, indent=2)
+
         tmp.replace(path)
+
     except Exception as e:
         log(f"⚠️ failed to save rolling cache {path}: {e}")
     finally:
         _release_lock()
 
 
-# ---------------------------------------------------------------------------
-# Universe helpers
-# ---------------------------------------------------------------------------
-
 def _norm_sym(sym: str) -> str:
     return (sym or "").strip().upper()
 
 
 def load_universe() -> List[str]:
-    """
-    Load universe schema:
-      1) {"symbols": ["AAPL", ...]}
-      2) ["AAPL", ...]
-    """
     path = Path(DT_PATHS["universe_file"])
     if not path.exists():
         log(f"⚠️ universe file missing at {path} — using empty universe.")
@@ -171,29 +185,14 @@ def load_universe() -> List[str]:
     out: List[str] = []
     seen = set()
     for item in items:
-        sym = _norm_sym(str(item))
-        if not sym or sym in seen:
-            continue
-        seen.add(sym)
-        out.append(sym)
+        s = _norm_sym(str(item))
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
     return out
 
 
-# ---------------------------------------------------------------------------
-# Rolling node helpers
-# ---------------------------------------------------------------------------
-
 def ensure_symbol_node(rolling: Dict[str, Any], symbol: str) -> Dict[str, Any]:
-    """
-    Ensure rolling[symbol] exists and has standard sections.
-
-    Standard sections:
-      • bars_intraday
-      • features_dt
-      • predictions_dt
-      • context_dt
-      • policy_dt
-    """
     sym = _norm_sym(symbol)
     node = rolling.get(sym)
     if not isinstance(node, dict):
