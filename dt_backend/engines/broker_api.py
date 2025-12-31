@@ -136,6 +136,10 @@ def _resolve_ledger_path() -> Path:
 
 LEDGER_PATH: Path = _resolve_ledger_path()
 
+# Backward-compat alias (older code imports PAPER_STATE_PATH)
+# In v2.2 this points at the per-bot ledger for the current DT_BOT_ID.
+PAPER_STATE_PATH: Path = LEDGER_PATH
+
 
 def _starting_cash_cap() -> float:
     """
