@@ -20,6 +20,7 @@ We acquire a scheduler lock file on startup so two schedulers can't run at once.
 from __future__ import annotations
 
 import time
+import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -49,27 +50,23 @@ except Exception:  # pragma: no cover
 
 
 def _now_ny() -> datetime:
-    """NY-local datetime with tzinfo when possible."""
     if callable(now_ny):
         return now_ny()  # type: ignore[misc]
     if ZoneInfo is not None:
         return datetime.now(ZoneInfo("America/New_York"))  # type: ignore[misc]
-    # Worst case fallback: UTC "pretending" to be local; still stable for comparisons.
     return datetime.now(timezone.utc)
 
 
-def _is_market_open_fallback(ny_now: Optional[datetime] = None) -> bool:
-    """Market-open check.
-    - Prefer utils.time_utils.is_market_open() if available.
-    - Otherwise use a simple NY weekday + 09:30–16:00 time window (no holiday calendar).
-    """
+def _is_market_open_fallback() -> bool:
+    # Prefer utils.time_utils if it exists.
     if callable(is_market_open):
         try:
             return bool(is_market_open())  # type: ignore[call-arg]
         except Exception:
             pass
 
-    n = ny_now or _now_ny()
+    # Next-best: simple NY schedule (no holiday calendar).
+    n = _now_ny()
     wd = int(n.weekday())  # 0=Mon
     if wd >= 5:
         return False
@@ -80,7 +77,7 @@ def _is_market_open_fallback(ny_now: Optional[datetime] = None) -> bool:
 
 
 def _close_plus_one_ts(ny: datetime) -> datetime:
-    """16:00:01 NY for the session date of `ny`."""
+    # 16:00:01 NY
     return ny.replace(hour=16, minute=0, second=1, microsecond=0)
 
 
@@ -89,7 +86,6 @@ def _utc_now_iso() -> str:
 
 
 def _last_cleanup_session_date() -> Optional[str]:
-    """Reads dt_brain meta for last EOD cleanup session date."""
     try:
         brain = read_dt_brain()
         meta = brain.get("_meta")
@@ -123,75 +119,75 @@ def run_dt_scheduler(
             f"max_symbols={max_symbols} execute={execute}"
         )
 
-        # Track transition so we can run EOD exactly once per NY session.
+        # Track transition so we can run EOD exactly once per session.
         was_open = False
         last_bars_t = 0.0
         last_trade_t = 0.0
 
-        # Optional small cooldown after hard failures to avoid hot crash loops
-        backoff_sec = 0.0
-
         while True:
-            loop_t = time.time()
-
-            # ✅ ALWAYS define time anchors at top of loop (prevents UnboundLocalError-style crashes)
+            # Always define a real "now" (UTC) every loop.
+            # This prevents branchy/conditional time variables from ever being unbound.
             now_utc = datetime.now(timezone.utc)
-            ny_now = _now_ny()
 
-            # Use NY date as the canonical session key for EOD/nightly idempotence
-            sess_ny = ny_now.date().isoformat()
+            t = time.time()
 
             # Determine market state.
-            open_now = _is_market_open_fallback(ny_now)
+            open_now = _is_market_open_fallback()
 
             # ----
             # EOD transition: open -> closed
             # ----
             if was_open and not open_now:
                 try:
+                    # Session date should be NY date if possible.
+                    try:
+                        today = _now_ny().date().isoformat()
+                    except Exception:
+                        today = now_utc.date().isoformat()
+
                     last_done = _last_cleanup_session_date()
-                    if last_done == sess_ny:
-                        log(f"[dt_scheduler] market closed; EOD already done for {sess_ny}")
+                    if last_done == today:
+                        log(f"[dt_scheduler] market closed; EOD already done for {today}")
                     else:
-                        log(f"[dt_scheduler] market closed; running EOD cleanup for {sess_ny} …")
+                        log(f"[dt_scheduler] market closed; running EOD cleanup for {today} …")
                         res = run_end_of_day_cleanup(clear_global_blocks=True)
                         log(f"[dt_scheduler] EOD cleanup result: {res}")
 
-                    # Nightly should run after close+1s (idempotent per session date).
-                    # We do NOT sleep-until-close inside scheduler; we just check readiness.
-                    try:
-                        close_plus_1 = _close_plus_one_ts(ny_now)
-                        if ny_now >= close_plus_1:
+                        # Run DT nightly immediately after close (+1s), idempotent per session.
+                        try:
+                            ny = _now_ny()
+                            ts = _close_plus_one_ts(ny)
+                            if ny < ts:
+                                time.sleep(max(0.0, (ts - ny).total_seconds()))
+                            sess = ts.date().isoformat()
                             last_n = last_dt_nightly_session_date() or ""
-                            if last_n == sess_ny:
-                                log(f"[dt_scheduler] DT nightly already done for {sess_ny}")
+                            if last_n == sess:
+                                log(f"[dt_scheduler] DT nightly already done for {sess}")
                             else:
-                                log(f"[dt_scheduler] running DT nightly for {sess_ny} …")
-                                nres = run_dt_nightly_job(session_date=sess_ny)
+                                log(f"[dt_scheduler] running DT nightly for {sess} …")
+                                nres = run_dt_nightly_job(session_date=sess)
                                 log(f"[dt_scheduler] DT nightly result: {nres}")
-                        else:
-                            # Not yet close+1s; we'll catch it in the late-start check below.
-                            pass
-                    except Exception as e:
-                        warn(f"[dt_scheduler] DT nightly failed: {e}")
-
+                        except Exception as e:
+                            warn(f"[dt_scheduler] DT nightly failed: {e}\n{traceback.format_exc()}")
                 except Exception as e:
-                    warn(f"[dt_scheduler] EOD cleanup failed: {e}")
+                    warn(f"[dt_scheduler] EOD cleanup failed: {e}\n{traceback.format_exc()}")
 
             # ----
             # If scheduler started AFTER close, still run DT nightly once (close+1s) for the session.
             # ----
             if not open_now:
                 try:
-                    close_plus_1 = _close_plus_one_ts(ny_now)
-                    if ny_now >= close_plus_1:
+                    ny = _now_ny()
+                    ts = _close_plus_one_ts(ny)
+                    if ny >= ts:
+                        sess = ts.date().isoformat()
                         last_n = last_dt_nightly_session_date() or ""
-                        if last_n != sess_ny:
-                            log(f"[dt_scheduler] market closed; scheduler late-start → running DT nightly for {sess_ny} …")
-                            nres = run_dt_nightly_job(session_date=sess_ny)
+                        if last_n != sess:
+                            log(f"[dt_scheduler] market closed; scheduler late-start → running DT nightly for {sess} …")
+                            nres = run_dt_nightly_job(session_date=sess)
                             log(f"[dt_scheduler] DT nightly result: {nres}")
                 except Exception as e:
-                    warn(f"[dt_scheduler] DT nightly late-start check failed: {e}")
+                    warn(f"[dt_scheduler] DT nightly late-start check failed: {e}\n{traceback.format_exc()}")
 
             was_open = open_now
 
@@ -199,7 +195,7 @@ def run_dt_scheduler(
             # If market open: update bars + run trade cycles
             # ----
             if open_now:
-                if loop_t - last_bars_t >= max(1, int(bars_interval_sec)):
+                if t - last_bars_t >= max(1, int(bars_interval_sec)):
                     try:
                         fetch_live_bars_once(
                             max_symbols=max_symbols,
@@ -207,26 +203,19 @@ def run_dt_scheduler(
                             fetch_5m=fetch_5m,
                         )
                     except Exception as e:
-                        warn(f"[dt_scheduler] live bars cycle failed: {e}")
-                        backoff_sec = min(10.0, (backoff_sec or 1.0) * 1.5)
-                    else:
-                        backoff_sec = 0.0
-                    last_bars_t = loop_t
+                        warn(f"[dt_scheduler] live bars cycle failed: {e}\n{traceback.format_exc()}")
+                    last_bars_t = t
 
-                if loop_t - last_trade_t >= max(1, int(trade_interval_sec)):
+                if t - last_trade_t >= max(1, int(trade_interval_sec)):
                     try:
                         out = run_daytrading_cycle(max_symbols=max_symbols, execute=execute)
-                        log(f"[dt_scheduler] trade cycle done: {now_utc.isoformat()} {out}")
+                        log(f"[dt_scheduler] trade cycle done: {_utc_now_iso()} {out}")
                     except Exception as e:
-                        warn(f"[dt_scheduler] trade cycle failed: {e}")
-                        backoff_sec = min(10.0, (backoff_sec or 1.0) * 1.5)
-                    else:
-                        backoff_sec = 0.0
-                    last_trade_t = loop_t
+                        # ✅ This is the key upgrade: you WILL get file/line traceback now.
+                        warn(f"[dt_scheduler] trade cycle failed: {e}\n{traceback.format_exc()}")
+                    last_trade_t = t
 
-            # Sleep: base tick 1s + optional backoff if we’re erroring hard
-            time.sleep(1.0 + float(backoff_sec or 0.0))
-
+            time.sleep(1.0)
     finally:
         release_lock_file(sched_lock)
 
