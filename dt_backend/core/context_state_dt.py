@@ -14,7 +14,7 @@ Best-effort, safe defaults. No heavy deps.
 from __future__ import annotations
 
 import math
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timezone
 from typing import Any, Dict, List, Optional
 
 from .data_pipeline_dt import _read_rolling, save_rolling, log, ensure_symbol_node
@@ -51,12 +51,16 @@ def _safe_float(x: Any) -> Optional[float]:
         return None
 
 
-def _extract_today_bars(node: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _extract_today_bars(node: Dict[str, Any], *, target_date: Optional[date] = None) -> List[Dict[str, Any]]:
     src = node.get("bars_intraday") or []
     if not isinstance(src, list):
         return []
 
-    today = now_ny().date() if callable(now_ny) else date.today()
+    # In live mode, default to today's NY trading date.
+    # In replay/backtest mode, callers pass target_date explicitly.
+    if target_date is None:
+        target_date = now_ny().date() if callable(now_ny) else date.today()
+
     out: List[Dict[str, Any]] = []
 
     for raw_bar in src:
@@ -64,7 +68,7 @@ def _extract_today_bars(node: Dict[str, Any]) -> List[Dict[str, Any]]:
             continue
 
         ts = _parse_ts(raw_bar.get("ts") or raw_bar.get("t") or raw_bar.get("timestamp"))
-        if ts is None or ts.date() != today:
+        if ts is None or ts.date() != target_date:
             continue
 
         price = raw_bar.get("c") if raw_bar.get("c") is not None else raw_bar.get("close", raw_bar.get("price"))
@@ -139,7 +143,7 @@ def _vol_bucket(vol: float) -> str:
     return "low"
 
 
-def build_intraday_context() -> Dict[str, Any]:
+def build_intraday_context(*, target_date: Optional[date | str] = None, now_utc: Optional[datetime] = None) -> Dict[str, Any]:
     rolling = _read_rolling()
     if not rolling:
         log("[context_dt] ⚠️ rolling empty.")
@@ -151,7 +155,14 @@ def build_intraday_context() -> Dict[str, Any]:
             continue
 
         node = ensure_symbol_node(rolling, sym)
-        bars_today = _extract_today_bars(node)
+        # Normalize target_date (replay/backtest may pass YYYY-MM-DD)
+        td = target_date
+        if isinstance(td, str):
+            try:
+                td = datetime.fromisoformat(td).date()
+            except Exception:
+                td = None
+        bars_today = _extract_today_bars(node, target_date=td if isinstance(td, date) else None)
         stats = _intraday_stats(bars_today)
         if not stats:
             continue
@@ -164,7 +175,7 @@ def build_intraday_context() -> Dict[str, Any]:
         ctx["intraday_trend"] = _trend_label(stats["intraday_return"])
         ctx["vol_bucket"] = _vol_bucket(stats["intraday_vol"])
         ctx["has_intraday_data"] = True
-        ctx["ts"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        ctx["ts"] = (now_utc or datetime.now(timezone.utc)).isoformat(timespec="seconds").replace("+00:00", "Z")
 
         node["context_dt"] = ctx
         rolling[sym] = node

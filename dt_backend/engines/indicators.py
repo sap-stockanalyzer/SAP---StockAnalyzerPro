@@ -88,6 +88,121 @@ def realized_vol(returns: Sequence[float]) -> float:
     return math.sqrt(var)
 
 
+def stddev(values: Sequence[float]) -> float:
+    """Standard deviation (sample) with safe defaults."""
+    vals = _to_list(values)
+    n = len(vals)
+    if n < 2:
+        return 0.0
+    mu = sum(vals) / float(n)
+    var = sum((x - mu) ** 2 for x in vals) / float(max(n - 1, 1))
+    return math.sqrt(max(0.0, var))
+
+
+def true_range(high: float, low: float, prev_close: float) -> float:
+    """True range for a single bar."""
+    try:
+        return max(
+            float(high) - float(low),
+            abs(float(high) - float(prev_close)),
+            abs(float(low) - float(prev_close)),
+        )
+    except Exception:
+        return 0.0
+
+
+def atr(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], window: int = 14) -> float:
+    """Average True Range (simple average of TR over window)."""
+    try:
+        hs = _to_list(highs)
+        ls = _to_list(lows)
+        cs = _to_list(closes)
+    except Exception:
+        return 0.0
+    n = min(len(hs), len(ls), len(cs))
+    if n < 2 or window <= 0:
+        return 0.0
+    trs: List[float] = []
+    for i in range(1, n):
+        trs.append(true_range(hs[i], ls[i], cs[i - 1]))
+    if len(trs) < window:
+        window = len(trs)
+    if window <= 0:
+        return 0.0
+    chunk = trs[-window:]
+    return sum(chunk) / float(window)
+
+
+def lin_slope(values: Sequence[float], window: int = 10) -> float:
+    """Simple linear-regression slope over the last `window` points."""
+    vals = _to_list(values)
+    if window <= 1 or len(vals) < window:
+        return 0.0
+    y = vals[-window:]
+    n = float(window)
+    sx = (n - 1) * n / 2.0
+    sxx = (n - 1) * n * (2 * n - 1) / 6.0
+    sy = sum(y)
+    sxy = sum(i * y[i] for i in range(window))
+    denom = (n * sxx - sx * sx)
+    if denom == 0.0:
+        return 0.0
+    return (n * sxy - sx * sy) / denom
+
+
+def bollinger_width(values: Sequence[float], window: int = 20, n_std: float = 2.0) -> float:
+    vals = _to_list(values)
+    if window <= 1 or len(vals) < window:
+        return 0.0
+    chunk = vals[-window:]
+    mid = sum(chunk) / float(window)
+    sd = stddev(chunk)
+    upper = mid + n_std * sd
+    lower = mid - n_std * sd
+    return max(0.0, upper - lower)
+
+
+def keltner_width(values: Sequence[float], highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], window: int = 20, atr_mult: float = 1.5) -> float:
+    vals = _to_list(values)
+    if window <= 1 or len(vals) < window:
+        return 0.0
+    mid = ema(vals, window)
+    a = atr(highs, lows, closes, window)
+    upper = mid + atr_mult * a
+    lower = mid - atr_mult * a
+    return max(0.0, upper - lower)
+
+
+def session_vwap(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], volumes: Sequence[float]) -> float:
+    """Session VWAP (volume-weighted average price) computed from bar data.
+
+    We use the bar 'typical price' (H+L+C)/3.
+    Returns 0.0 if volume is missing or sums to zero.
+    """
+    try:
+        hs = _to_list(highs)
+        ls = _to_list(lows)
+        cs = _to_list(closes)
+        vs = _to_list(volumes)
+    except Exception:
+        return 0.0
+    n = min(len(hs), len(ls), len(cs), len(vs))
+    if n <= 0:
+        return 0.0
+    num = 0.0
+    den = 0.0
+    for i in range(n):
+        v = vs[i]
+        if v <= 0:
+            continue
+        tp = (hs[i] + ls[i] + cs[i]) / 3.0
+        num += tp * v
+        den += v
+    if den <= 0.0:
+        return 0.0
+    return num / den
+
+
 # ---------------------------------------------------------------------------
 # RSI (Relative Strength Index) — exported as rsi_14 via feature_engineering
 # ---------------------------------------------------------------------------

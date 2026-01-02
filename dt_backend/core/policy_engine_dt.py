@@ -31,6 +31,44 @@ from typing import Any, Dict, Tuple, Optional
 
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
 
+# Phase 7: calibrated P(hit) (optional)
+try:
+    from dt_backend.calibration.phit_calibrator_dt import get_phit
+except Exception:  # pragma: no cover
+    get_phit = None  # type: ignore
+
+# Phase 8/9: risk + researcher rules (optional)
+try:
+    from dt_backend.risk.news_event_risk_dt import assess_symbol_risk
+except Exception:  # pragma: no cover
+    assess_symbol_risk = None  # type: ignore
+
+try:
+    from dt_backend.researcher.rules_runtime_dt import bot_allowed
+except Exception:  # pragma: no cover
+    bot_allowed = None  # type: ignore
+try:
+    from dt_backend.risk.news_event_risk_dt import risk_adjust_policy
+except Exception:  # pragma: no cover
+    risk_adjust_policy = None  # type: ignore
+
+# Phase 5.5: portfolio heat manager (optional)
+try:
+    from dt_backend.risk.portfolio_heat_dt import apply_portfolio_heat_gates
+except Exception:  # pragma: no cover
+    apply_portfolio_heat_gates = None  # type: ignore
+
+try:
+    from dt_backend.researcher.rules_dt import rules_adjust_setup
+except Exception:  # pragma: no cover
+    rules_adjust_setup = None  # type: ignore
+
+# Phase 3: strategy bots (ORB / VWAP MR / trend pullback / squeeze)
+try:
+    from dt_backend.strategies import select_best_setup
+except Exception:  # pragma: no cover
+    select_best_setup = None  # type: ignore
+
 
 @dataclass
 class PolicyConfig:
@@ -65,6 +103,57 @@ class PolicyConfig:
     stand_down_in_crash: bool = True
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        import os
+        raw = (os.getenv(name, "") or "").strip()
+        if raw == "":
+            return float(default)
+        return float(raw)
+    except Exception:
+        return float(default)
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        import os
+        raw = (os.getenv(name, "") or "").strip()
+        if raw == "":
+            return int(default)
+        return int(float(raw))
+    except Exception:
+        return int(default)
+
+def _apply_env_overrides(cfg: PolicyConfig) -> PolicyConfig:
+    """Optional per-bot tuning via env vars.
+
+    This keeps the code conservative by default, but lets you make it more 'day-trader-y'
+    without editing code each time.
+
+    Supported:
+      DT_BUY_THRESHOLD, DT_SELL_THRESHOLD
+      DT_MIN_CONFIDENCE
+      DT_CONFIRMATIONS_TO_FLIP
+      DT_MIN_EDGE_TO_FLIP
+      DT_HOLD_STICKY_BIAS
+    """
+    cfg.buy_threshold = _env_float("DT_BUY_THRESHOLD", cfg.buy_threshold)
+    cfg.sell_threshold = _env_float("DT_SELL_THRESHOLD", cfg.sell_threshold)
+    cfg.min_confidence = _env_float("DT_MIN_CONFIDENCE", cfg.min_confidence)
+    cfg.confirmations_to_flip = _env_int("DT_CONFIRMATIONS_TO_FLIP", cfg.confirmations_to_flip)
+    cfg.min_edge_to_flip = _env_float("DT_MIN_EDGE_TO_FLIP", cfg.min_edge_to_flip)
+    cfg.hysteresis_hold_bias = _env_float("DT_HOLD_STICKY_BIAS", cfg.hysteresis_hold_bias)
+
+    # sane clamps
+    cfg.buy_threshold = max(0.0, min(1.0, cfg.buy_threshold))
+    cfg.sell_threshold = min(0.0, max(-1.0, cfg.sell_threshold))
+    cfg.min_confidence = max(0.0, min(1.0, cfg.min_confidence))
+    cfg.confirmations_to_flip = max(1, int(cfg.confirmations_to_flip))
+    cfg.min_edge_to_flip = max(0.0, min(1.0, cfg.min_edge_to_flip))
+    cfg.hysteresis_hold_bias = max(0.0, min(0.25, cfg.hysteresis_hold_bias))
+    return cfg
+
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -80,13 +169,52 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
 
 
 def _get_global_regime(rolling: Dict[str, Any]) -> Dict[str, Any]:
+    """Prefer new regime_dt (Phase 2) but support legacy regime."""
     g = rolling.get("_GLOBAL_DT") or {}
     if not isinstance(g, dict):
-        return {"label": "unknown", "breadth_up": 0.5}
+        return {"label": "unknown"}
+
+    reg_dt = g.get("regime_dt")
+    if isinstance(reg_dt, dict) and reg_dt.get("label"):
+        return reg_dt
+
     reg = g.get("regime") or {}
-    if not isinstance(reg, dict):
-        return {"label": "unknown", "breadth_up": 0.5}
-    return reg
+    if isinstance(reg, dict) and reg.get("label"):
+        return reg
+    return {"label": "unknown"}
+
+
+def _get_micro_regime(rolling: Dict[str, Any]) -> Dict[str, Any]:
+    g = rolling.get("_GLOBAL_DT") or {}
+    if not isinstance(g, dict):
+        return {}
+    m = g.get("micro_regime_dt") or {}
+    return m if isinstance(m, dict) else {}
+
+
+def _get_daily_plan(rolling: Dict[str, Any]) -> Dict[str, Any]:
+    """Phase 4: daily plan selected by meta-controller."""
+    g = rolling.get("_GLOBAL_DT") or {}
+    if not isinstance(g, dict):
+        return {}
+    p = g.get("daily_plan_dt") or {}
+    return p if isinstance(p, dict) else {}
+
+
+def _regime_for_policy(label: str) -> str:
+    """Map Phase 2 labels into the older bull/bear/chop/stress bucket set."""
+    r = (label or "").strip().upper()
+    if r in {"BULL", "BEAR", "CHOP", "CRASH", "STRESS", "UNKNOWN"}:
+        return r.lower()
+    if r == "TREND_UP":
+        return "bull"
+    if r == "TREND_DOWN":
+        return "bear"
+    if r in {"RANGE", "LOW_VOL"}:
+        return "chop"
+    if r == "HIGH_VOL":
+        return "stress"
+    return "unknown"
 
 
 def _extract_prediction(node: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, float]]:
@@ -210,6 +338,8 @@ def _stabilize_with_hysteresis(
     edge: float,
     conf: float,
     cfg: PolicyConfig,
+    *,
+    policy_key: str = "policy_dt",
 ) -> Tuple[str, Dict[str, Any], str]:
     """
     Use per-symbol memory to prevent flip-flopping.
@@ -221,7 +351,7 @@ def _stabilize_with_hysteresis(
           * abs(edge) >= min_edge_to_flip
           * confirmations_to_flip consecutive proposals
     """
-    policy_prev = node.get("policy_dt") or {}
+    policy_prev = node.get(policy_key) or {}
     prev_action = str((policy_prev.get("action") or policy_prev.get("intent") or "HOLD")).upper()
     state = policy_prev.get("_state") or {}
     if not isinstance(state, dict):
@@ -282,10 +412,13 @@ def apply_intraday_policy(
     cfg: PolicyConfig | None = None,
     *,
     max_positions: int | None = None,
+    rolling_override: Dict[str, Any] | None = None,
+    save: bool = True,
+    out_key: str = "policy_dt",
     **_kwargs: Any,
 ) -> Dict[str, Any]:
-    cfg = cfg or PolicyConfig()
-    rolling = _read_rolling()
+    cfg = _apply_env_overrides(cfg or PolicyConfig())
+    rolling = rolling_override if isinstance(rolling_override, dict) else _read_rolling()
     if not rolling:
         log("[policy_dt] ⚠️ rolling empty.")
         return {"symbols": 0, "updated": 0}
@@ -299,7 +432,93 @@ def apply_intraday_policy(
         max_positions_n = None
 
     global_regime = _get_global_regime(rolling)
-    regime_label = str(global_regime.get("label") or "unknown")
+    regime_label_raw = str(global_regime.get("label") or "unknown")
+    regime_label = _regime_for_policy(regime_label_raw)
+
+    # Phase 0: hard risk rails can force a global stand_down for the session.
+    g = rolling.get("_GLOBAL_DT") if isinstance(rolling.get("_GLOBAL_DT"), dict) else {}
+    if bool(g.get("stand_down")):
+        reason = str(g.get("stand_down_reason") or (g.get("risk_rails_dt") or {}).get("reason") or "stand_down")
+        updated = 0
+        for sym, node_raw in list(rolling.items()):
+            if str(sym).startswith("_"):
+                continue
+            if not isinstance(node_raw, dict):
+                continue
+            node = ensure_symbol_node(rolling, sym)
+            node[out_key] = {
+                "action": "STAND_DOWN",
+                "intent": "STAND_DOWN",
+                "confidence": 0.0,
+                "score": 0.0,
+                "trade_gate": False,
+                "reason": f"risk_rails={reason}",
+                "ts": _utc_now_iso(),
+                "_state": (node.get(out_key, {}) or {}).get("_state") if isinstance(node.get(out_key), dict) else {},
+            }
+            rolling[sym] = node
+            updated += 1
+        if save:
+            save_rolling(rolling)
+        log(f"[policy_dt] 🛑 global stand_down (risk rails): updated {updated} symbols.")
+        return {"symbols": len(rolling), "updated": updated, "stand_down": True, "reason": reason}
+
+    # Phase 2.5: time-of-day micro-regime gating (lunch, closed, etc.)
+    micro = _get_micro_regime(rolling)
+    ignore_micro = str((__import__("os").getenv("DT_IGNORE_MICRO_REGIME", "") or "")).strip().lower() in {"1","true","yes","y"}
+    if micro and not ignore_micro:
+        allow = bool(micro.get("allow_trading"))
+        label = str(micro.get("label") or "")
+        if not allow:
+            updated = 0
+            for sym, node_raw in list(rolling.items()):
+                if str(sym).startswith("_"):
+                    continue
+                if not isinstance(node_raw, dict):
+                    continue
+                node = ensure_symbol_node(rolling, sym)
+                node[out_key] = {
+                    "action": "STAND_DOWN",
+                    "intent": "STAND_DOWN",
+                    "confidence": 0.0,
+                    "score": 0.0,
+                    "trade_gate": False,
+                    "reason": f"micro_regime={label} stand_down",
+                    "ts": _utc_now_iso(),
+                    "_state": {
+                        "prev_action": str((node.get(out_key) or {}).get("action") or "HOLD").upper(),
+                        "pending_action": "",
+                        "pending_count": 0,
+                        "last_edge": 0.0,
+                        "last_conf": 0.0,
+                    },
+                }
+                rolling[sym] = node
+                updated += 1
+
+            if save:
+                save_rolling(rolling)
+            log(f"[policy_dt] 💤 micro-regime stand_down ({label}); updated {updated} symbols.")
+            return {"symbols": len(rolling), "updated": updated, "micro_regime": label}
+
+    # Phase 4: meta-controller daily plan
+    plan = _get_daily_plan(rolling)
+    allowed_bots = plan.get("enabled_bots") if isinstance(plan, dict) else None
+    bot_weights = plan.get("bot_weights") if isinstance(plan, dict) else None
+    universe = plan.get("universe") if isinstance(plan, dict) else None
+    universe_set = {str(s).upper() for s in universe} if isinstance(universe, list) and universe else None
+    allow_model_fallback = bool(plan.get("allow_model_fallback")) if isinstance(plan, dict) else False
+    risk_mode = str(plan.get("risk_mode") or "").upper() if isinstance(plan, dict) else ""
+
+    # Risk mode adjusts aggressiveness (without touching the model itself)
+    if risk_mode == "CONSERVATIVE":
+        cfg.min_confidence = max(cfg.min_confidence, 0.38)
+        cfg.buy_threshold = max(cfg.buy_threshold, 0.15)
+        cfg.sell_threshold = min(cfg.sell_threshold, -0.15)
+    elif risk_mode == "AGGRESSIVE":
+        cfg.min_confidence = min(cfg.min_confidence, 0.26)
+        cfg.buy_threshold = min(cfg.buy_threshold, 0.10)
+        cfg.sell_threshold = max(cfg.sell_threshold, -0.10)
 
     updated = 0
     for sym, node_raw in list(rolling.items()):
@@ -308,10 +527,223 @@ def apply_intraday_policy(
         if not isinstance(node_raw, dict):
             continue
 
+        # Phase 4: universe focus (skip low-quality symbols)
+        sym_u = str(sym).upper()
+        if universe_set is not None and sym_u not in universe_set:
+            node = ensure_symbol_node(rolling, sym)
+            node[out_key] = {
+                "action": "HOLD",
+                "intent": "HOLD",
+                "confidence": 0.0,
+                "score": 0.0,
+                "trade_gate": False,
+                "reason": "out_of_universe",
+                "ts": _utc_now_iso(),
+                "_state": (node.get(out_key, {}) or {}).get("_state") if isinstance(node.get(out_key), dict) else {},
+            }
+            rolling[sym] = node
+            updated += 1
+            continue
+
         node = ensure_symbol_node(rolling, sym)
         ctx = node.get("context_dt") or {}
         if not isinstance(ctx, dict):
             ctx = {}
+
+        # ------------------------------------------------------------
+        # Phase 3: Strategy-first policy (uses features_dt + levels_dt)
+        # Fallback to model-based policy if no viable setup.
+        # ------------------------------------------------------------
+        setup = None
+        if select_best_setup is not None:
+            try:
+                micro_label = str((micro or {}).get("label") or "").upper() if isinstance(micro, dict) else ""
+                setup = select_best_setup(
+                    str(sym).upper(),
+                    node,
+                    rolling=rolling,
+                    micro=micro_label,
+                    allowed_bots=allowed_bots if isinstance(allowed_bots, list) else None,
+                    bot_weights=bot_weights if isinstance(bot_weights, dict) else None,
+                )
+            except Exception:
+                setup = None
+
+        # Maintain squeeze memory for Phase 3 (release detection).
+        try:
+            feat = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
+            sq_on = bool(float(feat.get("squeeze_on") or 0.0) >= 0.5) if isinstance(feat, dict) else False
+            st = node.get("_squeeze_state")
+            st = st if isinstance(st, dict) else {}
+            st["prev_squeeze_on"] = bool(sq_on)
+            st["ts"] = _utc_now_iso()
+            node["_squeeze_state"] = st
+        except Exception:
+            pass
+
+        if isinstance(setup, dict) and str(setup.get("side") or "").upper() in {"BUY", "SELL"}:
+            proposed_intent = str(setup.get("side") or "HOLD").upper()
+            base_conf = float(setup.get("confidence") or 0.0)
+            edge = float(setup.get("score") or 0.0) / 100.0  # score -> pseudo-edge scale
+
+            trend, vol_bkt = _trend_and_vol(ctx)
+
+            # Light adjustment using regime/vol/trend (keeps consistency with v2 policy)
+            conf_adj, adj_detail = _adjust_conf(base_conf, proposed_intent, trend, vol_bkt, regime_label, cfg)
+
+            stabilized_action, new_state, hyst_note = _stabilize_with_hysteresis(
+                node=node,
+                proposed=proposed_intent,
+                edge=edge,
+                conf=conf_adj,
+                cfg=cfg,
+                policy_key=out_key,
+            )
+
+            action = stabilized_action
+            conf_final = float(conf_adj) if action in {"BUY", "SELL"} else 0.0
+            trade_gate = bool(action in {"BUY", "SELL"} and conf_final >= cfg.min_confidence)
+
+            # Phase 7: calibrated P(hit) for model-driven decisions
+            p_hit = conf_final
+            # Phase 8: news/event risk seatbelt
+            risk_penalty = 1.0
+            risk_note = ""
+            risk = None
+            try:
+                if assess_symbol_risk is not None:
+                    risk = assess_symbol_risk(symbol=str(sym).upper(), features_dt=node.get("features_dt"), now_utc=None)
+                    if isinstance(risk, dict):
+                        node["risk_dt"] = risk
+                        if bool(risk.get("stand_down")):
+                            action = "STAND_DOWN"
+                        risk_penalty = float(risk.get("penalty") or 1.0)
+                        risk_note = ",".join([str(x) for x in (risk.get("reasons") or [])][:3])
+            except Exception:
+                risk_penalty = 1.0
+
+            # Phase 9: researcher rules (shadow-only by default, but enforceable if provided)
+            bot_name = str(setup.get("bot") or "").upper() or "UNKNOWN"
+            micro_label = str((micro or {}).get("label") or "").upper() if isinstance(micro, dict) else ""
+            try:
+                if bot_allowed is not None:
+                    ok, why = bot_allowed(bot=bot_name, regime=regime_label, micro=micro_label, features_dt=node.get("features_dt"))
+                    if not ok:
+                        node["execution_plan_dt"] = {}
+                        node[out_key] = {
+                            "action": "HOLD",
+                            "intent": "HOLD",
+                            "confidence": 0.0,
+                            "p_hit": 0.0,
+                            "score": 0.0,
+                            "trade_gate": False,
+                            "reason": f"filtered_{why}",
+                            "ts": _utc_now_iso(),
+                            "bot": bot_name,
+                            "_state": new_state,
+                        }
+                        rolling[sym] = node
+                        updated += 1
+                        continue
+            except Exception:
+                pass
+
+            # Phase 7: calibrated probability-of-hit
+            p_hit = conf_final
+            try:
+                if get_phit is not None:
+                    ph = get_phit(bot=bot_name, regime_label=regime_label, base_conf=conf_final)
+                    if ph is not None:
+                        p_hit = float(ph)
+            except Exception:
+                p_hit = conf_final
+
+            # Apply risk penalty to BOTH confidence and p_hit (seatbelt, not steering wheel)
+            if action == "STAND_DOWN":
+                conf_final = 0.0
+                p_hit = 0.0
+                trade_gate = False
+            else:
+                conf_final = float(max(0.0, min(cfg.max_confidence, conf_final * risk_penalty)))
+                p_hit = float(max(0.0, min(1.0, p_hit * risk_penalty)))
+                trade_gate = bool(action in {"BUY", "SELL"} and conf_final >= cfg.min_confidence)
+
+            # Compute expected R (TP distance / stop distance) using last price.
+            expected_r = 1.0
+            try:
+                feats = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
+                last_px = float(node.get("last_price") or feats.get("last") or feats.get("last_price") or 0.0)
+                risk_d = setup.get("risk") if isinstance(setup.get("risk"), dict) else {}
+                stop = risk_d.get("stop")
+                tp = risk_d.get("take_profit")
+                if last_px > 0 and stop is not None and tp is not None:
+                    denom = abs(float(last_px) - float(stop))
+                    num = abs(float(tp) - float(last_px))
+                    if denom > 1e-9:
+                        expected_r = float(max(0.2, min(5.0, num / denom)))
+            except Exception:
+                expected_r = 1.0
+
+            # Stash the plan for downstream execution layers.
+            node["execution_plan_dt"] = {
+                "bot": str(setup.get("bot") or "").upper(),
+                "side": str(setup.get("side") or "").upper(),
+                "confidence": float(setup.get("confidence") or 0.0),
+                "base_conf": float(base_conf),
+                "p_hit": float(p_hit),
+                "expected_r": float(expected_r),
+                "entry_features": {
+                    "rel_volume": float((feats or {}).get("rel_volume") or 0.0) if isinstance(feats, dict) else 0.0,
+                    "vwap_dist": float((feats or {}).get("vwap_dist") or 0.0) if isinstance(feats, dict) else 0.0,
+                    "squeeze_on": float((feats or {}).get("squeeze_on") or 0.0) if isinstance(feats, dict) else 0.0,
+                    "atr_pct": float((feats or {}).get("atr_pct") or 0.0) if isinstance(feats, dict) else 0.0,
+                    "spread_pct": float((feats or {}).get("spread_pct") or 0.0) if isinstance(feats, dict) else 0.0,
+                    "news_shock_score": float((feats or {}).get("news_shock_score") or 0.0) if isinstance(feats, dict) else 0.0,
+                },
+                "score": float(setup.get("score") or 0.0),
+                "entry": setup.get("entry") or {"type": "MKT"},
+                "risk": setup.get("risk") or {},
+                "reason": str(setup.get("reason") or ""),
+                "ts": setup.get("ts") or _utc_now_iso(),
+            }
+
+            reason = (
+                f"bot={node['execution_plan_dt'].get('bot')} {node['execution_plan_dt'].get('reason')}; "
+                f"trend={trend} vol={vol_bkt} regime={regime_label}; adj={adj_detail}; hyst={hyst_note}; "
+                f"risk={(risk_note or 'ok')}"
+            )
+
+            node[out_key] = {
+                "action": action,
+                "intent": action,
+                "confidence": float(conf_final),
+                "p_hit": float(p_hit),
+                "score": float(setup.get("score") or 0.0),
+                "trade_gate": bool(trade_gate),
+                "reason": reason,
+                "ts": _utc_now_iso(),
+                "bot": node["execution_plan_dt"].get("bot"),
+                "_state": new_state,
+            }
+            rolling[sym] = node
+            updated += 1
+            continue
+
+        # Phase 4: optionally disable model fallback entirely
+        if not allow_model_fallback:
+            node[out_key] = {
+                "action": "HOLD",
+                "intent": "HOLD",
+                "confidence": 0.0,
+                "score": 0.0,
+                "trade_gate": False,
+                "reason": "no_strategy_setup",
+                "ts": _utc_now_iso(),
+                "_state": (node.get(out_key, {}) or {}).get("_state") if isinstance(node.get(out_key), dict) else {},
+            }
+            rolling[sym] = node
+            updated += 1
+            continue
 
         # Require model output
         _, proba = _extract_prediction(node)
@@ -352,11 +784,22 @@ def apply_intraday_policy(
                 edge=edge,
                 conf=conf_adj,
                 cfg=cfg,
+                policy_key=out_key,
             )
 
             action = stabilized_action
             conf_final = float(conf_adj) if action in {"BUY", "SELL"} else 0.0
             trade_gate = bool(action in {"BUY", "SELL"} and conf_final >= cfg.min_confidence)
+
+            # Phase 7: calibrated probability-of-hit
+            p_hit = conf_final
+            try:
+                if get_phit is not None:
+                    ph = get_phit(bot="MODEL", regime_label=regime_label, base_conf=conf_final)
+                    if ph is not None:
+                        p_hit = float(ph)
+            except Exception:
+                p_hit = conf_final
 
             reason = (
                 f"edge={edge:.3f} p_buy={p_buy:.3f} p_sell={p_sell:.3f} p_hold={p_hold:.3f}; "
@@ -364,10 +807,11 @@ def apply_intraday_policy(
                 f"adj={adj_detail}; hyst={hyst_note}"
             )
 
-            node["policy_dt"] = {
+            node[out_key] = {
                 "action": action,
                 "intent": action,
                 "confidence": float(conf_final),
+                "p_hit": float(p_hit),
                 "score": float(score),
                 "trade_gate": bool(trade_gate),
                 "reason": reason,
@@ -379,16 +823,17 @@ def apply_intraday_policy(
             continue
 
         # STAND_DOWN path / safety
-        node["policy_dt"] = {
+        node[out_key] = {
             "action": action,
             "intent": action,
             "confidence": float(conf_final),
+            "p_hit": 0.0,
             "score": float(score),
             "trade_gate": bool(trade_gate),
             "reason": reason,
             "ts": _utc_now_iso(),
             "_state": {
-                "prev_action": str((node.get("policy_dt") or {}).get("action") or "HOLD").upper(),
+                "prev_action": str((node.get(out_key) or {}).get("action") or "HOLD").upper(),
                 "pending_action": "",
                 "pending_count": 0,
                 "last_edge": 0.0,
@@ -410,7 +855,7 @@ def apply_intraday_policy(
                 continue
             if not isinstance(node, dict):
                 continue
-            p = node.get("policy_dt")
+            p = node.get(out_key)
             if not isinstance(p, dict):
                 continue
             if p.get("trade_gate") is True and str(p.get("action")).upper() in {"BUY", "SELL"}:
@@ -423,7 +868,7 @@ def apply_intraday_policy(
             node = rolling.get(sym)
             if not isinstance(node, dict):
                 continue
-            p = node.get("policy_dt")
+            p = node.get(out_key)
             if not isinstance(p, dict):
                 continue
 
@@ -442,11 +887,26 @@ def apply_intraday_policy(
             p["reason"] = (str(p.get("reason") or "") + f"; cap=max_positions({max_positions_n})").strip()
             p["ts"] = _utc_now_iso()
 
-            node["policy_dt"] = p
+            node[out_key] = p
             rolling[sym] = node
             capped += 1
 
-    save_rolling(rolling)
+    # ------------------------------------------------------------
+    # Phase 5.5: Portfolio heat manager (sector/exposure caps)
+    # ------------------------------------------------------------
+    heat_summary = None
+    try:
+        if apply_portfolio_heat_gates is not None:
+            rolling, heat_summary = apply_portfolio_heat_gates(rolling, out_key=out_key)
+            gdt = rolling.get("_GLOBAL_DT") if isinstance(rolling.get("_GLOBAL_DT"), dict) else {}
+            if isinstance(heat_summary, dict):
+                gdt["heat_dt"] = heat_summary
+            rolling["_GLOBAL_DT"] = gdt
+    except Exception:
+        heat_summary = None
+
+    if save:
+        save_rolling(rolling)
     extra = f", capped={capped}, max_positions={max_positions_n}" if max_positions_n is not None else ""
     log(f"[policy_dt] ✅ updated policy_dt for {updated} symbols (regime={regime_label}){extra}.")
     return {"symbols": len(rolling), "updated": updated, "regime": regime_label, "capped": capped, "max_positions": max_positions_n}

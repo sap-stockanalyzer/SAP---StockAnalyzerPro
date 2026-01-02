@@ -54,6 +54,16 @@ import urllib.request
 import urllib.error
 
 from dt_backend.core import DT_PATHS, log
+from dt_backend.core.time_override_dt import utc_iso, now_utc
+
+# ---------------------------------------------------------------------------
+# Public interface (compat)
+# ---------------------------------------------------------------------------
+#
+# Some older / external modules expect a BrokerAPI class with methods.
+# This file originally provided free functions (get_cash/get_positions/submit_order).
+# To keep the system stable, we provide a small wrapper class that delegates to
+# the existing functions.
 
 # ROOT secrets (env-only)
 try:
@@ -97,7 +107,8 @@ class Order:
 # =========================
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    # Replay/backtest can drive time via DT_NOW_UTC.
+    return utc_iso()
 
 
 def _safe_float(x: Any, default: float = 0.0) -> float:
@@ -352,6 +363,15 @@ def get_cash() -> float:
     return _safe_float(state.get("cash", 0.0), 0.0)
 
 
+def get_ledger_state() -> Dict[str, Any]:
+    """Return the full per-bot local ledger (cash/positions/fills/meta).
+
+    This is intentionally read-only; mutations happen through submit_order().
+    """
+    return _read_ledger()
+
+
+
 # =========================
 # Execution: Alpaca if enabled, else pure local simulation
 # =========================
@@ -574,3 +594,20 @@ def submit_order(order: Order, last_price: float | None = None) -> Dict[str, Any
         "venue": "local",
         "bot_id": _bot_id(),
     }
+
+
+class BrokerAPI:
+    """Thin wrapper around the module-level broker functions.
+
+    This exists for compatibility with executors that were written against a
+    class-based interface.
+    """
+
+    def get_cash(self) -> float:
+        return get_cash()
+
+    def get_positions(self) -> Dict[str, Position]:
+        return get_positions()
+
+    def submit_order(self, order: Order, last_price: float | None = None) -> Dict[str, Any]:
+        return submit_order(order, last_price=last_price)

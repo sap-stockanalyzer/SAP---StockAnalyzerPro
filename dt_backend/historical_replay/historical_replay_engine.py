@@ -36,6 +36,8 @@ from dt_backend.core.data_pipeline_dt import (
 
 # Phase 2 engines
 from dt_backend.core.context_state_dt import build_intraday_context
+from dt_backend.core.regime_detector_dt import classify_intraday_regime
+from dt_backend.core.meta_controller_dt import ensure_daily_plan
 from dt_backend.engines.feature_engineering import build_intraday_features
 
 # Phase 1 model scoring (classification)
@@ -165,6 +167,56 @@ def _extract_prices(bars: List[Dict[str, Any]]) -> List[float]:
     return out
 
 
+def _parse_any_ts(ts_raw: Any) -> datetime | None:
+    """Best-effort parse of bar timestamps into timezone-aware UTC datetime."""
+    if ts_raw is None:
+        return None
+    try:
+        # epoch seconds
+        if isinstance(ts_raw, (int, float)):
+            v = float(ts_raw)
+            # handle nanoseconds
+            if v > 1e12:
+                v = v / 1e9
+            elif v > 1e10:
+                v = v / 1e6
+            return datetime.fromtimestamp(v, tz=timezone.utc)
+
+        s = str(ts_raw).strip()
+        if s.isdigit():
+            return _parse_any_ts(float(s))
+        # ISO string
+        if s.endswith('Z'):
+            s = s[:-1] + '+00:00'
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _infer_now_utc(raw_day: List[Dict[str, Any]], date_str: str) -> datetime:
+    """Pick a representative UTC timestamp for replay day for time-aware engines."""
+    # try first symbol's last bar
+    try:
+        if raw_day and isinstance(raw_day[0], dict):
+            bars = raw_day[0].get('bars')
+            if isinstance(bars, list) and bars:
+                ts = _parse_any_ts((bars[-1] or {}).get('ts') or (bars[-1] or {}).get('t') or (bars[-1] or {}).get('timestamp'))
+                if ts:
+                    return ts
+    except Exception:
+        pass
+
+    # fallback: noon NY ~= 17:00 UTC (rough), but we stay simple
+    try:
+        base = datetime.fromisoformat(date_str).replace(tzinfo=timezone.utc)
+    except Exception:
+        base = datetime.now(timezone.utc)
+    return base.replace(hour=17, minute=0, second=0, microsecond=0)
+
+
 # ---------------------------------------------------------
 # PnL computation
 # ---------------------------------------------------------
@@ -231,9 +283,12 @@ def replay_intraday_day(date_str: str) -> ReplayResult | None:
     rolling = _inject_bars(raw_day)
     save_rolling(rolling)
 
+    # Infer a stable replay time for time-aware engines
+    now_utc = _infer_now_utc(raw_day, date_str)
+
     # 2) context + features
-    build_intraday_context()
-    build_intraday_features()
+    build_intraday_context(target_date=date_str, now_utc=now_utc)
+    build_intraday_features(now_utc=now_utc)
 
     # 3) model scoring
     rolling = _read_rolling()
@@ -268,9 +323,19 @@ def replay_intraday_day(date_str: str) -> ReplayResult | None:
 
     save_rolling(rolling)
 
-    # 4) policy + execution
+    # 4) regime + meta-controller (Phase 2/2.5 + Phase 4)
+    try:
+        classify_intraday_regime(now_utc=now_utc)
+    except Exception:
+        pass
+    try:
+        ensure_daily_plan(force=True, date_override=date_str)
+    except Exception:
+        pass
+
+    # 5) policy + execution
     apply_intraday_policy()
-    run_execution_intraday()
+    run_execution_intraday(now_utc=now_utc)
 
     # 5) PnL aggregation
     rolling = _read_rolling()
@@ -296,6 +361,20 @@ def replay_intraday_day(date_str: str) -> ReplayResult | None:
         hit_rate=hit_rate,
         meta={},
     )
+
+    # Attach global context (regime/day plan) for downstream slice metrics
+    try:
+        g = (_read_rolling() or {}).get("_GLOBAL_DT") or {}
+        if isinstance(g, dict):
+            result.meta = {
+                "regime_dt": g.get("regime_dt"),
+                "regime": g.get("regime"),
+                "micro_regime_dt": g.get("micro_regime_dt"),
+                "daily_plan_dt": g.get("daily_plan_dt"),
+            }
+    except Exception:
+        pass
+
 
     # 6) Save output
     _, out_path = _paths_for_date(date_str)

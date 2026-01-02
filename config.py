@@ -369,6 +369,24 @@ DT_PATHS: Dict[str, Path] = {
     "models_ensemble_dir": DT_BACKEND / "models" / "ensemble",
 
     "logs_dt": LOGS_DT,
+
+    # ============================================================
+    # Phase 0 (DT): truth artifacts + locks
+    # ============================================================
+    # Human-readable DT runtime snapshot (regime, enabled bots, risk mode, etc.)
+    "dt_state_file": DA_BRAINS / "intraday" / "dt_state.json",
+    # Append-only decision/execution audit log (jsonl)
+    "dt_trades_file": DA_BRAINS / "intraday" / "dt_trades.jsonl",
+    # Aggregated DT metrics (rolling totals + today)
+    "dt_metrics_file": DA_BRAINS / "intraday" / "dt_metrics.json",
+    # Non-overlap lock for the DT cycle (prevents concurrent runs)
+    "dt_cycle_lock_file": DA_BRAINS / "intraday" / ".dt_cycle.lock",
+
+    # Scheduler singleton lock (prevents multiple dt_scheduler processes)
+    "dt_scheduler_lock_file": DA_BRAINS / "intraday" / ".dt_scheduler.lock",
+
+    # Live bars fetch lock (prevents multi-process fetch storms)
+    "dt_bars_fetch_lock_file": DA_BRAINS / "intraday" / ".dt_bars_fetch.lock",
 }
 
 

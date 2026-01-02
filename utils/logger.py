@@ -1,17 +1,12 @@
-"""utils/logger.py
-
+"""
 Unified logger for backend + dt_backend with UTF-8 safe console output.
 
-Key behavior:
-  • Always prints safely on Windows (no UnicodeEncodeError)
-  • UTF-8 logfile output
-  • Timestamped logs
-  • Auto-rotate daily log files
-
-Important fix:
-  • Resolve LOG_BASE using the unified ROOT config (config.py / backend.core.config).
-    The previous import attempted `backend.config` (non-existent after refactor),
-    which caused logs to fall back to whatever the process CWD was.
+Features:
+- Always prints safely on Windows (no UnicodeEncodeError)
+- UTF-8 logfile output
+- Timestamped logs
+- Auto-rotate daily log files
+- Thread-safe + multiprocess-safe friendly
 """
 
 from __future__ import annotations
@@ -23,23 +18,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# Determine log base directory (prefer unified ROOT paths)
-LOG_BASE: Path
+# Determine log base directory
 try:
-    # Canonical: unified root config
-    from config import PATHS as ROOT_PATHS  # type: ignore
-
-    base = ROOT_PATHS.get("logs")
-    LOG_BASE = Path(base) if base else Path("logs")
+    from backend.config import PATHS as BACKEND_PATHS
+    LOG_BASE = BACKEND_PATHS.get("logs") or Path("logs")
 except Exception:
-    try:
-        # Backward-compat shim used by backend/dt_backend
-        from backend.core.config import PATHS as BACKEND_PATHS  # type: ignore
-
-        base = BACKEND_PATHS.get("logs")
-        LOG_BASE = Path(base) if base else Path("logs")
-    except Exception:
-        LOG_BASE = Path("logs")
+    LOG_BASE = Path("logs")
 
 # Ensure folder exists
 Path(LOG_BASE).mkdir(parents=True, exist_ok=True)

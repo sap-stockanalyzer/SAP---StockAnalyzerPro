@@ -1,4 +1,4 @@
-# backend/backend_service.py — v2.1.0
+# backend/backend_service.py — v2.1.0 (router wiring fix)
 """
 AION Analytics — Backend Service
 
@@ -52,12 +52,11 @@ from backend.routers.intraday_logs_router import router as intraday_logs_router
 from backend.routers.dashboard_router import router as dashboard_router
 from backend.routers.intraday_stream_router import router as stream_router
 from backend.routers.system_run_router import router as system_run_router
+from backend.routers.eod_bots_router import router as eod_bots_router
+from backend.routers.intraday_tape_router import router as intraday_tape_router
+
 from backend.admin.routes import router as admin_router
 from backend.admin.admin_tools_router import router as admin_tools_router
-import backend.routers.eod_bots_router as eod_bots_router
-import backend.routers.intraday_logs_router as intraday_logs_router
-import backend.routers.intraday_router as intraday_router
-from backend.routers.intraday_tape_router import router as intraday_tape_router
 
 # Optional cloud sync
 try:
@@ -88,29 +87,35 @@ app.add_middleware(
 # Mount Routers (all already include /api/* prefixes)
 # -------------------------------------------------
 
-app.include_router(system_router)
-app.include_router(diagnostics_router)
-app.include_router(insights_router)
-app.include_router(live_prices_router)
-app.include_router(intraday_router)
-app.include_router(model_router)
-app.include_router(metrics_router)
-app.include_router(settings_router)
-app.include_router(nightly_logs_router)
-app.include_router(bots_page_router)
-app.include_router(bots_hub_router)
-app.include_router(replay_router)
-app.include_router(swing_replay_router)
-app.include_router(dashboard_router)
-app.include_router(intraday_logs_router)
-app.include_router(stream_router)
-app.include_router(system_run_router)
-app.include_router(admin_router)
-app.include_router(admin_tools_router)
-app.include_router(eod_bots_router)
-app.include_router(intraday_logs_router)
-app.include_router(intraday_router)
-app.include_router(intraday_tape_router)
+# NOTE:
+# Do NOT re-import router modules under the same names (e.g., `import ... as intraday_router`).
+# That overwrites the APIRouter object with a module, and `include_router()` will break.
+ROUTERS = [
+    system_router,
+    diagnostics_router,
+    insights_router,
+    live_prices_router,
+    intraday_router,
+    model_router,
+    metrics_router,
+    settings_router,
+    nightly_logs_router,
+    bots_page_router,
+    bots_hub_router,
+    replay_router,
+    swing_replay_router,
+    dashboard_router,
+    intraday_logs_router,
+    stream_router,
+    system_run_router,
+    admin_router,
+    admin_tools_router,
+    eod_bots_router,
+    intraday_tape_router,
+]
+
+for r in ROUTERS:
+    app.include_router(r)
 
 # -------------------------------------------------
 # Basic Endpoints
@@ -157,7 +162,6 @@ def _scheduler_thread():
 
 
 def _print_root_path():
-
     # Ensure required folders/files exist (locks, configs, logs, bots UI stores, etc.)
     ensure_project_structure()
     try:

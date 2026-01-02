@@ -20,6 +20,7 @@ from .data_pipeline_dt import (
 from .context_state_dt import build_intraday_context
 from .regime_detector_dt import classify_intraday_regime
 from .policy_engine_dt import apply_intraday_policy
+from .meta_controller_dt import ensure_daily_plan
 
 __all__ = [
     "DT_PATHS",
@@ -34,4 +35,5 @@ __all__ = [
     "build_intraday_context",
     "classify_intraday_regime",
     "apply_intraday_policy",
+    "ensure_daily_plan",
 ]
