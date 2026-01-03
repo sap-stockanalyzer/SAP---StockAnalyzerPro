@@ -47,10 +47,8 @@ from utils.logger import log
 # Set AION_SUPERVISOR_VERBOSE=1 to log every evaluation/verdict call
 AION_SUPERVISOR_VERBOSE = os.getenv('AION_SUPERVISOR_VERBOSE', '0').strip().lower() in {'1','true','yes','y','on'}
 
-# By default, only log when the overall verdict / overrides change.
+# By default, only log when the overall verdict / overrides change (or once per minute)
 AION_SUPERVISOR_LOG_ON_CHANGE = os.getenv('AION_SUPERVISOR_LOG_ON_CHANGE', '1').strip().lower() in {'1','true','yes','y','on'}
-
-# Optional heartbeat log. Set to 0 to fully silence (default).
 AION_SUPERVISOR_LOG_EVERY_SECS = float(os.getenv('AION_SUPERVISOR_LOG_EVERY_SECS', '0') or '0')
 
 _LAST_SUPERVISOR_LOG_TS = 0.0
@@ -75,6 +73,7 @@ def _maybe_log_supervisor(msg: str, sig: str = '') -> None:
         _LAST_SUPERVISOR_SIG = sig
         return
 
+    # Optional heartbeat log (default: once per 60s). Set to 0 to fully silence.
     if AION_SUPERVISOR_LOG_EVERY_SECS > 0 and (now - _LAST_SUPERVISOR_LOG_TS) >= AION_SUPERVISOR_LOG_EVERY_SECS:
         log(msg)
         _LAST_SUPERVISOR_LOG_TS = now
@@ -216,18 +215,6 @@ def _load_json(path: Path) -> Dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-
-
-def _overrides_core(o: Dict[str, Any]) -> Dict[str, Any]:
-    """Core keys that define behavior (exclude timestamps to avoid false 'changes')."""
-    if not isinstance(o, dict):
-        return {}
-    return {
-        "kill_switch": bool(o.get("kill_switch", False)),
-        "conf_min": safe_float(o.get("conf_min", 0.52)),
-        "exposure_cap": safe_float(o.get("exposure_cap", 1.2)),
-        "source": str(o.get("source", "")),
-    }
 
 
 # ---------------------------------------------------------------------
@@ -695,6 +682,7 @@ def _compute_overrides_from_truth(
         exposure = min(exposure, 0.85)
 
     # --- flat/degenerate model check ---
+    # if many horizons have tiny std, force caution
     per_h = pred_disp.get("per_horizon", {}) if isinstance(pred_disp, dict) else {}
     tiny = 0
     total = 0
@@ -711,11 +699,11 @@ def _compute_overrides_from_truth(
     conf_min = float(max(0.45, min(0.80, conf_min)))
     exposure = float(max(0.10, min(1.50, exposure)))
 
-    # NOTE: updated_at is filled in supervisor_verdict() ONLY when knobs change.
     return {
         "kill_switch": bool(kill),
         "conf_min": round(conf_min, 3),
         "exposure_cap": round(exposure, 3),
+        "updated_at": datetime.datetime.now(TIMEZONE).isoformat(),
         "source": "truth_loop",
     }
 
@@ -747,6 +735,7 @@ def supervisor_verdict() -> Dict[str, Any]:
     exec_perf = _check_execution_performance()
     aion_brain = _check_aion_brain_health()
 
+    # Determine overall status from components
     statuses = [
         dataset["status"],
         models["status"],
@@ -770,23 +759,12 @@ def supervisor_verdict() -> Dict[str, Any]:
         overall = "ok"
 
     # Build overrides based on truth loop (preferred)
-    prev = load_overrides()
-    prev_core = _overrides_core(prev)
-
     perf_metrics = exec_perf.get("metrics", {}) if isinstance(exec_perf, dict) else {}
     truth_overrides = _compute_overrides_from_truth(
         exec_perf=perf_metrics,
         drift=drift,
         pred_disp=pred_disp,
     )
-    truth_core = _overrides_core(truth_overrides)
-
-    # Only bump updated_at when core knobs actually change (prevents rewrite spam)
-    if prev_core and truth_core == prev_core and isinstance(prev.get("updated_at"), str):
-        truth_overrides["updated_at"] = prev.get("updated_at")
-    else:
-        truth_overrides["updated_at"] = datetime.datetime.now(TIMEZONE).isoformat()
-
     _save_overrides(truth_overrides)
 
     verdict = {
@@ -807,19 +785,15 @@ def supervisor_verdict() -> Dict[str, Any]:
         "generated_at": datetime.datetime.now(TIMEZONE).isoformat(),
     }
 
-    # IMPORTANT: signature MUST exclude updated_at, otherwise it "changes" every poll and spams logs.
-    sig_obj = {"status": overall, "overrides": truth_core}
-    sig = json.dumps(sig_obj, sort_keys=True, default=str)
-
-    _maybe_log_supervisor(
-        f"[supervisor_agent] 🧭 Supervisor verdict: {overall} | overrides={truth_overrides}",
-        sig=sig,
-    )
+    sig = json.dumps({'status': overall, 'overrides': truth_overrides}, sort_keys=True, default=str)
+    _maybe_log_supervisor(f"[supervisor_agent] 🧭 Supervisor verdict: {overall} | overrides={truth_overrides}", sig=sig)
     return verdict
 
 
 def run_supervisor_agent() -> Dict[str, Any]:
-    """Backward-compatible wrapper for nightly_job."""
+    """
+    Backward-compatible wrapper for nightly_job.
+    """
     return supervisor_verdict()
 
 

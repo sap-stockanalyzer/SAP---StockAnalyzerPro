@@ -10,7 +10,7 @@ from backend.core.config import PATHS
 from backend.core.data_pipeline import log
 
 
-def load_return_stats(path: Path | str | None = None) -> Dict[str, Any]:
+def load_return_stats() -> Dict[str, Any]:
     """
     Load global return statistics produced by ai_model training.
 
@@ -28,11 +28,7 @@ def load_return_stats(path: Path | str | None = None) -> Dict[str, Any]:
     Safe to call even if stats do not yet exist.
     """
     try:
-        # Allow callers (e.g., sector-aware inference) to provide an explicit stats path.
-        if path is not None:
-            p = Path(path)
-        else:
-            p = PATHS.get("RETURN_STATS")
+        p = PATHS.get("RETURN_STATS")
 
         # Fallback for older layouts
         if not p:

@@ -1,6 +1,5 @@
-# dt_backend/ml/predict_intraday_to_rolling.py — v1.0
-"""
-Attach intraday model predictions to rolling in a stable schema.
+# dt_backend/ml/predict_intraday_to_rolling.py — v1.1 (RUNTIME-COERCION FRIENDLY + LANE-AWARE)
+"""Attach intraday model predictions to rolling in a stable schema.
 
 Writes:
   rolling[sym]["predictions_dt"] = {
@@ -11,16 +10,27 @@ Writes:
       "meta": {"source": "...", "models": {...}}
   }
 
-This module is intentionally small and "glue-like":
-  • reads rolling/features_dt
-  • batches to pandas
-  • calls score_intraday_batch
-  • writes back predictions_dt
+Why v1.1
+--------
+Your runtime model scorer (ai_model_intraday) already implements robust feature
+coercion (datetime strings -> int64 ns, known categoricals -> stable codes, etc.).
+
+The original v1.0 glue file *over-coerced* features by forcing everything to
+float, which:
+  • discards intraday_trend / vol_bucket signal
+  • discards timestamp-like fields that the runtime coercer can handle
+
+So v1.1 keeps feature values intact (best-effort), and lets the scorer do the
+coercion consistently.
+
+Also: lane-aware.
+- Accepts optional `symbols=[...]` to support fast-lane/slow-lane pipelines.
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -37,43 +47,67 @@ def _utc_now_iso() -> str:
 
 def _safe_float(x: Any, default: float = 0.0) -> float:
     try:
-        return float(x)
+        v = float(x)
+        if v != v:  # NaN
+            return default
+        return v
     except Exception:
         return default
 
 
 def _normalize_proba(row: Dict[str, Any]) -> Dict[str, float]:
     p = {k: _safe_float(row.get(k, 0.0), 0.0) for k in _ALLOWED}
-    s = sum(p.values())
+    s = float(sum(p.values()))
     if s > 0:
-        p = {k: v / s for k, v in p.items()}
+        p = {k: float(v) / s for k, v in p.items()}
     else:
         p = {"BUY": 0.0, "HOLD": 1.0, "SELL": 0.0}
     return p
 
 
 def _features_to_row(sym: str, feats: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convert features_dt dict into a flat row. Drops non-numeric fields.
-    We keep it permissive: if a value can't be float-cast, it becomes 0.0
-    (LightGBM-friendly).
+    """Convert features_dt dict into a flat row.
+
+    Key principle: do NOT aggressively cast to float here.
+    - Keep strings like intraday_trend / vol_bucket
+    - Keep timestamp-like strings (ts) if present
+    - Drop obviously non-scalar types (dict/list)
+
+    The runtime scorer will coerce safely.
     """
     row: Dict[str, Any] = {"symbol": sym}
+
     for k, v in (feats or {}).items():
-        if k in {"ts", "timestamp", "symbol"}:
+        if k == "symbol":
             continue
-        try:
-            row[k] = float(v)
-        except Exception:
-            row[k] = 0.0
+        if isinstance(v, (dict, list, tuple, set)):
+            continue
+
+        # Keep raw scalars; pandas + runtime coercer will handle.
+        # Normalize bytes to str.
+        if isinstance(v, (bytes, bytearray)):
+            try:
+                row[k] = v.decode("utf-8", errors="ignore")
+            except Exception:
+                row[k] = ""
+            continue
+
+        row[k] = v
+
     return row
 
 
 def attach_intraday_predictions(
     max_symbols: int | None = None,
+    *,
+    symbols: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """
-    Main entrypoint.
+    """Main entrypoint.
+
+    Args:
+        max_symbols: optional cap.
+        symbols: optional explicit universe (fast/slow lane). If provided, we only
+                 score those symbols (intersection with rolling).
 
     Returns:
       {status, symbols_seen, predicted, missing_features, ts}
@@ -83,7 +117,13 @@ def attach_intraday_predictions(
         log("[dt_predict] ⚠️ rolling empty.")
         return {"status": "empty", "symbols_seen": 0, "predicted": 0}
 
-    syms = [s for s in rolling.keys() if not str(s).startswith("_")]
+    # Build symbol list
+    if isinstance(symbols, list) and symbols:
+        wanted = {str(s).strip().upper() for s in symbols if str(s).strip()}
+        syms = [str(s).upper() for s in rolling.keys() if not str(s).startswith("_") and str(s).upper() in wanted]
+    else:
+        syms = [str(s) for s in rolling.keys() if not str(s).startswith("_")]
+
     syms.sort()
     if max_symbols is not None:
         syms = syms[: max(0, int(max_symbols))]
@@ -116,14 +156,13 @@ def attach_intraday_predictions(
     # Load models once (faster + consistent)
     models = load_intraday_models()
 
-    proba_df, label_series = score_intraday_batch(df, models=models)
+    proba_df, _label_series = score_intraday_batch(df, models=models)
 
     predicted = 0
     ts = _utc_now_iso()
 
     for sym in used_syms:
         node = ensure_symbol_node(rolling, sym)
-
         if sym not in proba_df.index:
             continue
 
@@ -147,6 +186,7 @@ def attach_intraday_predictions(
                 "lgb_active": bool(models.lgb is not None),
                 "lstm_active": bool(models.lstm is not None),
                 "transf_active": bool(models.transf is not None),
+                "symbols_requested": len(symbols) if isinstance(symbols, list) else None,
             },
         }
         rolling[sym] = node

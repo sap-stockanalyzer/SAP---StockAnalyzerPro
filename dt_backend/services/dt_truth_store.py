@@ -1,4 +1,4 @@
-"""dt_backend/services/dt_truth_store.py — v0.1 (Phase 0)
+"""dt_backend/services/dt_truth_store.py — v0.2 (Phase 0)
 
 Truth + safety helpers for dt_backend.
 
@@ -12,6 +12,7 @@ Artifacts (append-only or atomic replace):
 Locking:
   • dt_scheduler.lock — prevents multiple dt_scheduler processes from running.
   • dt_cycle.lock     — prevents overlapping daytrading cycles across processes.
+  • dt_bars_fetch.lock — prevents overlapping intraday bars fetch loops (optional)
 
 All functions are best-effort and should never raise in normal use.
 """
@@ -22,13 +23,20 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
-from dt_backend.core import DT_PATHS
 from dt_backend.core.logger_dt import log
 from dt_backend.core.time_override_dt import utc_iso
+
+# DT_PATHS source: prefer config_dt; fall back gracefully if core exports it.
+try:
+    from dt_backend.core.config_dt import DT_PATHS  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from dt_backend.core import DT_PATHS  # type: ignore
+    except Exception:  # pragma: no cover
+        DT_PATHS = {}  # type: ignore
 
 
 def _utc_iso() -> str:
@@ -39,7 +47,7 @@ def _utc_iso() -> str:
 def _intraday_dir() -> Path:
     """Resolve the DT intraday artifact directory (best-effort).
 
-    Replay/backtest can override the artifact root by setting
+    Replay/backtest can override the artifact root by setting:
         DT_TRUTH_DIR=/abs/path/to/run_dir
 
     In that case, artifacts are written under <DT_TRUTH_DIR>/intraday.
@@ -50,11 +58,16 @@ def _intraday_dir() -> Path:
         base.mkdir(parents=True, exist_ok=True)
         return base
 
-    da = DT_PATHS.get("da_brains")
-    if isinstance(da, Path):
-        base = da / "intraday"
-    else:
+    # Prefer configured artifact dir if present.
+    da = DT_PATHS.get("da_brains") if isinstance(DT_PATHS, dict) else None
+    try:
+        if da:
+            base = Path(str(da)) / "intraday"
+        else:
+            base = Path("da_brains") / "intraday"
+    except Exception:
         base = Path("da_brains") / "intraday"
+
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -66,14 +79,25 @@ def _fallback(name: str) -> Path:
 # Canonical artifact locations (prefer ROOT config.py DT_PATHS)
 # IMPORTANT: replay/backtest must be able to redirect artifacts using DT_TRUTH_DIR.
 # We therefore treat these as *defaults* and apply the DT_TRUTH_DIR override at call-time.
-STATE_PATH_DEFAULT = DT_PATHS.get("dt_state_file") if isinstance(DT_PATHS.get("dt_state_file"), Path) else _fallback("dt_state.json")
-TRADES_PATH_DEFAULT = DT_PATHS.get("dt_trades_file") if isinstance(DT_PATHS.get("dt_trades_file"), Path) else _fallback("dt_trades.jsonl")
-METRICS_PATH_DEFAULT = DT_PATHS.get("dt_metrics_file") if isinstance(DT_PATHS.get("dt_metrics_file"), Path) else _fallback("dt_metrics.json")
+def _as_path(x: Any) -> Optional[Path]:
+    try:
+        if isinstance(x, Path):
+            return x
+        if isinstance(x, str) and x.strip():
+            return Path(x.strip())
+    except Exception:
+        return None
+    return None
+
+
+STATE_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_state_file") if isinstance(DT_PATHS, dict) else None) or _fallback("dt_state.json")
+TRADES_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_trades_file") if isinstance(DT_PATHS, dict) else None) or _fallback("dt_trades.jsonl")
+METRICS_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_metrics_file") if isinstance(DT_PATHS, dict) else None) or _fallback("dt_metrics.json")
 
 # Locks (same rule)
-SCHED_LOCK_PATH_DEFAULT = DT_PATHS.get("dt_scheduler_lock_file") if isinstance(DT_PATHS.get("dt_scheduler_lock_file"), Path) else _fallback(".dt_scheduler.lock")
-CYCLE_LOCK_PATH_DEFAULT = DT_PATHS.get("dt_cycle_lock_file") if isinstance(DT_PATHS.get("dt_cycle_lock_file"), Path) else _fallback(".dt_cycle.lock")
-BARS_FETCH_LOCK_PATH_DEFAULT = DT_PATHS.get("dt_bars_fetch_lock_file") if isinstance(DT_PATHS.get("dt_bars_fetch_lock_file"), Path) else _fallback(".dt_bars_fetch.lock")
+SCHED_LOCK_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_scheduler_lock_file") if isinstance(DT_PATHS, dict) else None) or _fallback(".dt_scheduler.lock")
+CYCLE_LOCK_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_cycle_lock_file") if isinstance(DT_PATHS, dict) else None) or _fallback(".dt_cycle.lock")
+BARS_FETCH_LOCK_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_bars_fetch_lock_file") if isinstance(DT_PATHS, dict) else None) or _fallback(".dt_bars_fetch.lock")
 
 
 def _override_path(default_path: Path, name: str) -> Path:
@@ -182,6 +206,7 @@ def acquire_lock(lock_path: Path, *, timeout_s: float = 10.0) -> LockHandle:
             finally:
                 os.close(fd)
             return LockHandle(path=lock_path, acquired=True)
+
         except FileExistsError:
             pid = _read_lock_pid(lock_path)
             if pid > 0 and not _pid_alive(pid):
@@ -194,6 +219,7 @@ def acquire_lock(lock_path: Path, *, timeout_s: float = 10.0) -> LockHandle:
             if time.time() >= deadline:
                 return LockHandle(path=lock_path, acquired=False)
             time.sleep(0.15)
+
         except Exception:
             return LockHandle(path=lock_path, acquired=False)
 
@@ -222,7 +248,7 @@ def atomic_write_json(path: Path, obj: Any) -> None:
 
 
 def update_dt_state(patch: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge-patch dt_state.json (shallow merge), add updated_at."""
+    """Merge-patch dt_state.json (shallow merge), add timestamps."""
     state = read_json(state_path(), {})
     if not isinstance(state, dict):
         state = {}
@@ -268,9 +294,8 @@ def _iter_broker_ledgers() -> Iterable[Path]:
 def write_metrics_snapshot(*, rolling: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Write dt_metrics.json.
 
-    This is a lightweight snapshot, not a full analytics engine.
-    It summarizes each bot ledger (cash, positions, equity estimate) and
-    includes basic counters.
+    Lightweight snapshot, not a full analytics engine.
+    Summarizes each bot ledger (cash, positions, equity estimate) + counters.
     """
     rolling = rolling if isinstance(rolling, dict) else {}
 
@@ -281,12 +306,24 @@ def write_metrics_snapshot(*, rolling: Optional[Dict[str, Any]] = None) -> Dict[
             continue
         if not isinstance(node, dict):
             continue
+        feat = node.get("features_dt")
+        if isinstance(feat, dict):
+            try:
+                px = float(feat.get("last_price") or 0.0)
+                if px > 0:
+                    last_px[str(sym).upper()] = px
+                    continue
+            except Exception:
+                pass
+
         bars = node.get("bars_intraday")
         if isinstance(bars, list) and bars:
             b = bars[-1] if isinstance(bars[-1], dict) else None
             if b:
                 try:
-                    last_px[sym] = float(b.get("c") or b.get("close") or 0.0)
+                    px = float(b.get("c") or b.get("close") or 0.0)
+                    if px > 0:
+                        last_px[str(sym).upper()] = px
                 except Exception:
                     pass
 
@@ -296,10 +333,12 @@ def write_metrics_snapshot(*, rolling: Optional[Dict[str, Any]] = None) -> Dict[
             raw = json.loads(p.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 continue
+
             bot_id = str(raw.get("bot_id") or p.stem.replace("bot_", ""))
             cash = float(raw.get("cash") or 0.0)
             positions = raw.get("positions") or {}
             fills = raw.get("fills") or []
+
             realized = 0.0
             if isinstance(fills, list):
                 for f in fills[-500:]:
@@ -320,7 +359,8 @@ def write_metrics_snapshot(*, rolling: Optional[Dict[str, Any]] = None) -> Dict[
                         if qty == 0:
                             continue
                         pos_count += 1
-                        px = last_px.get(str(sym).upper(), float(pos.get("avg_price") or 0.0))
+                        sym_u = str(sym).upper()
+                        px = last_px.get(sym_u, float(pos.get("avg_price") or 0.0))
                         pos_val += qty * float(px or 0.0)
                     except Exception:
                         continue
@@ -346,11 +386,7 @@ def write_metrics_snapshot(*, rolling: Optional[Dict[str, Any]] = None) -> Dict[
 
 
 def bump_metric(name: str, amount: float = 1.0) -> None:
-    """Increment a lightweight counter inside dt_metrics.json.
-
-    This is intentionally simple. For more advanced analytics, use the
-    performance loop later.
-    """
+    """Increment a lightweight counter inside dt_metrics.json."""
     try:
         if not isinstance(name, str) or not name.strip():
             return
@@ -361,6 +397,7 @@ def bump_metric(name: str, amount: float = 1.0) -> None:
     m = read_json(metrics_path(), {})
     if not isinstance(m, dict):
         m = {}
+
     counters = m.get("counters")
     if not isinstance(counters, dict):
         counters = {}
@@ -372,5 +409,5 @@ def bump_metric(name: str, amount: float = 1.0) -> None:
     counters[name] = cur + amt
 
     m["counters"] = counters
-    m.setdefault("ts", _utc_iso())
+    m["ts"] = _utc_iso()
     atomic_write_json(metrics_path(), m)

@@ -1,4 +1,4 @@
-# dt_backend/core/policy_engine_dt.py — v2.0
+# dt_backend/core/policy_engine_dt.py — v2.1 (LANE-AWARE + BUGFIXES)
 """
 Intraday policy engine for dt_backend.
 
@@ -7,6 +7,7 @@ Writes:
         "action": "BUY"|"SELL"|"HOLD"|"STAND_DOWN",
         "intent":  same as action (legacy compatibility),
         "confidence": 0.0..0.99,
+        "p_hit": optional calibrated probability-of-hit,
         "score": signed strength (positive favors BUY, negative favors SELL),
         "trade_gate": bool,
         "reason": short human-readable summary,
@@ -20,6 +21,12 @@ Design goals
 • Uses probabilities + context + global regime
 • Safe defaults
 • Pure Python
+
+v2.1 additions
+--------------
+• Lane-aware: accepts optional `symbols=[...]` and respects `max_symbols`
+• Avoids touching symbols outside the requested lane universe (except global safety stand-down)
+• Fixes a bug where `feats` could be referenced before assignment in strategy path
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
 
@@ -47,6 +54,7 @@ try:
     from dt_backend.researcher.rules_runtime_dt import bot_allowed
 except Exception:  # pragma: no cover
     bot_allowed = None  # type: ignore
+
 try:
     from dt_backend.risk.news_event_risk_dt import risk_adjust_policy
 except Exception:  # pragma: no cover
@@ -113,6 +121,7 @@ def _env_float(name: str, default: float) -> float:
     except Exception:
         return float(default)
 
+
 def _env_int(name: str, default: int) -> int:
     try:
         import os
@@ -123,11 +132,9 @@ def _env_int(name: str, default: int) -> int:
     except Exception:
         return int(default)
 
+
 def _apply_env_overrides(cfg: PolicyConfig) -> PolicyConfig:
     """Optional per-bot tuning via env vars.
-
-    This keeps the code conservative by default, but lets you make it more 'day-trader-y'
-    without editing code each time.
 
     Supported:
       DT_BUY_THRESHOLD, DT_SELL_THRESHOLD
@@ -151,7 +158,6 @@ def _apply_env_overrides(cfg: PolicyConfig) -> PolicyConfig:
     cfg.min_edge_to_flip = max(0.0, min(1.0, cfg.min_edge_to_flip))
     cfg.hysteresis_hold_bias = max(0.0, min(0.25, cfg.hysteresis_hold_bias))
     return cfg
-
 
 
 def _utc_now_iso() -> str:
@@ -218,15 +224,7 @@ def _regime_for_policy(label: str) -> str:
 
 
 def _extract_prediction(node: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, float]]:
-    """
-    Best-effort extraction of dt predictions.
-
-    Expected:
-      node["predictions_dt"] = {"label": "...", "proba": {"BUY":0.5,"HOLD":0.3,"SELL":0.2}}
-    Also tolerates:
-      node["predictions"] = ...
-      "probs" instead of "proba"
-    """
+    """Best-effort extraction of dt predictions."""
     pred = node.get("predictions_dt") or node.get("predictions") or {}
     if not isinstance(pred, dict):
         return None, {}
@@ -242,7 +240,6 @@ def _extract_prediction(node: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, 
             continue
         proba[k.upper()] = _safe_float(v, 0.0)
 
-    # normalize
     total = sum(proba.values())
     if total > 0:
         proba = {k: v / total for k, v in proba.items()}
@@ -257,12 +254,9 @@ def _trend_and_vol(ctx: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def _raw_intent_from_edge(p_buy: float, p_hold: float, p_sell: float, cfg: PolicyConfig) -> Tuple[str, float, float]:
-    """
-    Returns (intent, base_conf, edge).
-    base_conf is max(p_buy, p_sell) because HOLD shouldn't trigger action by itself.
-    """
+    """Returns (intent, base_conf, edge)."""
     edge = p_buy - p_sell
-    base_conf = max(p_buy, p_sell)
+    base_conf = max(p_buy, p_sell)  # HOLD shouldn't trigger action by itself
 
     if edge >= cfg.buy_threshold:
         return "BUY", base_conf, edge
@@ -280,7 +274,7 @@ def _adjust_conf(
     cfg: PolicyConfig,
 ) -> Tuple[float, str]:
     conf = float(base_conf)
-    detail = []
+    detail: List[str] = []
 
     if conf <= 0:
         return 0.0, "no_base_conf"
@@ -341,16 +335,7 @@ def _stabilize_with_hysteresis(
     *,
     policy_key: str = "policy_dt",
 ) -> Tuple[str, Dict[str, Any], str]:
-    """
-    Use per-symbol memory to prevent flip-flopping.
-    Stores a small internal state under policy_dt["_state"].
-
-    Rules:
-      - HOLD is sticky: needs extra edge to exit HOLD
-      - BUY<->SELL flips require:
-          * abs(edge) >= min_edge_to_flip
-          * confirmations_to_flip consecutive proposals
-    """
+    """Use per-symbol memory to prevent flip-flopping."""
     policy_prev = node.get(policy_key) or {}
     prev_action = str((policy_prev.get("action") or policy_prev.get("intent") or "HOLD")).upper()
     state = policy_prev.get("_state") or {}
@@ -360,7 +345,6 @@ def _stabilize_with_hysteresis(
     pending = str(state.get("pending_action") or "").upper()
     pending_count = int(state.get("pending_count") or 0)
 
-    # default: accept
     final_action = proposed
     note = ""
 
@@ -394,7 +378,6 @@ def _stabilize_with_hysteresis(
 
     # update state
     if final_action == proposed:
-        # reset pending when we accept
         state["pending_action"] = ""
         state["pending_count"] = 0
     else:
@@ -408,9 +391,26 @@ def _stabilize_with_hysteresis(
     return final_action, state, note
 
 
+def _lane_symbols(rolling: Dict[str, Any], symbols: Optional[List[str]], max_symbols: Optional[int]) -> List[str]:
+    """Determine which symbols this call should touch (lane-aware)."""
+    keys = [s for s in rolling.keys() if isinstance(s, str) and not s.startswith("_")]
+    if isinstance(symbols, list) and symbols:
+        wanted = {str(s).strip().upper() for s in symbols if str(s).strip()}
+        keys = [s for s in keys if str(s).upper() in wanted]
+    keys.sort()
+    if max_symbols is not None:
+        try:
+            keys = keys[: max(0, int(max_symbols))]
+        except Exception:
+            pass
+    return keys
+
+
 def apply_intraday_policy(
     cfg: PolicyConfig | None = None,
     *,
+    symbols: Optional[List[str]] = None,
+    max_symbols: int | None = None,
     max_positions: int | None = None,
     rolling_override: Dict[str, Any] | None = None,
     save: bool = True,
@@ -435,11 +435,15 @@ def apply_intraday_policy(
     regime_label_raw = str(global_regime.get("label") or "unknown")
     regime_label = _regime_for_policy(regime_label_raw)
 
+    # Choose which symbols to touch (lane-aware)
+    lane_syms = _lane_symbols(rolling, symbols, max_symbols)
+
     # Phase 0: hard risk rails can force a global stand_down for the session.
     g = rolling.get("_GLOBAL_DT") if isinstance(rolling.get("_GLOBAL_DT"), dict) else {}
     if bool(g.get("stand_down")):
         reason = str(g.get("stand_down_reason") or (g.get("risk_rails_dt") or {}).get("reason") or "stand_down")
         updated = 0
+        # Safety: global stand-down updates ALL symbols (not just lane)
         for sym, node_raw in list(rolling.items()):
             if str(sym).startswith("_"):
                 continue
@@ -450,6 +454,7 @@ def apply_intraday_policy(
                 "action": "STAND_DOWN",
                 "intent": "STAND_DOWN",
                 "confidence": 0.0,
+                "p_hit": 0.0,
                 "score": 0.0,
                 "trade_gate": False,
                 "reason": f"risk_rails={reason}",
@@ -465,12 +470,13 @@ def apply_intraday_policy(
 
     # Phase 2.5: time-of-day micro-regime gating (lunch, closed, etc.)
     micro = _get_micro_regime(rolling)
-    ignore_micro = str((__import__("os").getenv("DT_IGNORE_MICRO_REGIME", "") or "")).strip().lower() in {"1","true","yes","y"}
+    ignore_micro = str((__import__("os").getenv("DT_IGNORE_MICRO_REGIME", "") or "")).strip().lower() in {"1", "true", "yes", "y"}
     if micro and not ignore_micro:
         allow = bool(micro.get("allow_trading"))
         label = str(micro.get("label") or "")
         if not allow:
             updated = 0
+            # Safety: micro-regime stand-down updates ALL symbols (not just lane)
             for sym, node_raw in list(rolling.items()):
                 if str(sym).startswith("_"):
                     continue
@@ -481,6 +487,7 @@ def apply_intraday_policy(
                     "action": "STAND_DOWN",
                     "intent": "STAND_DOWN",
                     "confidence": 0.0,
+                    "p_hit": 0.0,
                     "score": 0.0,
                     "trade_gate": False,
                     "reason": f"micro_regime={label} stand_down",
@@ -521,9 +528,8 @@ def apply_intraday_policy(
         cfg.sell_threshold = max(cfg.sell_threshold, -0.10)
 
     updated = 0
-    for sym, node_raw in list(rolling.items()):
-        if str(sym).startswith("_"):
-            continue
+    for sym in lane_syms:
+        node_raw = rolling.get(sym)
         if not isinstance(node_raw, dict):
             continue
 
@@ -535,6 +541,7 @@ def apply_intraday_policy(
                 "action": "HOLD",
                 "intent": "HOLD",
                 "confidence": 0.0,
+                "p_hit": 0.0,
                 "score": 0.0,
                 "trade_gate": False,
                 "reason": "out_of_universe",
@@ -549,6 +556,8 @@ def apply_intraday_policy(
         ctx = node.get("context_dt") or {}
         if not isinstance(ctx, dict):
             ctx = {}
+
+        feats = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
 
         # ------------------------------------------------------------
         # Phase 3: Strategy-first policy (uses features_dt + levels_dt)
@@ -571,8 +580,7 @@ def apply_intraday_policy(
 
         # Maintain squeeze memory for Phase 3 (release detection).
         try:
-            feat = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
-            sq_on = bool(float(feat.get("squeeze_on") or 0.0) >= 0.5) if isinstance(feat, dict) else False
+            sq_on = bool(float(feats.get("squeeze_on") or 0.0) >= 0.5) if isinstance(feats, dict) else False
             st = node.get("_squeeze_state")
             st = st if isinstance(st, dict) else {}
             st["prev_squeeze_on"] = bool(sq_on)
@@ -588,7 +596,6 @@ def apply_intraday_policy(
 
             trend, vol_bkt = _trend_and_vol(ctx)
 
-            # Light adjustment using regime/vol/trend (keeps consistency with v2 policy)
             conf_adj, adj_detail = _adjust_conf(base_conf, proposed_intent, trend, vol_bkt, regime_label, cfg)
 
             stabilized_action, new_state, hyst_note = _stabilize_with_hysteresis(
@@ -604,15 +611,15 @@ def apply_intraday_policy(
             conf_final = float(conf_adj) if action in {"BUY", "SELL"} else 0.0
             trade_gate = bool(action in {"BUY", "SELL"} and conf_final >= cfg.min_confidence)
 
-            # Phase 7: calibrated P(hit) for model-driven decisions
-            p_hit = conf_final
             # Phase 8: news/event risk seatbelt
             risk_penalty = 1.0
             risk_note = ""
-            risk = None
+            bot_name = str(setup.get("bot") or "").upper() or "UNKNOWN"
+            micro_label = str((micro or {}).get("label") or "").upper() if isinstance(micro, dict) else ""
+
             try:
                 if assess_symbol_risk is not None:
-                    risk = assess_symbol_risk(symbol=str(sym).upper(), features_dt=node.get("features_dt"), now_utc=None)
+                    risk = assess_symbol_risk(symbol=str(sym).upper(), features_dt=feats, now_utc=None)
                     if isinstance(risk, dict):
                         node["risk_dt"] = risk
                         if bool(risk.get("stand_down")):
@@ -622,12 +629,10 @@ def apply_intraday_policy(
             except Exception:
                 risk_penalty = 1.0
 
-            # Phase 9: researcher rules (shadow-only by default, but enforceable if provided)
-            bot_name = str(setup.get("bot") or "").upper() or "UNKNOWN"
-            micro_label = str((micro or {}).get("label") or "").upper() if isinstance(micro, dict) else ""
+            # Phase 9: researcher rules
             try:
                 if bot_allowed is not None:
-                    ok, why = bot_allowed(bot=bot_name, regime=regime_label, micro=micro_label, features_dt=node.get("features_dt"))
+                    ok, why = bot_allowed(bot=bot_name, regime=regime_label, micro=micro_label, features_dt=feats)
                     if not ok:
                         node["execution_plan_dt"] = {}
                         node[out_key] = {
@@ -668,11 +673,10 @@ def apply_intraday_policy(
                 p_hit = float(max(0.0, min(1.0, p_hit * risk_penalty)))
                 trade_gate = bool(action in {"BUY", "SELL"} and conf_final >= cfg.min_confidence)
 
-            # Compute expected R (TP distance / stop distance) using last price.
+            # Compute expected R using last price, stop, tp if present.
             expected_r = 1.0
             try:
-                feats = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
-                last_px = float(node.get("last_price") or feats.get("last") or feats.get("last_price") or 0.0)
+                last_px = float(feats.get("last_price") or 0.0)
                 risk_d = setup.get("risk") if isinstance(setup.get("risk"), dict) else {}
                 stop = risk_d.get("stop")
                 tp = risk_d.get("take_profit")
@@ -684,7 +688,16 @@ def apply_intraday_policy(
             except Exception:
                 expected_r = 1.0
 
-            # Stash the plan for downstream execution layers.
+            # Add derived safety-friendly scalars if missing
+            try:
+                last_px = float(feats.get("last_price") or 0.0)
+                atr = float(feats.get("atr_14") or 0.0)
+                if last_px > 0 and "atr_pct" not in feats:
+                    feats = dict(feats)
+                    feats["atr_pct"] = float(atr / last_px) if atr > 0 else 0.0
+            except Exception:
+                pass
+
             node["execution_plan_dt"] = {
                 "bot": str(setup.get("bot") or "").upper(),
                 "side": str(setup.get("side") or "").upper(),
@@ -735,6 +748,7 @@ def apply_intraday_policy(
                 "action": "HOLD",
                 "intent": "HOLD",
                 "confidence": 0.0,
+                "p_hit": 0.0,
                 "score": 0.0,
                 "trade_gate": False,
                 "reason": "no_strategy_setup",
@@ -748,6 +762,20 @@ def apply_intraday_policy(
         # Require model output
         _, proba = _extract_prediction(node)
         if not proba:
+            # still write a safe HOLD so downstream doesn't see stale data
+            node[out_key] = {
+                "action": "HOLD",
+                "intent": "HOLD",
+                "confidence": 0.0,
+                "p_hit": 0.0,
+                "score": 0.0,
+                "trade_gate": False,
+                "reason": "missing_model_proba",
+                "ts": _utc_now_iso(),
+                "_state": (node.get(out_key, {}) or {}).get("_state") if isinstance(node.get(out_key), dict) else {},
+            }
+            rolling[sym] = node
+            updated += 1
             continue
 
         p_buy = float(proba.get("BUY", 0.0))
@@ -766,12 +794,16 @@ def apply_intraday_policy(
             score = 0.0
             trade_gate = False
             reason = f"regime={regime_label} stand_down"
+            new_state = (node.get(out_key) or {}).get("_state") if isinstance(node.get(out_key), dict) else {}
+            p_hit = 0.0
         elif cfg.stand_down_in_unknown_regime and r in {"unknown"}:
             action = "STAND_DOWN"
             conf_final = 0.0
             score = 0.0
             trade_gate = False
             reason = f"regime={regime_label} stand_down_unknown"
+            new_state = (node.get(out_key) or {}).get("_state") if isinstance(node.get(out_key), dict) else {}
+            p_hit = 0.0
         else:
             score = float(edge) * float(conf_adj)
 
@@ -807,52 +839,29 @@ def apply_intraday_policy(
                 f"adj={adj_detail}; hyst={hyst_note}"
             )
 
-            node[out_key] = {
-                "action": action,
-                "intent": action,
-                "confidence": float(conf_final),
-                "p_hit": float(p_hit),
-                "score": float(score),
-                "trade_gate": bool(trade_gate),
-                "reason": reason,
-                "ts": _utc_now_iso(),
-                "_state": new_state,
-            }
-            rolling[sym] = node
-            updated += 1
-            continue
-
-        # STAND_DOWN path / safety
         node[out_key] = {
             "action": action,
             "intent": action,
             "confidence": float(conf_final),
-            "p_hit": 0.0,
+            "p_hit": float(p_hit),
             "score": float(score),
             "trade_gate": bool(trade_gate),
             "reason": reason,
             "ts": _utc_now_iso(),
-            "_state": {
-                "prev_action": str((node.get(out_key) or {}).get("action") or "HOLD").upper(),
-                "pending_action": "",
-                "pending_count": 0,
-                "last_edge": 0.0,
-                "last_conf": 0.0,
-            },
+            "_state": new_state if isinstance(new_state, dict) else {},
         }
         rolling[sym] = node
         updated += 1
 
     # ------------------------------------------------------------
     # Hard cap: allow only top N trade candidates by |score|
-    # (Safety: if capped out, force HOLD + trade_gate False)
+    # Note: applied only within the lane symbols touched by this call.
     # ------------------------------------------------------------
     capped = 0
     if max_positions_n is not None:
-        candidates = []
-        for sym, node in rolling.items():
-            if not isinstance(sym, str) or sym.startswith("_"):
-                continue
+        candidates: List[Tuple[str, float]] = []
+        for sym in lane_syms:
+            node = rolling.get(sym)
             if not isinstance(node, dict):
                 continue
             p = node.get(out_key)
@@ -862,8 +871,6 @@ def apply_intraday_policy(
                 candidates.append((sym, abs(float(p.get("score") or 0.0))))
 
         candidates.sort(key=lambda t: t[1], reverse=True)
-        keep = set(sym for sym, _ in candidates[:max_positions_n])
-
         for sym, _ in candidates[max_positions_n:]:
             node = rolling.get(sym)
             if not isinstance(node, dict):
@@ -883,6 +890,7 @@ def apply_intraday_policy(
             p["intent"] = "HOLD"
             p["trade_gate"] = False
             p["confidence"] = 0.0
+            p["p_hit"] = 0.0
             p["score"] = 0.0
             p["reason"] = (str(p.get("reason") or "") + f"; cap=max_positions({max_positions_n})").strip()
             p["ts"] = _utc_now_iso()
@@ -907,6 +915,15 @@ def apply_intraday_policy(
 
     if save:
         save_rolling(rolling)
+
     extra = f", capped={capped}, max_positions={max_positions_n}" if max_positions_n is not None else ""
-    log(f"[policy_dt] ✅ updated policy_dt for {updated} symbols (regime={regime_label}){extra}.")
-    return {"symbols": len(rolling), "updated": updated, "regime": regime_label, "capped": capped, "max_positions": max_positions_n}
+    lane_note = f", lane_symbols={len(lane_syms)}" if isinstance(lane_syms, list) else ""
+    log(f"[policy_dt] ✅ updated policy_dt for {updated} symbols (regime={regime_label}){extra}{lane_note}.")
+    return {
+        "symbols": len(rolling),
+        "updated": updated,
+        "regime": regime_label,
+        "capped": capped,
+        "max_positions": max_positions_n,
+        "lane_symbols": len(lane_syms),
+    }

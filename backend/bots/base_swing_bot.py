@@ -73,6 +73,16 @@ except Exception:  # Fallback (e.g. older envs)
     def log(msg: str) -> None:
         print(msg, flush=True)
 
+# Swing Phase 0: truth/instrumentation (best-effort)
+try:
+    from backend.services.swing_truth_store import append_swing_event, bump_swing_metric
+except Exception:  # pragma: no cover
+    def append_swing_event(_event: dict) -> None:  # type: ignore
+        return
+
+    def bump_swing_metric(_name: str, _amount: float = 1.0) -> None:  # type: ignore
+        return
+
 ROOT = Path(PATHS.get("root", "."))
 ML_DATA = Path(PATHS["ml_data"])
 STOCK_CACHE = Path(PATHS["stock_cache"])
@@ -520,9 +530,24 @@ class SwingBot:
 
         universe_scores: Dict[str, float] = {}
 
+        # Phase S0: optional rejection logging for "missed opportunities" analytics.
+        log_reject = str(os.getenv("SWING_LOG_REJECTIONS", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+        max_reject_events = int(os.getenv("SWING_LOG_REJECTIONS_MAX", "250"))
+        reject_events = 0
+        reject_counts: Dict[str, int] = {}
+
         for sym, node in rolling.items():
             price = self._extract_price(node)
             if price is None or price <= 0:
+                if log_reject and reject_events < max_reject_events:
+                    append_swing_event({
+                        "type": "swing_reject",
+                        "bot": self.cfg.bot_key,
+                        "symbol": str(sym).upper(),
+                        "reason": "no_price",
+                    })
+                    reject_events += 1
+                    reject_counts["no_price"] = reject_counts.get("no_price", 0) + 1
                 continue
 
             # Policy + regression signal
@@ -531,10 +556,50 @@ class SwingBot:
 
             # Long-only + minimum confidence
             if intent != "BUY":
+                if log_reject and reject_events < max_reject_events:
+                    append_swing_event({
+                        "type": "swing_reject",
+                        "bot": self.cfg.bot_key,
+                        "symbol": str(sym).upper(),
+                        "reason": "intent_not_buy",
+                        "intent": intent,
+                        "confidence": float(pol_conf),
+                        "expected_return": float(exp_ret),
+                    })
+                    reject_events += 1
+                    reject_counts["intent_not_buy"] = reject_counts.get("intent_not_buy", 0) + 1
                 continue
             if pol_conf < self.cfg.conf_threshold:
+                if log_reject and reject_events < max_reject_events:
+                    append_swing_event({
+                        "type": "swing_reject",
+                        "bot": self.cfg.bot_key,
+                        "symbol": str(sym).upper(),
+                        "reason": "conf_below_threshold",
+                        "intent": intent,
+                        "confidence": float(pol_conf),
+                        "conf_threshold": float(self.cfg.conf_threshold),
+                        "expected_return": float(exp_ret),
+                    })
+                    reject_events += 1
+                    reject_counts["conf_below_threshold"] = reject_counts.get("conf_below_threshold", 0) + 1
                 continue
             if exp_ret <= 0.0:
+                # This is the first place we can measure "missed opportunities" later:
+                # we had a BUY intent + enough confidence, but rejected due to edge.
+                if log_reject and reject_events < max_reject_events:
+                    append_swing_event({
+                        "type": "swing_missed_candidate",
+                        "bot": self.cfg.bot_key,
+                        "symbol": str(sym).upper(),
+                        "reason": "non_positive_expected_return",
+                        "intent": intent,
+                        "confidence": float(pol_conf),
+                        "expected_return": float(exp_ret),
+                        "price": float(price),
+                    })
+                    reject_events += 1
+                    reject_counts["non_positive_expected_return"] = reject_counts.get("non_positive_expected_return", 0) + 1
                 continue  # require positive edge for now
 
             # Base AI score: expected return * confidence
@@ -562,6 +627,13 @@ class SwingBot:
                 universe_scores[sym] = score
 
         ranked = sorted(universe_scores.items(), key=lambda kv: kv[1], reverse=True)
+        if log_reject:
+            try:
+                bump_swing_metric(f"{self.cfg.bot_key}.rejections_logged", float(reject_events))
+                for k, v in reject_counts.items():
+                    bump_swing_metric(f"{self.cfg.bot_key}.reject.{k}", float(v))
+            except Exception:
+                pass
         log(f"[{self.cfg.bot_key}] AI-ranked universe size={len(ranked)}")
         return ranked
 

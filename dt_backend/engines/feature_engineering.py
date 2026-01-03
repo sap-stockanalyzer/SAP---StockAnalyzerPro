@@ -1,4 +1,4 @@
-# dt_backend/engines/feature_engineering.py — v3.1
+# dt_backend/engines/feature_engineering.py — v3.2
 """Intraday feature engineering for AION dt_backend.
 
 Phase 1: "the bot's senses"
@@ -18,6 +18,12 @@ Configured by env:
     DT_FEATURE_TF = "5Min" (default) or "1Min"
     DT_FEATURES_MIN_INTERVAL = seconds (optional) skip recompute if too recent
     DT_MARKET_PROXIES = "SPY,QQQ" (default)
+
+v3.2 additions
+--------------
+• Candidate universe support:
+    build_intraday_features(symbols=[...], max_symbols=...)
+  so the fast-lane / slow-lane orchestrator can scope work per cycle.
 """
 
 from __future__ import annotations
@@ -89,12 +95,7 @@ def _session_bounds_utc(now_utc: datetime) -> Tuple[datetime, datetime]:
 
 
 def _market_open_utc_for(ts_utc: datetime) -> datetime:
-    """Compute the NYSE market open (09:30 NY time) for the date of `ts_utc`, returned in UTC.
-
-    Defensive:
-      - If ts_utc is naive, assume UTC.
-      - If ZoneInfo isn't available, falls back to "today at 09:30 UTC" (not perfect, but safe).
-    """
+    """Compute the NYSE market open (09:30 NY time) for the date of `ts_utc`, returned in UTC."""
     try:
         if ts_utc.tzinfo is None:
             ts_utc = ts_utc.replace(tzinfo=timezone.utc)
@@ -155,7 +156,7 @@ def _ohlcv_from_bars(
         v.append(vv)
         vw.append(vww)
 
-    # ✅ Defensive: ensure increasing timestamps (feeds can be out-of-order)
+    # Defensive: ensure increasing timestamps
     if len(ts) >= 2:
         idx = sorted(range(len(ts)), key=lambda i: ts[i])
         ts = [ts[i] for i in idx]
@@ -170,10 +171,7 @@ def _ohlcv_from_bars(
 
 
 def _session_vwap_series(highs: List[float], lows: List[float], closes: List[float], volumes: List[float]) -> List[float]:
-    """Session VWAP series (cumulative).
-
-    We compute cumulative VWAP using typical price (H+L+C)/3.
-    """
+    """Session VWAP series (cumulative) using typical price (H+L+C)/3."""
     n = min(len(highs), len(lows), len(closes), len(volumes))
     if n <= 0:
         return []
@@ -272,6 +270,33 @@ def _market_proxy_features(rolling: Dict[str, Any], proxies: List[str], tf_key: 
     return out
 
 
+def _normalize_symbols(symbols: Any) -> Optional[List[str]]:
+    if symbols is None:
+        return None
+    if isinstance(symbols, str):
+        parts = [p.strip().upper() for p in symbols.split(",") if p.strip()]
+        return sorted(set(parts)) if parts else None
+    if isinstance(symbols, (list, tuple, set)):
+        parts = [str(s).strip().upper() for s in symbols if str(s).strip()]
+        return sorted(set(parts)) if parts else None
+    return None
+
+
+def _iter_symbol_items(rolling: Dict[str, Any], symbols: Optional[List[str]], max_symbols: Optional[int]) -> List[Tuple[str, Dict[str, Any]]]:
+    items = [(sym, node) for sym, node in rolling.items() if isinstance(sym, str) and not sym.startswith("_") and isinstance(node, dict)]
+    items.sort(key=lambda kv: kv[0])
+    if symbols:
+        wanted = set(symbols)
+        items = [(s, n) for s, n in items if s.upper() in wanted]
+    if max_symbols is not None:
+        try:
+            n = max(0, int(max_symbols))
+            items = items[:n]
+        except Exception:
+            pass
+    return items
+
+
 def _feature_snapshot_for_symbol(
     sym: str,
     node: Dict[str, Any],
@@ -302,7 +327,7 @@ def _feature_snapshot_for_symbol(
 
     vwap_s = _session_vwap_series(h, l, c, v)
     if not vwap_s:
-        return {}  # ✅ no meaningful vwap -> no meaningful feature set
+        return {}  # no meaningful vwap -> no meaningful features
 
     vwap_last = vwap_s[-1]
     vwap_dist = pct_change(c[-1], vwap_last)
@@ -404,6 +429,7 @@ def _feature_snapshot_for_symbol(
 def build_intraday_features(
     max_symbols: int | None = None,
     *,
+    symbols: Any = None,
     now_utc: datetime | None = None,
     ignore_min_interval: bool = False
 ) -> Dict[str, Any]:
@@ -424,16 +450,12 @@ def build_intraday_features(
         proxies = ["SPY", "QQQ"]
     mkt = _market_proxy_features(rolling, proxies, tf_key)
 
-    items = [(sym, node) for sym, node in rolling.items() if isinstance(sym, str) and not sym.startswith("_")]
-    items.sort(key=lambda kv: kv[0])
-    if max_symbols is not None:
-        items = items[: max(0, int(max_symbols))]
+    sym_list = _normalize_symbols(symbols)
+    items = _iter_symbol_items(rolling, sym_list, max_symbols)
 
     updated = 0
     skipped = 0
     for sym, node_raw in items:
-        if not isinstance(node_raw, dict):
-            continue
         node = ensure_symbol_node(rolling, sym)
 
         if min_int > 0:

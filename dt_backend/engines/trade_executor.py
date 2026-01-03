@@ -1,4 +1,4 @@
-# dt_backend/engines/trade_executor.py — v0.1 (Phase 0 executor)
+# dt_backend/engines/trade_executor.py — v0.2 (Phase 0 executor + LANE-AWARE + META FIXES)
 """Intraday trade executor for dt_backend.
 
 Phase 0 goals
@@ -7,20 +7,30 @@ Phase 0 goals
 * Safe-by-default: DRY RUN unless explicitly enabled.
 * Minimal assumptions: consumes execution_dt when present, otherwise policy_dt.
 
-This module is intentionally conservative.
-It does not try to be "smart" yet — it only turns intents into orders.
+v0.2 updates
+------------
+- Lane-aware: optional `symbols=[...]` to execute only a scoped universe.
+- Meta fixes: pull risk_mode/version from dt_state + daily_plan_dt (not a phantom g["dt_state"]).
+- Feature key fixes: atr_14 / vwap_dist instead of atr / vwap_dev.
+- Time consistency: use the effective cycle timestamp for exits + flip cooldown.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from dt_backend.core.data_pipeline_dt import _read_rolling
 from dt_backend.core.logger_dt import log
 from dt_backend.core.time_override_dt import now_utc as _now_utc_override
 from dt_backend.services.dt_truth_store import append_trade_event, bump_metric
+
+# Optional: dt_state tags (safe if unavailable)
+try:
+    from dt_backend.services.dt_truth_store import read_dt_state  # type: ignore
+except Exception:  # pragma: no cover
+    read_dt_state = None  # type: ignore
 
 from dt_backend.engines.broker_api import BrokerAPI, Order
 from dt_backend.services.position_manager_dt import (
@@ -79,22 +89,24 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
 
 
 def _extract_intent(node: Dict[str, Any]) -> Tuple[str, float, float]:
-    """Return (side, size, confidence)."""
+    """Return (side, size, confidence).
 
-    # Prefer execution_dt (sizing + cooldown already applied).
+    Prefers execution_dt (already sized + cooldown applied). Falls back to policy_dt.
+    """
+
     ex = node.get("execution_dt")
     if isinstance(ex, dict):
         side = str(ex.get("side") or "").upper()
         size = _safe_float(ex.get("size"), 0.0)
-        conf = _safe_float(ex.get("confidence_adj"), 0.0)
+        # Prefer p_hit if present; otherwise confidence_adj.
+        conf = _safe_float(ex.get("p_hit"), _safe_float(ex.get("confidence_adj"), 0.0))
         if side in {"BUY", "SELL", "FLAT"}:
             return side, size, conf
 
-    # Fallback: policy_dt.
     pol = node.get("policy_dt")
     if isinstance(pol, dict):
         side = str(pol.get("action") or pol.get("intent") or "").upper()
-        conf = _safe_float(pol.get("confidence"), 0.0)
+        conf = _safe_float(pol.get("p_hit"), _safe_float(pol.get("confidence"), 0.0))
         # policy_dt has no explicit size; treat confidence as a weak size proxy.
         size = max(0.0, min(1.0, conf))
         if side in {"BUY", "SELL", "HOLD", "STAND_DOWN"}:
@@ -104,7 +116,6 @@ def _extract_intent(node: Dict[str, Any]) -> Tuple[str, float, float]:
 
 
 def _extract_last_price(node: Dict[str, Any]) -> float:
-    # Prefer features_dt
     feat = node.get("features_dt")
     if isinstance(feat, dict):
         try:
@@ -114,7 +125,6 @@ def _extract_last_price(node: Dict[str, Any]) -> float:
         except Exception:
             pass
 
-    # Fallback to last close from bars
     for k in ("bars_intraday_5m", "bars_intraday"):
         bars = node.get(k)
         if isinstance(bars, list) and bars:
@@ -138,26 +148,39 @@ def _extract_atr(node: Dict[str, Any]) -> float:
             return 0.0
     return 0.0
 
+
 def _entry_meta_from_global(rolling: Dict[str, Any], now_utc: Optional[datetime] = None) -> Dict[str, Any]:
-    """Pull lightweight tags from _GLOBAL_DT for analytics/replay."""
+    """Pull lightweight tags from _GLOBAL_DT + dt_state for analytics/replay."""
     g = rolling.get("_GLOBAL_DT") if isinstance(rolling, dict) else None
     g = g if isinstance(g, dict) else {}
+
     rd = g.get("regime_dt") if isinstance(g.get("regime_dt"), dict) else {}
     mr = g.get("micro_regime_dt") if isinstance(g.get("micro_regime_dt"), dict) else {}
-    state = g.get("dt_state") if isinstance(g.get("dt_state"), dict) else {}
+    plan = g.get("daily_plan_dt") if isinstance(g.get("daily_plan_dt"), dict) else {}
+
+    # dt_state.json is the source of truth for version/risk switches
+    st = {}
+    try:
+        if read_dt_state is not None:
+            st = read_dt_state() or {}
+    except Exception:
+        st = {}
+
     out = {
         "regime": rd.get("label"),
         "day_type": rd.get("day_type"),
         "regime_conf": rd.get("confidence"),
         "micro": mr.get("label"),
         "time_window": mr.get("time_window"),
-        "risk_mode": state.get("risk_mode"),
-        "version": state.get("version"),
+        "risk_mode": (plan.get("risk_mode") or st.get("risk_mode")),
+        "version": st.get("version"),
+        "lane": st.get("lane"),
+        "cycle_seq": st.get("cycle_seq"),
+        "cycle_id": st.get("cycle_id"),
     }
     if now_utc is not None:
         out["cycle_ts"] = now_utc.isoformat(timespec="seconds").replace("+00:00", "Z")
     return out
-
 
 
 def _plan_risk(node: Dict[str, Any], *, side: str, last_price: float, atr: float, cfg: ExecutionConfig) -> Dict[str, Any]:
@@ -196,17 +219,27 @@ def _plan_risk(node: Dict[str, Any], *, side: str, last_price: float, atr: float
 
 
 def _qty_from_size(size: float, cfg: ExecutionConfig) -> float:
-    # Phase 0 uses a simple mapping; we will upgrade sizing later.
     size = max(0.0, min(1.0, float(size)))
     return max(0.0, float(cfg.default_qty) * size)
 
 
-def execute_from_policy(cfg: Optional[ExecutionConfig] = None, *, now_utc: Optional[datetime] = None) -> Dict[str, Any]:
+def execute_from_policy(
+    cfg: Optional[ExecutionConfig] = None,
+    *,
+    now_utc: Optional[datetime] = None,
+    symbols: Optional[List[str]] = None,
+    max_symbols: Optional[int] = None,
+) -> Dict[str, Any]:
     """Execute one cycle worth of intents.
+
+    Args:
+        cfg: ExecutionConfig (dry run by default).
+        now_utc: optional forced time (replay/backtest).
+        symbols: optional explicit universe (lane-aware). If provided, only these symbols are considered.
+        max_symbols: optional cap applied after symbol filtering.
 
     Returns a summary dict.
     """
-
     cfg = cfg or ExecutionConfig()
     rolling = _read_rolling() or {}
     if not isinstance(rolling, dict) or not rolling:
@@ -225,7 +258,7 @@ def execute_from_policy(cfg: Optional[ExecutionConfig] = None, *, now_utc: Optio
         dry_run=bool(cfg.dry_run),
         eod_flatten=bool(cfg.eod_flatten),
         eod_flatten_minutes=int(cfg.eod_flatten_minutes),
-        now_utc=now_utc,
+        now_utc=ts_now,
     )
     try:
         if exit_summary.exits_sent or exit_summary.partials_sent or exit_summary.eod_flattens:
@@ -240,8 +273,19 @@ def execute_from_policy(cfg: Optional[ExecutionConfig] = None, *, now_utc: Optio
     considered = 0
     blocked = 0
 
+    # Build deterministic symbol list
+    if isinstance(symbols, list) and symbols:
+        wanted = {str(s).strip().upper() for s in symbols if str(s).strip()}
+        sym_list = [s for s in rolling.keys() if isinstance(s, str) and not s.startswith("_") and s.upper() in wanted]
+    else:
+        sym_list = [s for s in rolling.keys() if isinstance(s, str) and not s.startswith("_")]
+
+    sym_list = sorted(set([str(s).upper() for s in sym_list]))
+    if max_symbols is not None:
+        sym_list = sym_list[: max(0, int(max_symbols))]
+
     # Iterate symbols deterministically.
-    for sym in sorted([s for s in rolling.keys() if isinstance(s, str) and not s.startswith("_")]):
+    for sym in sym_list:
         if orders >= max(0, int(cfg.max_orders_per_cycle)):
             break
         node = rolling.get(sym)
@@ -304,7 +348,7 @@ def execute_from_policy(cfg: Optional[ExecutionConfig] = None, *, now_utc: Optio
             pass
 
         # Phase 0 only closes longs on SELL unless allow_shorts is enabled.
-        if side == "SELL" and (pos is None or pos.qty <= 0.0) and not cfg.allow_shorts:
+        if side == "SELL" and (pos is None or getattr(pos, "qty", 0.0) <= 0.0) and not cfg.allow_shorts:
             blocked += 1
             append_trade_event(
                 {
@@ -364,7 +408,6 @@ def execute_from_policy(cfg: Optional[ExecutionConfig] = None, *, now_utc: Optio
                     filled_qty = _safe_float(res.get("qty"), 0.0)
                     fill_price = _safe_float(res.get("price"), 0.0)
 
-                    # Entry: BUY always means long entry. SELL could be exit (if we had a position) or short entry.
                     is_entry = side == "BUY" or (side == "SELL" and cfg.allow_shorts and (pos is None or getattr(pos, "qty", 0.0) <= 0))
 
                     if is_entry and filled_qty > 0 and fill_price > 0:
@@ -372,21 +415,21 @@ def execute_from_policy(cfg: Optional[ExecutionConfig] = None, *, now_utc: Optio
                         plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else {}
                         bot = str(plan.get("bot") or "") if isinstance(plan, dict) else ""
                         reason = str(plan.get("reason") or "") if isinstance(plan, dict) else ""
-                        meta = _entry_meta_from_global(rolling, now_utc)
+
+                        meta = _entry_meta_from_global(rolling, ts_now)
                         try:
-                            # Phase 7 calibration wants the raw entry confidence at time of decision.
                             meta["base_conf"] = float(conf)
                             meta["confidence"] = float(conf)
-                            # Also stash calibrated prob if the policy provided it.
                             p = node.get("policy_dt") if isinstance(node.get("policy_dt"), dict) else {}
                             if isinstance(p, dict) and p.get("p_hit") is not None:
                                 meta["p_hit"] = float(p.get("p_hit") or 0.0)
-                            # Phase 9 researcher wants a few entry-time features for safe filter proposals.
+
                             feats = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
                             meta["entry_features"] = {
                                 "rel_volume": float(feats.get("rel_volume") or 0.0),
-                                "atr": float(feats.get("atr") or 0.0),
-                                "vwap_dev": float(feats.get("vwap_dev") or 0.0),
+                                "atr_14": float(feats.get("atr_14") or 0.0),
+                                "vwap_dist": float(feats.get("vwap_dist") or 0.0),
+                                "squeeze_on": float(feats.get("squeeze_on") or 0.0),
                             }
                             if bot:
                                 meta["bot"] = str(bot).upper()
@@ -404,14 +447,13 @@ def execute_from_policy(cfg: Optional[ExecutionConfig] = None, *, now_utc: Optio
                             trail_atr_mult=float(cfg.trail_atr_mult),
                             scratch_min=int(cfg.scratch_min),
                             scratch_atr_frac=float(cfg.scratch_atr_frac),
-                            now_utc=now_utc,
+                            now_utc=ts_now,
                             meta=meta,
                             confidence=float(conf),
                         )
                     else:
-                        # If this SELL likely closed a long, mark exit in state.
                         if side == "SELL" and (pos is not None and getattr(pos, "qty", 0.0) > 0) and filled_qty > 0:
-                            record_exit(sym, reason="manual_sell", now_utc=now_utc)
+                            record_exit(sym, reason="manual_sell", now_utc=ts_now)
             except Exception:
                 pass
         except Exception as e:
@@ -433,6 +475,7 @@ def execute_from_policy(cfg: Optional[ExecutionConfig] = None, *, now_utc: Optio
         "orders": int(orders),
         "blocked": int(blocked),
         "dry_run": bool(cfg.dry_run),
+        "symbols": len(sym_list),
         "exits": {
             "evaluated": int(exit_summary.evaluated),
             "partials_sent": int(exit_summary.partials_sent),

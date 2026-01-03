@@ -1,22 +1,38 @@
-# dt_backend/core/execution_dt.py — Advanced execution intent layer.
+# dt_backend/core/execution_dt.py — v1.1 (LANE-AWARE + STAND_DOWN SAFE)
 """
+Advanced execution intent layer for dt_backend.
+
 Converts policy_dt (intents) into execution_dt blocks that downstream
 executors (e.g. backend trade bots) can consume.
 
+Writes:
     rolling[sym]["execution_dt"] = {
         "side": "BUY" | "SELL" | "FLAT",
         "size": 0.0–1.0,          # fraction of max capital per symbol
         "confidence_adj": 0.0–1.0,
         "cooldown": bool,
         "valid_until": <ISO8601 UTC>,
-        "ts": <ISO8601 UTC>
+        "ts": <ISO8601 UTC>,
+
+        # Optional Phase 7/3 extras (safe for downstream to ignore)
+        "p_hit": float,
+        "expected_r": float,
+        "bot": str|None,
+        "risk": dict|None,
     }
+
+v1.1 additions
+--------------
+- Lane-aware: accepts optional `symbols=[...]` and `max_symbols=...` so the
+  fast-lane / slow-lane orchestrator can scope work without touching other nodes.
+- STAND_DOWN handling: if policy action/intent is STAND_DOWN, we force FLAT.
 """
+
 from __future__ import annotations
 
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
 
@@ -89,7 +105,6 @@ def _size_from_conf_and_vol(conf: float, vol_bkt: str, cfg: ExecConfig) -> float
 
     conf = max(0.0, min(cfg.max_conf_cap, conf))
 
-    # Volatility-aware scaling: risk-off when vol is high.
     if vol_bkt == "high":
         scale = 0.4
     elif vol_bkt == "medium":
@@ -107,23 +122,16 @@ def _size_from_phit_expected_r(
     vol_bkt: str,
     cfg: ExecConfig,
 ) -> float:
-    """Phase 7 sizing: size ~ f(P(hit), expected_R) with vol scaling.
-
-    * expected_r is reward-to-risk multiple (e.g., 1.0 = 1R target).
-    * Conservative: allocate only if phit is above coin-flip + margin.
-    """
+    """Phase 7 sizing: size ~ f(P(hit), expected_R) with vol scaling."""
     phit = _safe_float(phit, 0.0)
     if phit < cfg.min_phit:
         return 0.0
 
-    # Convert probability edge into [0,1].
     edge = max(0.0, min(1.0, (phit - 0.5) / 0.5))
 
-    # expected_r factor: reward-to-risk helps, but don't let it explode.
     er = max(0.5, min(2.0, _safe_float(expected_r, 1.0)))
     r_factor = 0.5 + 0.5 * (er / 2.0)  # 0.5..1.0
 
-    # Volatility-aware scaling: risk-off when vol is high.
     if vol_bkt == "high":
         vol_scale = 0.4
     elif vol_bkt == "medium":
@@ -141,7 +149,6 @@ def _expected_r_from_plan(node: Dict[str, Any]) -> float:
         plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else {}
         risk = plan.get("risk") if isinstance(plan, dict) and isinstance(plan.get("risk"), dict) else {}
 
-        # Prefer explicit r_target if provided by the strategy
         rt = risk.get("r_target")
         if rt is not None:
             return max(0.1, min(3.0, _safe_float(rt, 1.0)))
@@ -190,8 +197,6 @@ def _cooldown_active(
 
     if prev_side not in {"BUY", "SELL"} or new_side not in {"BUY", "SELL"}:
         return False
-
-    # Only enforce cooldown when flipping direction (BUY → SELL or SELL → BUY)
     if prev_side == new_side:
         return False
 
@@ -204,6 +209,28 @@ def _cooldown_active(
     return delta.total_seconds() < cfg.cooldown_minutes * 60
 
 
+def _symbols_to_process(
+    rolling: Dict[str, Any],
+    *,
+    symbols: Optional[List[str]] = None,
+    max_symbols: Optional[int] = None,
+) -> List[str]:
+    """Deterministic symbol selection for lane-aware processing."""
+    if isinstance(symbols, list) and symbols:
+        wanted = {str(s).strip().upper() for s in symbols if str(s).strip()}
+        syms = [str(s).upper() for s in rolling.keys() if isinstance(s, str) and not s.startswith("_") and str(s).upper() in wanted]
+    else:
+        syms = [str(s) for s in rolling.keys() if isinstance(s, str) and not s.startswith("_")]
+
+    syms = sorted(set(syms))
+    if max_symbols is not None:
+        try:
+            syms = syms[: max(0, int(max_symbols))]
+        except Exception:
+            pass
+    return syms
+
+
 def run_execution_intraday(
     cfg: ExecConfig | None = None,
     *,
@@ -212,10 +239,18 @@ def run_execution_intraday(
     save: bool = True,
     policy_key: str = "policy_dt",
     out_key: str = "execution_dt",
+    symbols: Optional[List[str]] = None,
+    max_symbols: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Main entry point.
 
     Reads rolling, converts policy_dt into execution_dt, writes back.
+
+    Args:
+        symbols: optional explicit universe (fast/slow lane). If provided, only
+                 those symbols are updated.
+        max_symbols: optional cap (applies after symbol filtering).
+
     Returns summary dict.
     """
     cfg = cfg or ExecConfig()
@@ -224,7 +259,6 @@ def run_execution_intraday(
         log("[exec_dt] ⚠️ rolling empty, nothing to do.")
         return {"symbols": 0, "updated": 0}
 
-    # ✅ FIX: ensure time exists and is UTC
     now_utc = now_utc or datetime.now(timezone.utc)
 
     # Phase 4: risk mode can modestly scale sizing (keeps a single code path).
@@ -241,30 +275,44 @@ def run_execution_intraday(
     except Exception:
         pass
 
-    updated = 0
-    symbols_seen = 0
+    syms = _symbols_to_process(rolling, symbols=symbols, max_symbols=max_symbols)
 
-    for sym, node_raw in list(rolling.items()):
-        if not isinstance(sym, str) or sym.startswith("_"):
-            continue
+    updated = 0
+    for sym in syms:
+        node_raw = rolling.get(sym)
         if not isinstance(node_raw, dict):
             continue
 
-        symbols_seen += 1
-
         node = ensure_symbol_node(rolling, sym)
-        policy = node.get(policy_key) or {}
-        ctx = node.get("context_dt") or {}
+        policy = node.get(policy_key) if isinstance(node.get(policy_key), dict) else {}
+        ctx = node.get("context_dt") if isinstance(node.get("context_dt"), dict) else {}
+
+        # Hard safety: STAND_DOWN => FLAT
+        pol_action = str((policy or {}).get("action") or "").upper()
+        if pol_action == "STAND_DOWN":
+            node[out_key] = {
+                "side": "FLAT",
+                "size": 0.0,
+                "confidence_adj": 0.0,
+                "p_hit": 0.0,
+                "expected_r": 0.0,
+                "cooldown": False,
+                "valid_until": (now_utc + timedelta(minutes=cfg.valid_minutes)).isoformat().replace("+00:00", "Z"),
+                "ts": now_utc.isoformat().replace("+00:00", "Z"),
+                "bot": None,
+                "risk": None,
+            }
+            rolling[sym] = node
+            updated += 1
+            continue
 
         # Phase 3: strategy bots can publish an explicit trade plan.
-        # If present, prefer it over pure policy intent sizing.
-        plan = node.get("execution_plan_dt")
+        plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else None
         if isinstance(plan, dict):
             try:
                 p_side = str(plan.get("side") or "").upper()
                 p_conf = _safe_float(plan.get("confidence"), 0.0)
                 if p_side in {"BUY", "SELL"} and p_conf >= cfg.min_conf:
-                    # Adopt plan as our intent baseline.
                     policy = {
                         **(policy if isinstance(policy, dict) else {}),
                         "intent": p_side,
@@ -276,32 +324,29 @@ def run_execution_intraday(
             except Exception:
                 node["_execution_plan_used"] = False
 
-        intent = str((policy if isinstance(policy, dict) else {}).get("intent") or "").upper()
-        conf = _safe_float((policy if isinstance(policy, dict) else {}).get("confidence"), 0.0)
+        intent = str((policy or {}).get("intent") or "").upper()
+        conf = _safe_float((policy or {}).get("confidence"), 0.0)
 
         # Phase 7: calibrated probability-of-hit (falls back to confidence)
-        phit = _safe_float((policy if isinstance(policy, dict) else {}).get("p_hit"), conf)
+        phit = _safe_float((policy or {}).get("p_hit"), conf)
 
         side = "FLAT"
         conf_adj = 0.0
         size = 0.0
 
         if intent in {"BUY", "SELL"} and conf >= cfg.min_conf:
-            _, vol_bkt = _trend_and_vol(ctx if isinstance(ctx, dict) else {})
+            _, vol_bkt = _trend_and_vol(ctx)
             expected_r = _expected_r_from_plan(node)
             size = _size_from_phit_expected_r(phit, expected_r, vol_bkt, cfg)
 
             if size > 0.0:
                 side = intent
-                # Phase 7: confidence_adj reflects *probability of hit* when available.
                 conf_adj = min(cfg.max_conf_cap, max(conf, phit))
 
-        # Determine cooldown and adjust side/size accordingly.
         prev_exec = node.get(out_key) if isinstance(node.get(out_key), dict) else {}
         cooldown = _cooldown_active(prev_exec, side, cfg, now_utc=now_utc)
 
         if cooldown and side in {"BUY", "SELL"}:
-            # Respect cooldown by downgrading to FLAT for this cycle.
             side = "FLAT"
             size = 0.0
             conf_adj = 0.0
@@ -317,7 +362,6 @@ def run_execution_intraday(
             "cooldown": bool(cooldown),
             "valid_until": valid_until,
             "ts": now_utc.isoformat().replace("+00:00", "Z"),
-            # Phase 3 metadata (ignored by Phase 0 executor, but logged/useful)
             "bot": (plan.get("bot") if isinstance(plan, dict) else None),
             "risk": (plan.get("risk") if isinstance(plan, dict) else None),
         }
@@ -328,8 +372,8 @@ def run_execution_intraday(
     if save:
         save_rolling(rolling)
 
-    log(f"[exec_dt] ✅ updated {out_key} for {updated} symbols.")
-    return {"symbols": symbols_seen, "updated": updated}
+    log(f"[exec_dt] ✅ updated {out_key} for {updated} symbols (seen={len(syms)}).")
+    return {"symbols": len(syms), "updated": updated}
 
 
 def main() -> None:

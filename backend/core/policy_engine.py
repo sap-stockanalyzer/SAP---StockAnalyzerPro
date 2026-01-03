@@ -398,13 +398,28 @@ def _build(sym, node, preds, brain_node, regime, brain_meta):
 
     risk = float(max(0.005, min(0.05, risk)))
 
+    # Phase S0 (Swing): lightweight reason codes for decision auditing.
+    reason_codes = []
+    if intent == "HOLD":
+        reason_codes.append("NO_EDGE")
+    if lab in ("bear", "panic") and intent == "BUY":
+        reason_codes.append("REGIME_BLOCK_BUY")
+    if ctx.get("volatility", 0.0) > 0.04:
+        reason_codes.append("HIGH_VOL_PENALTY")
+    if ctx.get("impact_mult", 1.0) < 1.0:
+        reason_codes.append("NEWS_IMPACT_PENALTY")
+
+    trade_gate = not (lab in ("bear", "panic") and intent == "BUY")
+
     return {
         "intent": intent,
         "score": round(final_score, 4),
         "confidence": round(final_conf, 4),
         "exposure_scale": round(exposure, 4),
         "risk": round(risk, 4),
-        "trade_gate": not (lab in ("bear", "panic") and intent == "BUY"),
+        "trade_gate": bool(trade_gate),
+        "reason_codes": reason_codes,
+        "reason": ";".join(reason_codes) if reason_codes else "ok",
         "reasons": {
             "predicted_return": round(float(fused["ret"]), 4),
             "confidence_raw": round(float(fused["conf"]), 4),

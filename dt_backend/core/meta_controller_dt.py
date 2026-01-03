@@ -1,4 +1,4 @@
-# dt_backend/core/meta_controller_dt.py — v1.0 (Phase 4)
+# dt_backend/core/meta_controller_dt.py — v1.1 (Phase 4 + Candidate Universe)
 """Meta-controller for dt_backend (Phase 4).
 
 This module decides, *once per trading day*, which strategy bots are enabled,
@@ -12,15 +12,32 @@ Outputs
 Writes into rolling["_GLOBAL_DT"]["daily_plan_dt"] and returns the plan dict.
 
 The plan is also intended to be persisted into dt_state.json via
-dt_backend.services.dt_truth_store.update_dt_state.
+  dt_backend.services.dt_truth_store.update_dt_state
+
+v1.1 additions
+--------------
+Candidate universe support:
+  - You can constrain the daily universe to a pre-approved list.
+  - Sources (highest priority first):
+      1) DT_CANDIDATE_UNIVERSE (comma-separated)
+      2) DT_CANDIDATE_UNIVERSE_FILE / DT_UNIVERSE_FILE (txt/csv/json)
+      3) None -> use all symbols present in rolling
+
+File formats:
+  - .txt / .csv: one symbol per line (or comma-separated)
+  - .json: either a list ["AAPL", ...] or {"symbols": [...]} or {"universe": [...]}.
+
+Safety:
+  - Best-effort; never crashes the loop.
+  - If candidate filtering produces too few symbols, we fall back to rolling.
 """
 
 from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from dt_backend.core.config_dt import TIMEZONE
@@ -103,74 +120,196 @@ def _get_regime_dt(rolling: Dict[str, Any]) -> Dict[str, Any]:
     return r if isinstance(r, dict) else {}
 
 
-def _symbol_liquidity_score(sym: str, node: Dict[str, Any]) -> float:
-    """Approximate dollar-volume score using latest bar volume * last_price."""
-    feat = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
-    last_px = _f(feat.get("last_price"), 0.0)
-    if last_px <= 0:
-        return 0.0
+# ----------------------
+# Candidate universe I/O
+# ----------------------
 
+def _split_syms(text: str) -> List[str]:
+    parts: List[str] = []
+    for line in (text or "").replace("\r", "\n").split("\n"):
+        for tok in line.replace(";", ",").split(","):
+            s = (tok or "").strip().upper()
+            if not s:
+                continue
+            # basic sanity: tickers usually alnum + . -
+            ok = all(ch.isalnum() or ch in {".", "-"} for ch in s)
+            if ok:
+                parts.append(s)
+    return parts
+
+
+def _load_candidate_universe() -> Tuple[Optional[List[str]], str]:
+    """Return (symbols or None, source_label)."""
+
+    # 1) env list
+    env_list = (os.getenv("DT_CANDIDATE_UNIVERSE", "") or "").strip()
+    if env_list:
+        syms = sorted(set(_split_syms(env_list)))
+        return (syms if syms else None), "env:DT_CANDIDATE_UNIVERSE"
+
+    # 2) file
+    path_raw = (
+        (os.getenv("DT_CANDIDATE_UNIVERSE_FILE", "") or "").strip()
+        or (os.getenv("DT_UNIVERSE_FILE", "") or "").strip()
+    )
+    if not path_raw:
+        return None, "rolling"
+
+    try:
+        p = Path(path_raw)
+        if not p.exists() or not p.is_file():
+            return None, f"missing:{p}"
+
+        if p.suffix.lower() == ".json":
+            import json
+
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                syms = [str(x).strip().upper() for x in raw]
+            elif isinstance(raw, dict):
+                cand = raw.get("symbols") or raw.get("universe") or raw.get("tickers")
+                if isinstance(cand, list):
+                    syms = [str(x).strip().upper() for x in cand]
+                else:
+                    syms = []
+            else:
+                syms = []
+            syms = sorted(set([s for s in syms if s]))
+            return (syms if syms else None), f"file:{p.name}"
+
+        # txt/csv/etc
+        text = p.read_text(encoding="utf-8", errors="ignore")
+        syms = sorted(set(_split_syms(text)))
+        return (syms if syms else None), f"file:{p.name}"
+
+    except Exception as e:
+        return None, f"error:{e}"
+
+
+# ----------------------
+# Universe scoring
+# ----------------------
+
+def _latest_bar_volume(node: Dict[str, Any]) -> float:
     # Prefer 5m bars if present; fallback to 1m
     bars = node.get("bars_intraday_5m")
     if not isinstance(bars, list) or not bars:
         bars = node.get("bars_intraday")
-    vol = 0.0
-    try:
+    if not isinstance(bars, list) or not bars:
+        return 0.0
+    b = bars[-1]
+    if not isinstance(b, dict):
+        return 0.0
+    return _f(b.get("v") or b.get("volume"), 0.0)
+
+
+def _symbol_liquidity_score(sym: str, node: Dict[str, Any]) -> float:
+    """Approximate dollar-volume score using last_price * latest volume * rel_volume."""
+    feat = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
+    last_px = _f(feat.get("last_price"), 0.0)
+
+    # Fallback: infer last_px from bars if features are missing
+    if last_px <= 0:
+        bars = node.get("bars_intraday_5m")
+        if not isinstance(bars, list) or not bars:
+            bars = node.get("bars_intraday")
         if isinstance(bars, list) and bars:
             b = bars[-1]
             if isinstance(b, dict):
-                vol = _f(b.get("v") or b.get("volume"), 0.0)
-    except Exception:
-        vol = 0.0
+                last_px = _f(b.get("c") or b.get("close") or b.get("price"), 0.0)
 
-    # rel_volume helps prioritize "alive" tape
+    if last_px <= 0:
+        return 0.0
+
+    vol = _latest_bar_volume(node)
     rel_vol = _f(feat.get("rel_volume"), 1.0)
     return float(last_px * vol * max(0.25, rel_vol))
 
 
-def _build_universe(rolling: Dict[str, Any]) -> List[str]:
+def _build_universe(rolling: Dict[str, Any]) -> Tuple[List[str], Dict[str, Any]]:
     """Select a tradable universe for today.
 
-    The goal is to focus the engine on symbols with enough movement + activity.
+    Returns (universe, meta).
     """
     max_n = _env_int("DT_UNIVERSE_SIZE", 60)
     min_price = _env_float("DT_UNIVERSE_MIN_PRICE", 2.0)
     min_atr_pct = _env_float("DT_UNIVERSE_MIN_ATR_PCT", 0.0015)  # 0.15%
     max_atr_pct = _env_float("DT_UNIVERSE_MAX_ATR_PCT", 0.0800)  # 8%
 
-    candidates: List[Tuple[str, float]] = []
-    for sym, node in rolling.items():
-        if not isinstance(sym, str) or sym.startswith("_"):
-            continue
-        if not isinstance(node, dict):
-            continue
-        feat = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
-        last_px = _f(feat.get("last_price"), 0.0)
-        atr = _f(feat.get("atr_14"), 0.0)
-        if last_px <= 0 or atr <= 0:
-            continue
-        if last_px < min_price:
-            continue
-        atr_pct = atr / last_px if last_px > 0 else 0.0
-        if atr_pct < min_atr_pct or atr_pct > max_atr_pct:
-            continue
-
-        score = _symbol_liquidity_score(sym, node)
-        if score <= 0:
-            continue
-        candidates.append((sym.upper(), score))
+    candidates_src, source_label = _load_candidate_universe()
+    candidate_set = set(candidates_src or []) if candidates_src else None
 
     # Always include market proxies if present
     proxies = [s.strip().upper() for s in (os.getenv("DT_MARKET_PROXIES", "SPY,QQQ").split(",")) if s.strip()]
     proxy_set = set(proxies)
 
-    candidates.sort(key=lambda t: t[1], reverse=True)
-    universe = [sym for sym, _ in candidates[: max(0, max_n)]]
+    # Filter to symbols present in rolling (prevents requesting data we don't have)
+    rolling_syms = [s for s in rolling.keys() if isinstance(s, str) and not s.startswith("_")]
+    rolling_set = set([s.upper() for s in rolling_syms])
+
+    if candidate_set is not None:
+        filtered = sorted(candidate_set & rolling_set)
+        # If candidate set is too restrictive, fall back to rolling.
+        min_keep = _env_int("DT_UNIVERSE_MIN_CANDIDATES", 10)
+        if len(filtered) < min_keep:
+            candidate_set = None
+            source_label = f"fallback:rolling(min_candidates={len(filtered)})"
+        else:
+            candidate_set = set(filtered)
+
+    pool = candidate_set if candidate_set is not None else rolling_set
+
+    scored: List[Tuple[str, float]] = []
+
+    for sym in pool:
+        node = rolling.get(sym)
+        if not isinstance(node, dict):
+            continue
+
+        feat = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
+        last_px = _f(feat.get("last_price"), 0.0)
+        atr_v = _f(feat.get("atr_14"), 0.0)
+
+        # Fallbacks if features aren't ready yet
+        if last_px <= 0:
+            bars = node.get("bars_intraday_5m")
+            if not isinstance(bars, list) or not bars:
+                bars = node.get("bars_intraday")
+            if isinstance(bars, list) and bars:
+                b = bars[-1]
+                if isinstance(b, dict):
+                    last_px = _f(b.get("c") or b.get("close") or b.get("price"), 0.0)
+
+        if last_px < min_price:
+            continue
+
+        # If ATR isn't available yet, don't over-filter; just treat atr_pct as unknown.
+        atr_pct = (atr_v / last_px) if (last_px > 0 and atr_v > 0) else None
+        if atr_pct is not None:
+            if atr_pct < min_atr_pct or atr_pct > max_atr_pct:
+                continue
+
+        score = _symbol_liquidity_score(sym, node)
+        if score <= 0:
+            continue
+        scored.append((sym, score))
+
+    scored.sort(key=lambda t: t[1], reverse=True)
+    universe = [sym for sym, _ in scored[: max(0, max_n)]]
+
+    # Ensure proxies appended (useful for market context)
     for p in proxies:
-        if p and p not in universe and p in proxy_set:
+        if p and p in rolling_set and p not in universe and p in proxy_set:
             universe.append(p)
 
-    return universe
+    meta = {
+        "source": source_label,
+        "candidate_count": (len(candidates_src) if candidates_src else None),
+        "rolling_count": len(rolling_set),
+        "pool_count": len(pool),
+        "selected": len(universe),
+    }
+    return universe, meta
 
 
 def _risk_mode_from_regime(label: str, conf: float) -> str:
@@ -232,25 +371,17 @@ def build_daily_plan(*, rolling: Dict[str, Any], date_override: Optional[str] = 
     if _env_bool("DT_FORCE_ALL_BOTS", False):
         enabled = SUPPORTED_BOTS[:]
     else:
-        # individual enables
-        enabled = [
-            b
-            for b in enabled
-            if _env_bool(f"DT_ENABLE_{b}", True)
-        ]
+        enabled = [b for b in enabled if _env_bool(f"DT_ENABLE_{b}", True)]
 
-    # Ensure at least one bot.
     if not enabled:
         enabled = ["VWAP_MR"]
 
     risk_mode = _risk_mode_from_regime(label, conf)
 
-    # Base weights start at 1.0, then multiply by regime weights, then by risk-mode scaling.
     base = {b: 1.0 for b in SUPPORTED_BOTS}
     weights = _merge_weights(base, regime_weights)
 
     if risk_mode == "CONSERVATIVE":
-        # prefer mean reversion / avoid overtrading
         weights["VWAP_MR"] *= 1.15
         weights["ORB"] *= 0.85
         weights["SQUEEZE"] *= 0.90
@@ -258,21 +389,18 @@ def build_daily_plan(*, rolling: Dict[str, Any], date_override: Optional[str] = 
         weights["ORB"] *= 1.10
         weights["TREND_PULLBACK"] *= 1.10
 
-    # Normalize weights for enabled bots only (for interpretability)
     enabled_w = {b: float(_clamp(weights.get(b, 1.0), 0.0, 3.0)) for b in enabled}
     s = sum(enabled_w.values())
     if s > 0:
         enabled_w = {b: v / s for b, v in enabled_w.items()}
 
-    # Phase 4.5: optional bandit overlay (OFF by default).
-    # Safe defaults: only applies when DT_BANDIT_ENABLED=1.
-    # For live safety, DT_BANDIT_SHADOW_ONLY=1 keeps it confined to shadow mode.
+    # Phase 4.5: optional bandit overlay
     try:
-        bandit_on = _env_bool('DT_BANDIT_ENABLED', False)
-        shadow_only = _env_bool('DT_BANDIT_SHADOW_ONLY', True)
-        shadow_enabled = _env_bool('DT_SHADOW_ENABLED', False)
+        bandit_on = _env_bool("DT_BANDIT_ENABLED", False)
+        shadow_only = _env_bool("DT_BANDIT_SHADOW_ONLY", True)
+        shadow_enabled = _env_bool("DT_SHADOW_ENABLED", False)
         if bandit_on and suggest_bot_weights is not None and (not shadow_only or shadow_enabled):
-            context = {'regime': label, 'regime_conf': conf, 'risk_mode': risk_mode}
+            context = {"regime": label, "regime_conf": conf, "risk_mode": risk_mode}
             bw = suggest_bot_weights(context=context)
             if isinstance(bw, dict) and bw:
                 mixed = {b: float(enabled_w.get(b, 0.0)) * float(bw.get(b, 0.0) or 0.0) for b in enabled_w.keys()}
@@ -282,7 +410,7 @@ def build_daily_plan(*, rolling: Dict[str, Any], date_override: Optional[str] = 
     except Exception:
         pass
 
-    universe = _build_universe(rolling)
+    universe, uni_meta = _build_universe(rolling)
 
     allow_model_fallback = _env_bool("DT_ALLOW_MODEL_FALLBACK", False)
 
@@ -294,9 +422,10 @@ def build_daily_plan(*, rolling: Dict[str, Any], date_override: Optional[str] = 
         "enabled_bots": enabled,
         "bot_weights": enabled_w,
         "universe": universe,
+        "universe_meta": uni_meta,
         "allow_model_fallback": bool(allow_model_fallback),
         "reason": f"meta: regime={label} conf={conf:.2f} risk={risk_mode} enabled={','.join(enabled)}",
-        "version": "phase4_v1",
+        "version": "phase4_v1.1",
     }
 
 
