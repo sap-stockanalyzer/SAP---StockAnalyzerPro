@@ -242,8 +242,8 @@ if __name__ == "__main__":
 
     # ✅ Workers (requested: 4)
     # You can override with APP_WORKERS / DT_APP_WORKERS if needed.
-    BACKEND_WORKERS = _env_int("APP_WORKERS", 4)
-    DT_WORKERS = _env_int("DT_APP_WORKERS", 4)
+    BACKEND_WORKERS = _env_int("APP_WORKERS", 1)
+    DT_WORKERS = _env_int("DT_APP_WORKERS", 1)
     REPLAY_WORKERS = _env_int("REPLAY_APP_WORKERS", 1)
 
     print("────────────────────────────────────────")
