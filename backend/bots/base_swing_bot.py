@@ -482,6 +482,65 @@ class SwingBot:
 
         return max(0.5, min(1.5, bias))
 
+
+    def _regime_risk_profile(self, rolling: Dict[str, Any]) -> Dict[str, float]:
+        """Phase 3: replace hard regime blocks with regime-based risk adjustments.
+
+        We *never* forbid trading outright here. We adjust:
+          - max_positions (portfolio breadth)
+          - max_weight_per_name (per-name risk)
+          - stop_loss_pct (stop width)
+          - take_profit_pct (profit target realism)
+
+        All are best-effort and env-overridable.
+        """
+        import os
+
+        g = rolling.get("_GLOBAL") if isinstance(rolling, dict) else None
+        g = g if isinstance(g, dict) else {}
+        reg = g.get("regime") if isinstance(g.get("regime"), dict) else {}
+        label = str((reg or {}).get("label") or "unknown").strip().lower()
+
+        # Defaults: conservative in bear/stress, modestly freer in bull.
+        if label in {"bull"}:
+            pos_mult, w_mult, stop_mult, tp_mult = 1.15, 1.10, 1.00, 1.05
+        elif label in {"bear", "risk_off"}:
+            pos_mult, w_mult, stop_mult, tp_mult = 0.75, 0.80, 1.15, 0.90
+        elif label in {"stress", "crash"}:
+            pos_mult, w_mult, stop_mult, tp_mult = 0.60, 0.70, 1.25, 0.85
+        elif label in {"chop"}:
+            pos_mult, w_mult, stop_mult, tp_mult = 0.85, 0.90, 1.05, 0.95
+        else:
+            pos_mult, w_mult, stop_mult, tp_mult = 0.90, 0.95, 1.05, 0.95
+
+        def _envf(name: str, default: float) -> float:
+            try:
+                raw = (os.getenv(name, "") or "").strip()
+                return float(raw) if raw else float(default)
+            except Exception:
+                return float(default)
+
+        # Optional env overrides (keep API keys separate — these are "knobs")
+        pos_mult = _envf("SWING_REGIME_POS_MULT", pos_mult)
+        w_mult = _envf("SWING_REGIME_WEIGHT_MULT", w_mult)
+        stop_mult = _envf("SWING_REGIME_STOP_MULT", stop_mult)
+        tp_mult = _envf("SWING_REGIME_TP_MULT", tp_mult)
+
+        # Sane clamps
+        pos_mult = max(0.25, min(2.0, float(pos_mult)))
+        w_mult = max(0.25, min(2.0, float(w_mult)))
+        stop_mult = max(0.75, min(2.0, float(stop_mult)))
+        tp_mult = max(0.50, min(1.50, float(tp_mult)))
+
+        return {
+            "label": label,
+            "pos_mult": float(pos_mult),
+            "weight_mult": float(w_mult),
+            "stop_mult": float(stop_mult),
+            "tp_mult": float(tp_mult),
+        }
+
+
     # ------------------------- State I/O -------------------------- #
 
     def load_bot_state(self) -> BotState:
@@ -948,6 +1007,38 @@ class SwingBot:
         if not rolling:
             log(f"[{self.cfg.bot_key}] ⚠️ No rolling data — aborting FULL rebalance.")
             return
+
+        # Phase 3: regime-based risk adjustments (no hard blocks).
+        # We tune sizing + risk rails based on the global regime label.
+        try:
+            prof = self._regime_risk_profile(rolling)
+            # Apply multiplicatively each cycle (idempotent-ish because we base off the original defaults).
+            base_max_pos = int(getattr(self.cfg, "_base_max_positions", self.cfg.max_positions))
+            base_max_w = float(getattr(self.cfg, "_base_max_weight_per_name", self.cfg.max_weight_per_name))
+            base_sl = float(getattr(self.cfg, "_base_stop_loss_pct", self.cfg.stop_loss_pct))
+            base_tp = float(getattr(self.cfg, "_base_take_profit_pct", self.cfg.take_profit_pct))
+
+            # Stash originals once so repeated cycles don't drift.
+            setattr(self.cfg, "_base_max_positions", base_max_pos)
+            setattr(self.cfg, "_base_max_weight_per_name", base_max_w)
+            setattr(self.cfg, "_base_stop_loss_pct", base_sl)
+            setattr(self.cfg, "_base_take_profit_pct", base_tp)
+
+            self.cfg.max_positions = max(1, int(round(base_max_pos * float(prof.get("pos_mult") or 1.0))))
+            self.cfg.max_weight_per_name = max(0.01, min(1.0, base_max_w * float(prof.get("weight_mult") or 1.0)))
+
+            # Wider stops in hostile regimes; slightly smaller targets when conditions are ugly.
+            self.cfg.stop_loss_pct = float(base_sl) * float(prof.get("stop_mult") or 1.0)
+            self.cfg.take_profit_pct = float(base_tp) * float(prof.get("tp_mult") or 1.0)
+
+            # Optional: drop a tiny breadcrumb for debugging/telemetry.
+            g = rolling.get("_GLOBAL") if isinstance(rolling.get("_GLOBAL"), dict) else {}
+            gprof = {k: v for k, v in prof.items() if k != "label"}
+            gprof["label"] = prof.get("label")
+            g["swing_risk_profile"] = gprof
+            rolling["_GLOBAL"] = g
+        except Exception:
+            pass
 
         insights = self.load_insights()
         ranked = rank_universe_v2(

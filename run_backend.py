@@ -26,6 +26,37 @@ try:
 except Exception:
     pass
 
+# ---------------------------------------------------------------------------
+# Optional knobs env files (kept separate from API keys)
+#
+# Load order:
+#   1) .env (already loaded above)
+#   2) knobs.env
+#   3) dt_knobs.env
+#
+# override=False so real env vars / .env values win over knobs defaults.
+# You can override paths with:
+#   KNOBS_ENV_PATH=/abs/path/to/knobs.env
+#   DT_KNOBS_ENV_PATH=/abs/path/to/dt_knobs.env
+# ---------------------------------------------------------------------------
+try:
+    from pathlib import Path as _Path
+
+    _KNOBS_ENV = (os.getenv("KNOBS_ENV_PATH", "") or "").strip()
+    _DT_KNOBS_ENV = (os.getenv("DT_KNOBS_ENV_PATH", "") or "").strip()
+
+    _here = _Path(__file__).resolve().parent
+    _knobs_path = _Path(_KNOBS_ENV) if _KNOBS_ENV else (_here / "knobs.env")
+    _dt_knobs_path = _Path(_DT_KNOBS_ENV) if _DT_KNOBS_ENV else (_here / "dt_knobs.env")
+
+    if _knobs_path.exists():
+        load_dotenv(dotenv_path=str(_knobs_path), override=False)
+    if _dt_knobs_path.exists():
+        load_dotenv(dotenv_path=str(_dt_knobs_path), override=False)
+except Exception:
+    # Never block boot because of a knobs file.
+    pass
+
 from utils.live_log import append_log, prune_old_logs
 
 from backend.core.config import PATHS
