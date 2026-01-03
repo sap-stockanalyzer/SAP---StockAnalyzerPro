@@ -8,15 +8,15 @@ import platform
 import threading
 from typing import Optional
 
-
-
 import importlib.util
+
 
 def module_exists(mod: str) -> bool:
     try:
         return importlib.util.find_spec(mod) is not None
     except Exception:
         return False
+
 
 # dotenv is optional; if .env has bad lines we don't want to crash boot
 try:
@@ -60,6 +60,7 @@ except Exception:
 from utils.live_log import append_log, prune_old_logs
 
 from backend.core.config import PATHS
+
 print("ROLLING:", PATHS.get("rolling"))
 print("ROLLING_BODY:", PATHS.get("rolling_body"))
 print("ROLLING_BRAIN:", PATHS.get("rolling_brain"))
@@ -101,6 +102,16 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return default
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name, "") or "").strip()
+    if raw == "":
+        return int(default)
+    try:
+        return int(float(raw))
+    except Exception:
+        return int(default)
+
+
 def uvicorn_cmd(
     app: str,
     host: str,
@@ -109,10 +120,16 @@ def uvicorn_cmd(
     log_level: str = "warning",
     access_log: bool = False,
     reload: bool = False,
+    workers: int = 1,
 ) -> list[str]:
     """
     Build a safe uvicorn command.
     IMPORTANT: flags are presence-based. Never pass "false"/"true" as extra args.
+
+    NOTE:
+      If your FastAPI app starts background threads in @startup,
+      running multiple workers will multiply those threads. In production,
+      keep schedulers/supervisors in separate single-instance processes.
     """
     cmd = [
         sys.executable,
@@ -134,6 +151,14 @@ def uvicorn_cmd(
     if reload:
         cmd.append("--reload")
 
+    # ✅ workers
+    try:
+        w = int(workers)
+        if w > 1 and not reload:
+            cmd += ["--workers", str(w)]
+    except Exception:
+        pass
+
     return cmd
 
 
@@ -152,14 +177,28 @@ def launch(cmd: list[str], name: str) -> subprocess.Popen:
     )
 
 
+def _should_silence_supervisor_agent() -> bool:
+    # Default ON: silences spammy supervisor_agent lines in console + live_log.
+    # Set SILENCE_SUPERVISOR_AGENT=0 to show them.
+    return _env_bool("SILENCE_SUPERVISOR_AGENT", default=True)
+
+
 def pipe_output(proc: subprocess.Popen, name: str):
     if proc.stdout is None:
         return
+
+    silence_supervisor = _should_silence_supervisor_agent()
+
     for line in proc.stdout:
+        # Optional: silence supervisor_agent spam (does not stop it running, just hides its log lines)
+        if silence_supervisor and ("[supervisor_agent]" in line or "supervisor_agent" in line):
+            continue
+
         try:
             print(line, end="")
         except Exception:
             pass
+
         append_log(f"[{name}] {line}")
 
 
@@ -201,11 +240,19 @@ if __name__ == "__main__":
     UVICORN_ACCESS_LOG = _env_bool("UVICORN_ACCESS_LOG", default=False)
     UVICORN_RELOAD = _env_bool("UVICORN_RELOAD", default=False)
 
+    # ✅ Workers (requested: 4)
+    # You can override with APP_WORKERS / DT_APP_WORKERS if needed.
+    BACKEND_WORKERS = _env_int("APP_WORKERS", 4)
+    DT_WORKERS = _env_int("DT_APP_WORKERS", 4)
+    REPLAY_WORKERS = _env_int("REPLAY_APP_WORKERS", 1)
+
     print("────────────────────────────────────────")
     print("🚀 Launching AION Analytics system")
-    print(f"   • backend          → http://{backend_host}:{backend_port}")
-    print(f"   • dt_backend       → http://{dt_host}:{dt_port}")
-    print(f"   • replay_service   → http://{replay_host}:{replay_port} (dormant)")
+    print(f"   • backend          → http://{backend_host}:{backend_port} (workers={BACKEND_WORKERS})")
+    print(f"   • dt_backend       → http://{dt_host}:{dt_port} (workers={DT_WORKERS})")
+    print(f"   • replay_service   → http://{replay_host}:{replay_port} (dormant, workers={REPLAY_WORKERS})")
+    if _should_silence_supervisor_agent():
+        print("   • logs             → supervisor_agent SILENCED (set SILENCE_SUPERVISOR_AGENT=0 to show)")
     print("────────────────────────────────────────", flush=True)
 
     append_log("AION system starting")
@@ -219,6 +266,7 @@ if __name__ == "__main__":
             log_level=UVICORN_LOG_LEVEL,
             access_log=UVICORN_ACCESS_LOG,
             reload=UVICORN_RELOAD,
+            workers=BACKEND_WORKERS,
         ),
         "backend",
     )
@@ -232,10 +280,12 @@ if __name__ == "__main__":
             log_level=UVICORN_LOG_LEVEL,
             access_log=UVICORN_ACCESS_LOG,
             reload=UVICORN_RELOAD,
+            workers=DT_WORKERS,
         ),
         "dt_backend",
     )
     threading.Thread(target=pipe_output, args=(dt_proc, "dt_backend"), daemon=True).start()
+
     # DT worker: prefer dt_scheduler if present; otherwise fall back to the legacy live loop.
     dt_worker_module = (
         "dt_backend.jobs.dt_scheduler"
@@ -258,6 +308,7 @@ if __name__ == "__main__":
             log_level=UVICORN_LOG_LEVEL,
             access_log=UVICORN_ACCESS_LOG,
             reload=UVICORN_RELOAD,
+            workers=REPLAY_WORKERS,
         ),
         "replay_service",
     )
