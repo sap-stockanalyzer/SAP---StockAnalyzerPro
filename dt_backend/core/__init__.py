@@ -10,6 +10,14 @@ Provides core building blocks for the intraday engine:
 """
 
 from .config_dt import DT_PATHS, ensure_dt_dirs
+
+# Phase 6: apply persisted DT knob overrides early (import-safe, best-effort)
+try:
+    from .knob_overrides_dt import apply_dt_knob_overrides
+
+    apply_dt_knob_overrides()
+except Exception:
+    pass
 from .logger_dt import log, warn, error
 from .data_pipeline_dt import (
     _read_rolling,

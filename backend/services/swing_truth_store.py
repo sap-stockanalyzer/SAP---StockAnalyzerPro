@@ -22,6 +22,7 @@ Artifacts will be written under: <SWING_TRUTH_DIR>/swing/
 from __future__ import annotations
 
 import json
+import uuid
 import os
 import time
 from dataclasses import dataclass
@@ -167,6 +168,8 @@ def append_missed_opportunity(event: Dict[str, Any]) -> None:
         if not isinstance(event, dict):
             return
         event.setdefault("ts", _utc_iso())
+        # Ensure an id exists for later evaluation + attribution joins.
+        event.setdefault("event_id", uuid.uuid4().hex)
         p = missed_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "a", encoding="utf-8") as f:

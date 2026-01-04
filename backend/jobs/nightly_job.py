@@ -169,6 +169,9 @@ detect_regime = _safe_import("backend.core.regime_detector", "detect_regime")
 run_continuous_learning = _safe_import("backend.core.continuous_learning", "run_continuous_learning")
 run_supervisor_agent = _safe_import("backend.core.supervisor_agent", "run_supervisor_agent")
 
+# Phase 6 (optional): auto knob tuner
+run_swing_knob_tuner = _safe_import("backend.tuning.swing_knob_tuner", "run_swing_knob_tuner")
+
 # Optional phases
 aggregate_system_performance = _safe_import("backend.services.performance_aggregator", "aggregate_system_performance")
 update_aion_brain = _safe_import("backend.services.aion_brain_updater", "update_aion_brain")
@@ -767,6 +770,28 @@ def run_nightly_job(
             log("✅ Supervisor complete.")
         except Exception as e:
             _record_err(summary, key, e, t0)
+            _write_summary(summary)
+
+        # 21) Phase 6: auto knob tuner (best-effort; does not affect pipeline status)
+        t0 = time.time()
+        try:
+            if run_swing_knob_tuner is None:
+                raise RuntimeError("run_swing_knob_tuner unavailable")
+            res = run_swing_knob_tuner(dry_run=False)
+            summary.setdefault("phases", {}).setdefault("knob_tuner_swing", {})
+            summary["phases"]["knob_tuner_swing"] = {
+                "status": "ok",
+                "secs": round(time.time() - t0, 3),
+                "result": res,
+            }
+            _write_summary(summary)
+        except Exception as e_tune:
+            summary.setdefault("phases", {}).setdefault("knob_tuner_swing", {})
+            summary["phases"]["knob_tuner_swing"] = {
+                "status": "error",
+                "secs": round(time.time() - t0, 3),
+                "error": str(e_tune),
+            }
             _write_summary(summary)
 
         # Determine final status

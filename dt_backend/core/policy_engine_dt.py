@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Tuple, Optional
 
+from dt_backend.tuning.dt_profile_loader import load_dt_profile, strategy_weight
+
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
 
 # Phase 7: calibrated P(hit) (optional)
@@ -110,6 +112,19 @@ class PolicyConfig:
     stand_down_in_unknown_regime: bool = False
     stand_down_in_crash: bool = True
 
+    # -----------------------------
+    # Phase 4: Human-like action tiers
+    # -----------------------------
+    # PROBE: allow micro-sized entries even when we wouldn't pass the full trade gate.
+    probe_enabled: bool = True
+    probe_min_signal_conf: float = 0.18
+    probe_min_abs_score: float = 12.0  # setup.score is typically 0..100
+
+    # PRESS: scale up only when P(hit) + R are strong.
+    press_min_phit: float = 0.62
+    press_min_expected_r: float = 1.20
+    press_conf_extra: float = 0.05
+
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -150,6 +165,18 @@ def _apply_env_overrides(cfg: PolicyConfig) -> PolicyConfig:
     cfg.min_edge_to_flip = _env_float("DT_MIN_EDGE_TO_FLIP", cfg.min_edge_to_flip)
     cfg.hysteresis_hold_bias = _env_float("DT_HOLD_STICKY_BIAS", cfg.hysteresis_hold_bias)
 
+    # Phase 4: tiers
+    try:
+        import os
+        cfg.probe_enabled = (os.getenv("DT_PROBE_ENABLED", "1").strip().lower() in {"1", "true", "yes", "y", "on"})
+    except Exception:
+        cfg.probe_enabled = True
+    cfg.probe_min_signal_conf = _env_float("DT_PROBE_MIN_CONF", cfg.probe_min_signal_conf)
+    cfg.probe_min_abs_score = _env_float("DT_PROBE_MIN_SCORE", cfg.probe_min_abs_score)
+    cfg.press_min_phit = _env_float("DT_PRESS_MIN_PHIT", cfg.press_min_phit)
+    cfg.press_min_expected_r = _env_float("DT_PRESS_MIN_R", cfg.press_min_expected_r)
+    cfg.press_conf_extra = _env_float("DT_PRESS_CONF_EXTRA", cfg.press_conf_extra)
+
     # sane clamps
     cfg.buy_threshold = max(0.0, min(1.0, cfg.buy_threshold))
     cfg.sell_threshold = min(0.0, max(-1.0, cfg.sell_threshold))
@@ -157,8 +184,86 @@ def _apply_env_overrides(cfg: PolicyConfig) -> PolicyConfig:
     cfg.confirmations_to_flip = max(1, int(cfg.confirmations_to_flip))
     cfg.min_edge_to_flip = max(0.0, min(1.0, cfg.min_edge_to_flip))
     cfg.hysteresis_hold_bias = max(0.0, min(0.25, cfg.hysteresis_hold_bias))
+
+    cfg.probe_min_signal_conf = max(0.0, min(0.60, float(cfg.probe_min_signal_conf)))
+    cfg.probe_min_abs_score = max(0.0, min(100.0, float(cfg.probe_min_abs_score)))
+    cfg.press_min_phit = max(0.50, min(0.90, float(cfg.press_min_phit)))
+    cfg.press_min_expected_r = max(0.5, min(5.0, float(cfg.press_min_expected_r)))
+    cfg.press_conf_extra = max(0.0, min(0.25, float(cfg.press_conf_extra)))
     return cfg
 
+
+
+def _apply_profile_overrides(cfg: PolicyConfig, profile: Dict[str, Any]) -> PolicyConfig:
+    """Apply playbook profile overrides (Phase 5). Soft gates only.
+
+    NOTE: env overrides already applied earlier; we only clamp here.
+    """
+    try:
+        soft = profile.get("soft_thresholds") or {}
+        if "dt_min_confidence" in soft:
+            cfg.min_confidence = float(soft["dt_min_confidence"])
+    except Exception:
+        pass
+
+    try:
+        p = profile.get("probe") or {}
+        if "enabled" in p:
+            cfg.probe_enabled = bool(p.get("enabled"))
+        if "min_conf" in p:
+            cfg.probe_min_signal_conf = float(p.get("min_conf"))
+        if "min_score" in p:
+            cfg.probe_min_abs_score = float(p.get("min_score"))
+    except Exception:
+        pass
+
+    try:
+        pr = profile.get("press") or {}
+        if "min_phit" in pr:
+            cfg.press_min_phit = float(pr.get("min_phit"))
+        if "min_r" in pr:
+            cfg.press_min_expected_r = float(pr.get("min_r"))
+    except Exception:
+        pass
+
+    # Clamp (match env clamp behavior)
+    cfg.buy_threshold = max(0.0, min(1.0, cfg.buy_threshold))
+    cfg.sell_threshold = min(0.0, max(-1.0, cfg.sell_threshold))
+    cfg.min_confidence = max(0.0, min(1.0, cfg.min_confidence))
+    cfg.confirmations_to_flip = max(1, int(cfg.confirmations_to_flip))
+    cfg.min_edge_to_flip = max(0.0, min(1.0, cfg.min_edge_to_flip))
+    cfg.hysteresis_hold_bias = max(0.0, min(0.25, cfg.hysteresis_hold_bias))
+
+    cfg.probe_min_signal_conf = max(0.0, min(0.60, float(cfg.probe_min_signal_conf)))
+    cfg.probe_min_abs_score = max(0.0, min(100.0, float(cfg.probe_min_abs_score)))
+    cfg.press_min_phit = max(0.50, min(0.90, float(cfg.press_min_phit)))
+    cfg.press_min_expected_r = max(0.5, min(5.0, float(cfg.press_min_expected_r)))
+    cfg.press_conf_extra = max(0.0, min(0.25, float(cfg.press_conf_extra)))
+    return cfg
+
+    try:
+        p = profile.get("probe") or {}
+        if "enabled" in p:
+            cfg.probe_enabled = bool(p.get("enabled"))
+        if "min_conf" in p:
+            cfg.probe_min_signal_conf = float(p.get("min_conf"))
+        if "min_score" in p:
+            cfg.probe_min_abs_score = float(p.get("min_score"))
+    except Exception:
+        pass
+
+    try:
+        pr = profile.get("press") or {}
+        if "min_phit" in pr:
+            cfg.press_min_phit = float(pr.get("min_phit"))
+        if "min_r" in pr:
+            cfg.press_min_expected_r = float(pr.get("min_r"))
+        # size_mult is applied in execution_dt
+    except Exception:
+        pass
+
+    # Re-clamp with existing clamps via env function (cheap reuse)
+    return _apply_env_overrides(cfg)
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -435,6 +540,18 @@ def apply_intraday_policy(
     regime_label_raw = str(global_regime.get("label") or "unknown")
     regime_label = _regime_for_policy(regime_label_raw)
 
+    # Phase 5: load playbook profile (soft gate knobs + strategy weights)
+    dt_profile = {}
+    try:
+        dt_profile = load_dt_profile(regime_label_raw)
+        cfg = _apply_profile_overrides(cfg, dt_profile)
+        # Drop breadcrumb for debugging/UI
+        gdt = rolling.get("_GLOBAL_DT") if isinstance(rolling.get("_GLOBAL_DT"), dict) else {}
+        gdt["dt_playbook_profile"] = {"name": str(dt_profile.get("label") or ""), "ts": _utc_now_iso()}
+        rolling["_GLOBAL_DT"] = gdt
+    except Exception:
+        dt_profile = {}
+
     # Choose which symbols to touch (lane-aware)
     lane_syms = _lane_symbols(rolling, symbols, max_symbols)
 
@@ -512,6 +629,23 @@ def apply_intraday_policy(
     plan = _get_daily_plan(rolling)
     allowed_bots = plan.get("enabled_bots") if isinstance(plan, dict) else None
     bot_weights = plan.get("bot_weights") if isinstance(plan, dict) else None
+
+    # Phase 5: profile strategy weights bias bot selection (multiply if daily plan already provided weights)
+    try:
+        prof_w = (dt_profile or {}).get("strategy_weights")
+        if isinstance(prof_w, dict) and prof_w:
+            if isinstance(bot_weights, dict) and bot_weights:
+                merged = dict(bot_weights)
+                for k, v in prof_w.items():
+                    try:
+                        merged[str(k).upper()] = float(merged.get(str(k).upper(), 1.0)) * float(v)
+                    except Exception:
+                        pass
+                bot_weights = merged
+            else:
+                bot_weights = {str(k).upper(): float(v) for k, v in prof_w.items()}
+    except Exception:
+        pass
     universe = plan.get("universe") if isinstance(plan, dict) else None
     universe_set = {str(s).upper() for s in universe} if isinstance(universe, list) and universe else None
     allow_model_fallback = bool(plan.get("allow_model_fallback")) if isinstance(plan, dict) else False
@@ -590,6 +724,19 @@ def apply_intraday_policy(
             pass
 
         if isinstance(setup, dict) and str(setup.get("side") or "").upper() in {"BUY", "SELL"}:
+
+            # Phase 5: apply strategy weights from the active playbook
+            try:
+                bname = str(setup.get("bot") or setup.get("strategy") or "").upper()
+                w = strategy_weight(dt_profile or {}, bname) if bname else 1.0
+                if w != 1.0:
+                    setup = dict(setup)
+                    setup["score"] = float(setup.get("score") or 0.0) * float(w)
+                    # tiny confidence nudge (bounded)
+                    setup["confidence"] = max(0.0, min(1.0, float(setup.get("confidence") or 0.0) * (0.90 + 0.10 * float(w))))
+                    setup["reason"] = f"{setup.get('reason') or ''} (w={w:.2f})".strip()
+            except Exception:
+                pass
             proposed_intent = str(setup.get("side") or "HOLD").upper()
             base_conf = float(setup.get("confidence") or 0.0)
             edge = float(setup.get("score") or 0.0) / 100.0  # score -> pseudo-edge scale
@@ -664,13 +811,20 @@ def apply_intraday_policy(
                 p_hit = conf_final
 
             # Apply risk penalty to BOTH confidence and p_hit (seatbelt, not steering wheel)
+            # IMPORTANT: we keep a separate "signal" confidence even when action stabilizes to HOLD.
+            signal_conf = float(max(0.0, min(cfg.max_confidence, conf_final * risk_penalty)))
+            signal_phit = float(max(0.0, min(1.0, p_hit * risk_penalty)))
+
             if action == "STAND_DOWN":
                 conf_final = 0.0
                 p_hit = 0.0
+                signal_conf = 0.0
+                signal_phit = 0.0
                 trade_gate = False
             else:
-                conf_final = float(max(0.0, min(cfg.max_confidence, conf_final * risk_penalty)))
-                p_hit = float(max(0.0, min(1.0, p_hit * risk_penalty)))
+                # Policy confidence is only "live" when we actually take BUY/SELL.
+                conf_final = float(signal_conf) if action in {"BUY", "SELL"} else 0.0
+                p_hit = float(signal_phit) if action in {"BUY", "SELL"} else 0.0
                 trade_gate = bool(action in {"BUY", "SELL"} and conf_final >= cfg.min_confidence)
 
             # Compute expected R using last price, stop, tp if present.
@@ -688,6 +842,32 @@ def apply_intraday_policy(
             except Exception:
                 expected_r = 1.0
 
+            # Phase 4: NO_TRADE / PROBE / ENTER / PRESS
+            tier = "NO_TRADE"
+            try:
+                setup_score = float(setup.get("score") or 0.0)
+            except Exception:
+                setup_score = 0.0
+
+            if action == "STAND_DOWN":
+                tier = "NO_TRADE"
+            elif bool(trade_gate):
+                tier = "ENTER"
+                if (
+                    float(signal_phit) >= float(cfg.press_min_phit)
+                    and float(expected_r) >= float(cfg.press_min_expected_r)
+                    and float(signal_conf) >= float(cfg.min_confidence + cfg.press_conf_extra)
+                ):
+                    tier = "PRESS"
+            else:
+                if (
+                    bool(cfg.probe_enabled)
+                    and str(proposed_intent).upper() in {"BUY", "SELL"}
+                    and float(signal_conf) >= float(cfg.probe_min_signal_conf)
+                    and abs(float(setup_score)) >= float(cfg.probe_min_abs_score)
+                ):
+                    tier = "PROBE"
+
             # Add derived safety-friendly scalars if missing
             try:
                 last_px = float(feats.get("last_price") or 0.0)
@@ -701,9 +881,10 @@ def apply_intraday_policy(
             node["execution_plan_dt"] = {
                 "bot": str(setup.get("bot") or "").upper(),
                 "side": str(setup.get("side") or "").upper(),
+                "tier": str(tier),
                 "confidence": float(setup.get("confidence") or 0.0),
                 "base_conf": float(base_conf),
-                "p_hit": float(p_hit),
+                "p_hit": float(signal_phit),
                 "expected_r": float(expected_r),
                 "entry_features": {
                     "rel_volume": float((feats or {}).get("rel_volume") or 0.0) if isinstance(feats, dict) else 0.0,
@@ -731,6 +912,10 @@ def apply_intraday_policy(
                 "intent": action,
                 "confidence": float(conf_final),
                 "p_hit": float(p_hit),
+                "tier": str(tier),
+                "signal_intent": str(proposed_intent),
+                "signal_confidence": float(signal_conf),
+                "signal_p_hit": float(signal_phit),
                 "score": float(setup.get("score") or 0.0),
                 "trade_gate": bool(trade_gate),
                 "reason": reason,

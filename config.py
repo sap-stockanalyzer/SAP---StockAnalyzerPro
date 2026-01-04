@@ -275,6 +275,32 @@ PATHS.setdefault("bots_ui_overrides", _BOT_CONFIG_DIR / "bots_ui_overrides.json"
 PATHS.setdefault("nightly_summary", LOGS_NIGHTLY / "last_nightly_summary.json")
 
 # ============================================================
+#  TUNING / AUTO-KNOB OVERRIDES (Phase 6)
+# ============================================================
+
+# Swing (backend) override file + log
+PATHS.setdefault("swing_knob_overrides", _BOT_CONFIG_DIR / "swing_knob_overrides.json")
+PATHS.setdefault("swing_tuning_log", _BOT_CONFIG_DIR / "swing_tuning_log.jsonl")
+
+# Phase 7: exploration budget + tuner state
+PATHS.setdefault("swing_exploration_budget", _BOT_CONFIG_DIR / "exploration_budget.json")
+PATHS.setdefault("swing_tuner_state", _BOT_CONFIG_DIR / "swing_tuner_state.json")
+
+# Swing profile directory (Phase 5)
+PATHS.setdefault("swing_knob_profiles_dir", _BOT_CONFIG_DIR / "swing_knob_profiles")
+
+# DT override file + log + profiles
+_DT_CONFIG_DIR = MLDT_ROOT / "config"
+_DT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+PATHS.setdefault("dt_config_dir", _DT_CONFIG_DIR)
+PATHS.setdefault("dt_knob_overrides", _DT_CONFIG_DIR / "dt_knob_overrides.json")
+PATHS.setdefault("dt_tuning_log", _DT_CONFIG_DIR / "dt_tuning_log.jsonl")
+PATHS.setdefault("dt_exploration_budget", _DT_CONFIG_DIR / "exploration_budget.json")
+PATHS.setdefault("dt_tuner_state", _DT_CONFIG_DIR / "dt_tuner_state.json")
+PATHS.setdefault("dt_knob_profiles_dir", _DT_CONFIG_DIR / "dt_knob_profiles")
+
+
+# ============================================================
 #  AUTO-CREATE DIRECTORIES
 # ============================================================
 
@@ -395,6 +421,11 @@ try:
     DT_PATHS.update({
         "intraday_ui_store": ML_DATA_DT / "config" / "intraday_bots_ui.json",
         "sim_summary": ML_DATA_DT / "sim_summary.json",
+
+        # Phase 6: automatic knob overrides + tuning logs
+        "dt_knob_overrides": (MLDT_ROOT / "config" / "dt_knob_overrides.json"),
+        "dt_tuning_log": (MLDT_ROOT / "config" / "dt_tuning_log.jsonl"),
+        "dt_knob_profiles_dir": (MLDT_ROOT / "config" / "dt_knob_profiles"),
     })
 except Exception:
     pass

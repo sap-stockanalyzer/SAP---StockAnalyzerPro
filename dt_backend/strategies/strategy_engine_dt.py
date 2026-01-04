@@ -588,9 +588,46 @@ def select_best_setup(
     # Final gating thresholds.
     min_conf = _env_float("DT_STRAT_MIN_CONF", 0.32)
     min_score = _env_float("DT_STRAT_MIN_SCORE", 7.0)
+    # Phase 1 (Upgrade Package v1): log *soft* rejects as "missed opportunity" candidates.
+    # This is intentionally best-effort and must never break strategy selection.
+    def _log_missed(reason_code: str, details: Dict[str, Any]) -> None:
+        try:
+            from dt_backend.services.dt_truth_store import append_missed_opportunity  # type: ignore
+
+            feat = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
+            last = _f(feat.get("last_price"), 0.0)
+            event = {
+                "type": "dt_missed_candidate",
+                "symbol": str(sym).upper(),
+                "bot": str(best.get("bot") or "").upper(),
+                "side": str(best.get("side") or "").upper(),
+                "reason": str(reason_code),
+                "micro": str(micro or "").upper(),
+                "snapshot": {
+                    "price": float(last) if last > 0 else None,
+                    "atr_pct": _f(feat.get("atr_pct"), 0.0),
+                    "rel_volume": _f(feat.get("rel_volume"), 0.0),
+                    "vwap_dist": _f(feat.get("vwap_dist"), 0.0),
+                    "trend_score": _f(feat.get("trend_score"), 0.0),
+                },
+                "proposed": {
+                    "confidence": _f(best.get("confidence"), 0.0),
+                    "score": _f(best.get("score"), 0.0),
+                    "risk": best.get("risk") if isinstance(best.get("risk"), dict) else {},
+                    "reason": str(best.get("reason") or "")[:280],
+                },
+                "thresholds": {"min_conf": float(min_conf), "min_score": float(min_score)},
+                "details": details,
+            }
+            append_missed_opportunity(event)
+        except Exception:
+            return
+
     if _f(best.get("confidence"), 0.0) < min_conf:
+        _log_missed("DT_STRAT_MIN_CONF", {"min_conf": float(min_conf)})
         return None
     if _f(best.get("score"), 0.0) < min_score:
+        _log_missed("DT_STRAT_MIN_SCORE", {"min_score": float(min_score)})
         return None
 
     return best

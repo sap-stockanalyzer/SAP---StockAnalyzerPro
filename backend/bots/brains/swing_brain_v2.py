@@ -65,9 +65,11 @@ def _tiered_entry_gate(
     conf: float,
     exp_ret: float,
     vol: float,
-    regime_label: str,
-    regime_conf: float,
+    regime: str,
+    risk_off: float,
     allow_countertrend: bool = False,
+    tier_overrides: Dict[str, Dict[str, float]] | None = None,
+    max_vol_override: float | None = None,
 ) -> Tuple[bool, str, str]:
     """Tiered entry gate (Phase 1).
 
@@ -88,19 +90,28 @@ def _tiered_entry_gate(
     """
 
     # --- default tiers (loosened vs strict v0) ---
-    a_conf = _env_float("SWING_TIER_A_CONF", 0.52)
-    b_conf = _env_float("SWING_TIER_B_CONF", 0.38)
-    c_conf = _env_float("SWING_TIER_C_CONF", 0.26)
+    if isinstance(tier_overrides, dict) and tier_overrides:
+        a_conf = _safe_float((tier_overrides.get("A") or {}).get("conf"), 0.52)
+        b_conf = _safe_float((tier_overrides.get("B") or {}).get("conf"), 0.38)
+        c_conf = _safe_float((tier_overrides.get("C") or {}).get("conf"), 0.26)
 
-    a_ret = _env_float("SWING_TIER_A_RET", 0.040)
-    b_ret = _env_float("SWING_TIER_B_RET", 0.018)
-    c_ret = _env_float("SWING_TIER_C_RET", 0.010)
+        a_ret = _safe_float((tier_overrides.get("A") or {}).get("ret"), 0.040)
+        b_ret = _safe_float((tier_overrides.get("B") or {}).get("ret"), 0.018)
+        c_ret = _safe_float((tier_overrides.get("C") or {}).get("ret"), 0.010)
+    else:
+        a_conf = _env_float("SWING_TIER_A_CONF", 0.52)
+        b_conf = _env_float("SWING_TIER_B_CONF", 0.38)
+        c_conf = _env_float("SWING_TIER_C_CONF", 0.26)
+
+        a_ret = _env_float("SWING_TIER_A_RET", 0.040)
+        b_ret = _env_float("SWING_TIER_B_RET", 0.018)
+        c_ret = _env_float("SWING_TIER_C_RET", 0.010)
 
     # Volatility seatbelt: if vol is high, require stronger confidence.
-    max_vol = _env_float("SWING_MAX_VOL", 0.060)
+    max_vol = float(max_vol_override) if (max_vol_override is not None) else _env_float("SWING_MAX_VOL", 0.060)
     vol = float(vol or 0.0)
 
-    rl = (regime_label or "").strip().lower()
+    rl = (regime or "").strip().lower()
 
     # Legacy knob: previously this could hard-block buys in bear/risk_off regimes.
     # Phase 3 upgrade: do NOT forbid trading outright — instead we downgrade the tier
@@ -113,9 +124,9 @@ def _tiered_entry_gate(
     # Soft regime adjustment: in bear, demand a bit more confidence for BUY signals.
     bear_conf_bonus = _env_float("SWING_BEAR_CONF_BONUS", 0.05)
 
-    # Treat low regime confidence as "fog" => tighten slightly.
+    # Treat high risk_off as "fog" => tighten slightly.
     fog_pen = 0.00
-    if float(regime_conf or 0.0) < 0.35:
+    if float(risk_off or 0.0) > 0.60:
         fog_pen = 0.03
 
     # Vol penalty: above max_vol, only Tier A survives unless explicitly allowed.
@@ -150,7 +161,8 @@ def rank_universe_v2(
     insights: List[dict],
     horizon: str,
     conf_threshold: float,
-) -> List[Tuple[str, float]]:
+    tier_params: Dict[str, Any] | None = None,
+    ) -> List[Tuple[str, float, str]]:
     """
     Rank symbols using explicit utility:
 
@@ -160,7 +172,7 @@ def rank_universe_v2(
           + 0.05 * Drawdown
 
     Returns:
-        List[(symbol, score)] sorted desc
+        List[(symbol, score, tier)] sorted desc
     """
 
     # ---------------- Insight rank ---------------- #
@@ -170,7 +182,7 @@ def rank_universe_v2(
         if sym:
             insight_rank[sym] = i
 
-    ranked: List[Tuple[str, float]] = []
+    ranked: List[Tuple[str, float, str]] = []
 
     # Legacy hard gates (very strict): keep as an opt-in escape hatch.
     # Phase 1 default is tiered gating.
@@ -241,7 +253,17 @@ def rank_universe_v2(
                 continue
             tier = "A"
         else:
-            ok, tier, _why = _tiered_entry_gate(regime=regime, risk_off=risk_off, conf=confidence, exp_ret=exp_ret, vol=vol)
+            tier_overrides = (tier_params or {}).get("tier_overrides") if isinstance(tier_params, dict) else None
+            max_vol_override = (tier_params or {}).get("max_vol") if isinstance(tier_params, dict) else None
+            ok, tier, _why = _tiered_entry_gate(
+                regime=regime,
+                risk_off=risk_off,
+                conf=confidence,
+                exp_ret=exp_ret,
+                vol=vol,
+                tier_overrides=tier_overrides if isinstance(tier_overrides, dict) else None,
+                max_vol_override=float(max_vol_override) if (max_vol_override is not None) else None,
+            )
             if not ok:
                 continue
         exposure = REGIME_EXPOSURE.get(regime, 0.70)
@@ -293,7 +315,7 @@ def rank_universe_v2(
         U *= exposure
 
         if U > 0:
-            ranked.append((sym, float(U)))
+            ranked.append((sym, float(U), str(tier).upper() or "C"))
 
     ranked.sort(key=lambda x: x[1], reverse=True)
     return ranked

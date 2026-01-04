@@ -31,6 +31,12 @@ except Exception:  # pragma: no cover
 from dt_backend.core import DT_PATHS
 from dt_backend.core.logger_dt import log, warn
 
+# Phase 6: auto knob tuner (best-effort)
+try:
+    from dt_backend.tuning.dt_knob_tuner import run_dt_knob_tuner
+except Exception:  # pragma: no cover
+    run_dt_knob_tuner = None  # type: ignore
+
 try:
     from dt_backend.ml.continuous_learning_intraday import run_continuous_learning_intraday
 except Exception:  # pragma: no cover
@@ -237,6 +243,15 @@ def run_dt_nightly_job(session_date: Optional[str] = None) -> Dict[str, Any]:
         "realized_pnl": float(total_pnl),
         "continuous_learning": cl_status,
     }
+
+    # Phase 6: auto knob tuner (best-effort; does not affect job status)
+    try:
+        if callable(run_dt_knob_tuner):
+            summary["knob_tuner"] = run_dt_knob_tuner(dry_run=False)  # type: ignore[call-arg]
+        else:
+            summary["knob_tuner"] = {"status": "missing"}
+    except Exception as e_tune:
+        summary["knob_tuner"] = {"status": "error", "error": str(e_tune)[:200]}
 
     _stamp_brain(session_date, summary)
 

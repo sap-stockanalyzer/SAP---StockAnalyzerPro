@@ -34,6 +34,8 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from dt_backend.tuning.dt_profile_loader import load_dt_profile
+
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
 
 
@@ -58,6 +60,26 @@ class ExecConfig:
     # Base validity window for an execution intent.
     valid_minutes: int = 15
 
+    # -----------------------------
+    # Phase 4: action tiers
+    # -----------------------------
+    # PROBE: allow lower-confidence, micro-sized entries.
+    probe_min_conf: float = 0.18
+    probe_size_fraction: float = 0.25
+
+    # PRESS: modest scale-up when P(hit) is strong.
+    press_min_phit: float = 0.62
+    press_size_mult: float = 1.35
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        import os
+        raw = (os.getenv(name, "") or "").strip()
+        return float(raw) if raw else float(default)
+    except Exception:
+        return float(default)
+
 
 def _safe_float(x: Any, default: float = 0.0) -> float:
     try:
@@ -67,6 +89,21 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
         return v
     except Exception:
         return default
+
+def _get_regime_label_dt(rolling: Dict[str, Any]) -> str:
+    try:
+        g = rolling.get("_GLOBAL_DT") or {}
+        if not isinstance(g, dict):
+            return "unknown"
+        reg = g.get("regime_dt")
+        if isinstance(reg, dict) and reg.get("label"):
+            return str(reg.get("label"))
+        reg2 = g.get("regime")
+        if isinstance(reg2, dict) and reg2.get("label"):
+            return str(reg2.get("label"))
+        return str(g.get("regime_label") or "unknown")
+    except Exception:
+        return "unknown"
 
 
 def _trend_and_vol(context_dt: Dict[str, Any]) -> Tuple[str, str]:
@@ -254,7 +291,36 @@ def run_execution_intraday(
     Returns summary dict.
     """
     cfg = cfg or ExecConfig()
+
+    # Optional env overrides (keeps knobs centralized in dt_knobs.env)
+    cfg.probe_min_conf = _env_float("DT_PROBE_MIN_CONF", cfg.probe_min_conf)
+    cfg.probe_size_fraction = _env_float("DT_PROBE_SIZE_FRAC", cfg.probe_size_fraction)
+    cfg.press_min_phit = _env_float("DT_PRESS_MIN_PHIT", cfg.press_min_phit)
+    cfg.press_size_mult = _env_float("DT_PRESS_SIZE_MULT", cfg.press_size_mult)
+
+    # sane clamps
+    cfg.probe_min_conf = max(0.0, min(0.60, float(cfg.probe_min_conf)))
+    cfg.probe_size_fraction = max(0.0, min(1.0, float(cfg.probe_size_fraction)))
+    cfg.press_min_phit = max(0.50, min(0.90, float(cfg.press_min_phit)))
+    cfg.press_size_mult = max(1.0, min(2.50, float(cfg.press_size_mult)))
     rolling = rolling_override if isinstance(rolling_override, dict) else _read_rolling()
+    # Phase 5: playbook profile sizing overrides (soft sizing knobs only)
+    try:
+        reg_label = _get_regime_label_dt(rolling if isinstance(rolling, dict) else {})
+        prof = load_dt_profile(reg_label)
+        p = prof.get("probe") if isinstance(prof, dict) else None
+        pr = prof.get("press") if isinstance(prof, dict) else None
+        if isinstance(p, dict) and "size_frac" in p:
+            cfg.probe_size_fraction = float(p.get("size_frac"))
+        if isinstance(p, dict) and "min_conf" in p:
+            cfg.probe_min_conf = float(p.get("min_conf"))
+        if isinstance(pr, dict) and "min_phit" in pr:
+            cfg.press_min_phit = float(pr.get("min_phit"))
+        if isinstance(pr, dict) and "size_mult" in pr:
+            cfg.press_size_mult = float(pr.get("size_mult"))
+    except Exception:
+        pass
+
     if not rolling or not isinstance(rolling, dict):
         log("[exec_dt] ⚠️ rolling empty, nothing to do.")
         return {"symbols": 0, "updated": 0}
@@ -306,17 +372,23 @@ def run_execution_intraday(
             updated += 1
             continue
 
-        # Phase 3: strategy bots can publish an explicit trade plan.
+        # Phase 3/4: strategy bots can publish an explicit trade plan (with optional tiers).
         plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else None
         if isinstance(plan, dict):
             try:
                 p_side = str(plan.get("side") or "").upper()
                 p_conf = _safe_float(plan.get("confidence"), 0.0)
-                if p_side in {"BUY", "SELL"} and p_conf >= cfg.min_conf:
+                p_tier = str(plan.get("tier") or "").upper()
+
+                # PROBE tier can run with lower confidence.
+                min_needed = cfg.probe_min_conf if p_tier == "PROBE" else cfg.min_conf
+
+                if p_side in {"BUY", "SELL"} and p_conf >= float(min_needed):
                     policy = {
                         **(policy if isinstance(policy, dict) else {}),
                         "intent": p_side,
                         "confidence": float(min(cfg.max_conf_cap, p_conf)),
+                        **({"tier": p_tier} if p_tier else {}),
                     }
                     node["_execution_plan_used"] = True
                 else:
@@ -324,20 +396,36 @@ def run_execution_intraday(
             except Exception:
                 node["_execution_plan_used"] = False
 
-        intent = str((policy or {}).get("intent") or "").upper()
-        conf = _safe_float((policy or {}).get("confidence"), 0.0)
+        tier = str((policy or {}).get("tier") or "").upper()
 
-        # Phase 7: calibrated probability-of-hit (falls back to confidence)
-        phit = _safe_float((policy or {}).get("p_hit"), conf)
+        # Phase 4: PROBE uses signal_* fields (keeps UI policy stable while letting execution take micro-risk).
+        if tier == "PROBE":
+            intent = str((policy or {}).get("signal_intent") or (policy or {}).get("intent") or "").upper()
+            conf = _safe_float((policy or {}).get("signal_confidence"), _safe_float((policy or {}).get("confidence"), 0.0))
+            phit = _safe_float((policy or {}).get("signal_p_hit"), _safe_float((policy or {}).get("p_hit"), conf))
+        else:
+            intent = str((policy or {}).get("intent") or "").upper()
+            conf = _safe_float((policy or {}).get("confidence"), 0.0)
+            # Phase 7: calibrated probability-of-hit (falls back to confidence)
+            phit = _safe_float((policy or {}).get("p_hit"), conf)
 
         side = "FLAT"
         conf_adj = 0.0
         size = 0.0
 
-        if intent in {"BUY", "SELL"} and conf >= cfg.min_conf:
+        if intent in {"BUY", "SELL"}:
             _, vol_bkt = _trend_and_vol(ctx)
             expected_r = _expected_r_from_plan(node)
-            size = _size_from_phit_expected_r(phit, expected_r, vol_bkt, cfg)
+
+            if tier == "PROBE":
+                if conf >= float(cfg.probe_min_conf):
+                    size = _size_from_conf_and_vol(conf, vol_bkt, cfg) * float(cfg.probe_size_fraction)
+                    size = max(0.0, min(cfg.max_symbol_fraction, float(size)))
+            else:
+                if conf >= float(cfg.min_conf):
+                    size = _size_from_phit_expected_r(phit, expected_r, vol_bkt, cfg)
+                    if tier == "PRESS" and float(phit) >= float(cfg.press_min_phit):
+                        size = max(0.0, min(cfg.max_symbol_fraction, float(size) * float(cfg.press_size_mult)))
 
             if size > 0.0:
                 side = intent

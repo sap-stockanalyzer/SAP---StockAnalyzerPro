@@ -111,6 +111,7 @@ def apply_swing_env_overrides(cfg: "SwingBotConfig") -> "SwingBotConfig":
 
     return cfg
 from backend.bots.brains.swing_brain_v2 import rank_universe_v2
+from backend.tuning.swing_profile_loader import load_swing_profile
 
 # ---------------------------------------------------------------------
 # Config & logging
@@ -279,6 +280,12 @@ class SwingBotConfig:
     stop_loss_pct: float      # -0.05 → -5%
     take_profit_pct: float    # 0.10 → +10%
     max_weight_per_name: float  # max fraction of equity in one symbol
+
+    # Phase 4: cap sizing for low-conviction "probe" names (Tier C).
+    low_conf_max_fraction: float = 0.35
+
+    # Phase 7: EV shaping (used in universe scoring + ranking helpers)
+    ev_power: float = 1.0
     # Phase 4: position building (starter entries + adds)
     starter_fraction: float = 0.35          # fraction of desired size on first entry
     add_fraction: float = 0.33              # fraction of desired size per add
@@ -858,7 +865,7 @@ class SwingBot:
         log(f"[{self.cfg.bot_key}] AI-ranked universe size={len(ranked)}")
         return ranked
 
-    def construct_target_weights(self, ranked: List[Tuple[str, float]]) -> Dict[str, float]:
+    def construct_target_weights(self, ranked: List[Tuple]) -> Dict[str, float]:
         """
         From ranked (sym, score), produce target weights.
         - keep top max_positions
@@ -869,15 +876,41 @@ class SwingBot:
             return {}
 
         top = ranked[: self.cfg.max_positions]
-        scores = [max(0.0, s) for _, s in top]
+
+        # ranked items may be (sym, score) or (sym, score, tier)
+        def _score(it: Tuple) -> float:
+            try:
+                return max(0.0, float(it[1]))
+            except Exception:
+                return 0.0
+
+        def _tier(it: Tuple) -> str:
+            try:
+                return str(it[2]).upper() if len(it) >= 3 else "A"
+            except Exception:
+                return "A"
+
+        scores = [_score(it) for it in top]
         total = sum(scores)
         if total <= 0:
             return {}
 
         weights: Dict[str, float] = {}
-        for sym, s in top:
+        for it in top:
+            sym = str(it[0]).upper()
+            s = _score(it)
+            tier = _tier(it)
+
             w = s / total
-            w = min(w, self.cfg.max_weight_per_name)
+
+            # Phase 4: tier-based caps (C ≈ probe).
+            tier_mult = 1.0
+            if tier == "B":
+                tier_mult = 0.75
+            elif tier == "C":
+                tier_mult = float(getattr(self.cfg, "low_conf_max_fraction", 0.35))
+            cap = float(self.cfg.max_weight_per_name) * max(0.0, min(1.0, tier_mult))
+            w = min(w, cap)
             weights[sym] = w
 
         # renormalize after capping
@@ -1271,11 +1304,47 @@ class SwingBot:
             pass
 
         insights = self.load_insights()
+        # Phase 5: regime playbook profile (soft gates + tier thresholds)
+        tier_params: dict = {}
+        try:
+            g = rolling.get("_GLOBAL") if isinstance(rolling.get("_GLOBAL"), dict) else {}
+            reg_label = str(
+                g.get("regime_label")
+                or g.get("market_regime")
+                or g.get("regime")
+                or (g.get("regime_state") or {}).get("label")
+                or ""
+            )
+            playbook = load_swing_profile(reg_label)
+
+            # Avoid permanent drift across cycles
+            base_conf_th = float(getattr(self.cfg, "_base_conf_threshold", self.cfg.conf_threshold))
+            base_low_frac = float(getattr(self.cfg, "_base_low_conf_max_fraction", self.cfg.low_conf_max_fraction))
+            setattr(self.cfg, "_base_conf_threshold", base_conf_th)
+            setattr(self.cfg, "_base_low_conf_max_fraction", base_low_frac)
+
+            if isinstance(playbook, dict):
+                if playbook.get("conf_threshold") is not None:
+                    self.cfg.conf_threshold = float(playbook.get("conf_threshold"))
+                if playbook.get("low_conf_max_fraction") is not None:
+                    self.cfg.low_conf_max_fraction = float(playbook.get("low_conf_max_fraction"))
+
+                g["swing_playbook_profile"] = {"name": str(playbook.get("label") or ""), "ts": _now_iso()}
+                rolling["_GLOBAL"] = g
+
+                if isinstance(playbook.get("tier_overrides"), dict):
+                    tier_params["tier_overrides"] = playbook.get("tier_overrides")
+                if playbook.get("max_vol") is not None:
+                    tier_params["max_vol"] = float(playbook.get("max_vol"))
+        except Exception:
+            tier_params = {}
+
         ranked = rank_universe_v2(
             rolling=rolling,
             insights=insights,
             horizon=self.cfg.horizon,
             conf_threshold=self.cfg.conf_threshold,
+            tier_params=tier_params if isinstance(tier_params, dict) and tier_params else None,
         )
         target_weights = self.construct_target_weights(ranked)
 

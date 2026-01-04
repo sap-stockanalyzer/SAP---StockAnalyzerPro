@@ -10,6 +10,15 @@ Keep this module IMPORT-SAFE:
 """
 
 from .config import PATHS
+
+# Phase 6: apply persisted knob overrides early (import-safe, best-effort)
+try:
+    from .knob_overrides import apply_swing_knob_overrides
+
+    apply_swing_knob_overrides()
+except Exception:
+    # keep import-safe
+    pass
 from .data_pipeline import (
     log,
     _read_rolling,

@@ -20,6 +20,7 @@ All functions are best-effort and should never raise in normal use.
 from __future__ import annotations
 
 import json
+import uuid
 import os
 import time
 from dataclasses import dataclass
@@ -94,6 +95,10 @@ STATE_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_state_file") if isinstance(DT_PAT
 TRADES_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_trades_file") if isinstance(DT_PATHS, dict) else None) or _fallback("dt_trades.jsonl")
 METRICS_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_metrics_file") if isinstance(DT_PATHS, dict) else None) or _fallback("dt_metrics.json")
 
+# Upgrade Package v1 (Phase 1–2): missed opportunity evidence loop
+MISSED_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_missed_opportunities_file") if isinstance(DT_PATHS, dict) else None) or _fallback("dt_missed_opportunities.jsonl")
+MISSED_EVALS_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_missed_evals_file") if isinstance(DT_PATHS, dict) else None) or _fallback("dt_missed_evals.jsonl")
+
 # Locks (same rule)
 SCHED_LOCK_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_scheduler_lock_file") if isinstance(DT_PATHS, dict) else None) or _fallback(".dt_scheduler.lock")
 CYCLE_LOCK_PATH_DEFAULT = _as_path(DT_PATHS.get("dt_cycle_lock_file") if isinstance(DT_PATHS, dict) else None) or _fallback(".dt_cycle.lock")
@@ -117,6 +122,8 @@ def _override_path(default_path: Path, name: str) -> Path:
 STATE_PATH = STATE_PATH_DEFAULT
 TRADES_PATH = TRADES_PATH_DEFAULT
 METRICS_PATH = METRICS_PATH_DEFAULT
+MISSED_PATH = MISSED_PATH_DEFAULT
+MISSED_EVALS_PATH = MISSED_EVALS_PATH_DEFAULT
 SCHED_LOCK_PATH = SCHED_LOCK_PATH_DEFAULT
 CYCLE_LOCK_PATH = CYCLE_LOCK_PATH_DEFAULT
 BARS_FETCH_LOCK_PATH = BARS_FETCH_LOCK_PATH_DEFAULT
@@ -132,6 +139,14 @@ def trades_path() -> Path:
 
 def metrics_path() -> Path:
     return _override_path(METRICS_PATH_DEFAULT, "dt_metrics.json")
+
+
+def missed_path() -> Path:
+    return _override_path(MISSED_PATH_DEFAULT, "dt_missed_opportunities.jsonl")
+
+
+def missed_evals_path() -> Path:
+    return _override_path(MISSED_EVALS_PATH_DEFAULT, "dt_missed_evals.jsonl")
 
 
 def sched_lock_path() -> Path:
@@ -279,6 +294,46 @@ def append_trade_event(event: Dict[str, Any]) -> None:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
     except Exception as e:
         log(f"[dt_truth] ⚠️ failed to append dt_trades event: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Upgrade Package v1 (Phase 1–2): missed opportunities
+# ---------------------------------------------------------------------------
+
+
+def append_missed_opportunity(event: Dict[str, Any]) -> None:
+    """Append a 'missed opportunity candidate' line.
+
+    This is a Phase 1 artifact: a record of a trade-like setup that was rejected
+    by a *soft* gate (thresholds, EV filters, etc.).
+    """
+    try:
+        if not isinstance(event, dict):
+            return
+        event.setdefault("ts", _utc_iso())
+        # Ensure an id exists for later evaluation + attribution joins.
+        # Keep it simple: unique, not necessarily deterministic.
+        event.setdefault("event_id", uuid.uuid4().hex)
+        p = missed_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log(f"[dt_truth] ⚠️ failed to append missed opportunity: {e}")
+
+
+def append_missed_eval(event: Dict[str, Any]) -> None:
+    """Append a labeled outcome line for a missed candidate (Phase 2)."""
+    try:
+        if not isinstance(event, dict):
+            return
+        event.setdefault("ts", _utc_iso())
+        p = missed_evals_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception as e:
+        log(f"[dt_truth] ⚠️ failed to append missed eval: {e}")
 
 
 def _iter_broker_ledgers() -> Iterable[Path]:
