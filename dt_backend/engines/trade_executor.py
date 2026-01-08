@@ -1,4 +1,4 @@
-# dt_backend/engines/trade_executor.py — v0.2 (Phase 0 executor + LANE-AWARE + META FIXES)
+# dt_backend/engines/trade_executor.py — v0.3 (Phase 0 executor + LANE-AWARE + LIQUIDATION DEDUP)
 """Intraday trade executor for dt_backend.
 
 Phase 0 goals
@@ -13,6 +13,13 @@ v0.2 updates
 - Meta fixes: pull risk_mode/version from dt_state + daily_plan_dt (not a phantom g["dt_state"]).
 - Feature key fixes: atr_14 / vwap_dist instead of atr / vwap_dev.
 - Time consistency: use the effective cycle timestamp for exits + flip cooldown.
+
+v0.3 updates
+------------
+- Liquidation de-dup + inflight tracking:
+    * Prevents re-sending liquidation orders for the same symbols every cycle.
+    * Tracks "inflight" liquidations in dt_state.json with TTL.
+    * Optionally records accept/reject counts when broker returns status.
 """
 
 from __future__ import annotations
@@ -28,9 +35,10 @@ from dt_backend.services.dt_truth_store import append_trade_event, bump_metric
 
 # Optional: dt_state tags (safe if unavailable)
 try:
-    from dt_backend.services.dt_truth_store import read_dt_state  # type: ignore
+    from dt_backend.services.dt_truth_store import read_dt_state, update_dt_state  # type: ignore
 except Exception:  # pragma: no cover
     read_dt_state = None  # type: ignore
+    update_dt_state = None  # type: ignore
 
 from dt_backend.engines.broker_api import BrokerAPI, Order, get_positions_scoped
 from dt_backend.services.position_manager_dt import (
@@ -81,6 +89,11 @@ class ExecutionConfig:
     scratch_atr_frac: float = 0.15
 
 
+def _safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
 
 
 def _env(name: str, default: str = "") -> str:
@@ -106,19 +119,89 @@ def _cfg_from_env() -> ExecutionConfig:
     return cfg
 
 
+# ---------------------------------------------------------------------------
+# Liquidation (operator lever)
+# ---------------------------------------------------------------------------
+
+
 def _liquidation_settings() -> Dict[str, Any]:
     return {
         "enabled": _env_bool("DT_LIQUIDATE_ENABLED", "0"),
         "target_positions": int(_safe_float(_env("DT_LIQUIDATE_TARGET_POSITIONS", "-1"), -1)),
         "scope": _env("DT_LIQUIDATE_SCOPE", "ALL").upper(),  # ACTIVE|CARRY|ALL
         "max_orders": int(_safe_float(_env("DT_LIQUIDATE_MAX_ORDERS_PER_CYCLE", "25"), 25)),
+        # de-dup / inflight tracking
+        "dedup": _env_bool("DT_LIQUIDATE_DEDUP_ENABLED", "1"),
+        "ttl_sec": int(_safe_float(_env("DT_LIQUIDATE_INFLIGHT_TTL_SEC", "180"), 180)),
     }
 
 
-def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig) -> Dict[str, Any]:
+def _parse_utc_iso(s: Any) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        txt = str(s).strip()
+        if not txt:
+            return None
+        # Accept both Z and +00:00
+        if txt.endswith("Z"):
+            txt = txt[:-1] + "+00:00"
+        return datetime.fromisoformat(txt).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _load_inflight() -> Dict[str, Dict[str, Any]]:
+    """Load liquidation inflight map from dt_state.json.
+
+    Shape:
+        {
+          "AAPL": {"ts": "2026-01-08T16:41:20Z", "side": "SELL", "qty": 10.0},
+          ...
+        }
+    """
+    if read_dt_state is None:
+        return {}
+    try:
+        st = read_dt_state() or {}
+        m = st.get("liquidation_inflight")
+        return m if isinstance(m, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_inflight(m: Dict[str, Dict[str, Any]]) -> None:
+    if update_dt_state is None:
+        return
+    try:
+        update_dt_state({"liquidation_inflight": m})
+    except Exception:
+        pass
+
+
+def _prune_inflight(m: Dict[str, Dict[str, Any]], *, now_utc: datetime, ttl_sec: int) -> Dict[str, Dict[str, Any]]:
+    if ttl_sec <= 0:
+        return {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for sym, v in (m or {}).items():
+        if not isinstance(sym, str) or not isinstance(v, dict):
+            continue
+        ts = _parse_utc_iso(v.get("ts"))
+        if ts is None:
+            continue
+        age = (now_utc - ts).total_seconds()
+        if age <= float(ttl_sec):
+            out[sym.upper()] = v
+    return out
+
+
+def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_utc: datetime) -> Dict[str, Any]:
     """If liquidation is enabled, sell down positions to target count.
 
     This runs even during stand_down. It is capped per cycle.
+
+    v0.3: de-dups by tracking inflight symbols in dt_state.json with TTL so we
+    don't resend the same liquidation orders every cycle.
     """
     s = _liquidation_settings()
     if not s["enabled"]:
@@ -127,10 +210,15 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig) -> Dict
     scope = str(s["scope"] or "ALL").upper()
     target = int(s["target_positions"])
     max_orders = int(s["max_orders"])
+    dedup = bool(s.get("dedup"))
+    ttl_sec = int(s.get("ttl_sec") or 180)
+
+    inflight = _load_inflight() if dedup else {}
+    inflight = _prune_inflight(inflight, now_utc=now_utc, ttl_sec=ttl_sec) if dedup else {}
 
     # Pull positions from the requested scope (ledger view).
     pos = get_positions_scoped(scope)
-    syms = sorted([k for k, p in pos.items() if isinstance(p, object) and float(getattr(p, "qty", 0.0)) != 0.0])
+    syms = sorted([k for k, p in pos.items() if isinstance(k, str) and float(getattr(p, "qty", 0.0) or 0.0) != 0.0])
 
     keep = set()
     if target >= 0:
@@ -139,40 +227,108 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig) -> Dict
     to_sell = [sym for sym in syms if sym not in keep]
 
     sent = 0
+    skipped_inflight = 0
+    accepted = 0
+    rejected = 0
+    errors = 0
+
     for sym in to_sell:
         if sent >= max_orders:
             break
+
+        sym_u = str(sym).upper().strip()
         p = pos.get(sym)
         qty = float(getattr(p, "qty", 0.0)) if p else 0.0
         if qty == 0.0:
             continue
+
+        # De-dup: if we already fired a liquidation order recently for this symbol, skip.
+        if dedup and sym_u in inflight:
+            skipped_inflight += 1
+            continue
+
         side = "SELL" if qty > 0 else "BUY"  # cover shorts if any
-        order = Order(symbol=sym, side=side, qty=abs(qty), limit_price=None)
+        order = Order(symbol=sym_u, side=side, qty=abs(qty), limit_price=None)
+
         append_trade_event(
             {
                 "type": "liquidate_intent",
-                "symbol": sym,
+                "symbol": sym_u,
                 "side": side,
                 "qty": abs(qty),
                 "scope": scope,
                 "target_positions": target,
+                "dedup": dedup,
+                "ttl_sec": ttl_sec,
             }
         )
+
+        # Mark inflight BEFORE submit so we don't spam duplicates even if submit is slow.
+        if dedup:
+            inflight[sym_u] = {
+                "ts": now_utc.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                "side": side,
+                "qty": float(abs(qty)),
+            }
+            _save_inflight(inflight)
+
         if cfg.dry_run:
             sent += 1
             continue
-        res = broker.submit_order(order, last_price=None)
-        append_trade_event(
-            {
-                "type": "liquidate_order",
-                "symbol": sym,
-                "side": side,
-                "qty": abs(qty),
-                "result": res,
-                "scope": scope,
-            }
-        )
-        sent += 1
+
+        try:
+            res = broker.submit_order(order, last_price=None)
+
+            # Best-effort status accounting
+            st = ""
+            try:
+                st = str(res.get("status") or res.get("state") or "").lower() if isinstance(res, dict) else ""
+            except Exception:
+                st = ""
+
+            if st in {"accepted", "new", "partially_filled", "filled", "pending_new", "submitted"}:
+                accepted += 1
+            elif st:
+                rejected += 1
+
+            append_trade_event(
+                {
+                    "type": "liquidate_order",
+                    "symbol": sym_u,
+                    "side": side,
+                    "qty": abs(qty),
+                    "result": res,
+                    "scope": scope,
+                }
+            )
+
+            # If broker clearly rejected, remove inflight so it can retry (or operator can investigate)
+            if dedup and st and st in {"rejected", "canceled", "cancelled", "expired"}:
+                inflight.pop(sym_u, None)
+                _save_inflight(inflight)
+
+            sent += 1
+        except Exception as e:
+            errors += 1
+            append_trade_event(
+                {
+                    "type": "liquidate_error",
+                    "symbol": sym_u,
+                    "side": side,
+                    "qty": abs(qty),
+                    "error": str(e),
+                    "scope": scope,
+                }
+            )
+            # Don't keep it inflight if submission threw.
+            if dedup:
+                inflight.pop(sym_u, None)
+                _save_inflight(inflight)
+
+    # Final prune/save (keeps state bounded)
+    if dedup:
+        inflight = _prune_inflight(inflight, now_utc=now_utc, ttl_sec=ttl_sec)
+        _save_inflight(inflight)
 
     return {
         "status": "ok",
@@ -182,12 +338,14 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig) -> Dict
         "positions_seen": len(syms),
         "orders_sent": sent,
         "orders_cap": max_orders,
+        "dedup": dedup,
+        "inflight_ttl_sec": ttl_sec,
+        "inflight_now": len(inflight) if dedup else 0,
+        "skipped_inflight": skipped_inflight,
+        "accepted": accepted,
+        "rejected": rejected,
+        "errors": errors,
     }
-def _safe_float(x: Any, default: float = 0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
 
 
 def _extract_intent(node: Dict[str, Any]) -> Tuple[str, float, float]:
@@ -350,11 +508,11 @@ def execute_from_policy(
 
     broker = BrokerAPI()
 
-    # Emergency / operator-controlled liquidation (sell down to target positions).
-    liquidation_summary = _run_liquidation_if_enabled(broker, cfg)
-
     # Replay/backtest can drive time via DT_NOW_UTC; fall back to real time.
     ts_now = now_utc or _now_utc_override()
+
+    # Emergency / operator-controlled liquidation (sell down to target positions).
+    liquidation_summary = _run_liquidation_if_enabled(broker, cfg, now_utc=ts_now)
 
     # Phase 5: manage exits (synthetic brackets, time-stops, scratch, EOD flatten)
     exit_summary = process_exits(
