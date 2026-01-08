@@ -19,6 +19,13 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
+# Hot-reload knobs from dt_knobs.env each cycle (so operators can flip switches
+# without restarting the scheduler).
+try:
+    from dt_backend.utils.knob_loader_dt import maybe_reload_dt_knobs
+except Exception:  # pragma: no cover
+    maybe_reload_dt_knobs = None  # type: ignore
+
 from dt_backend.core import (
     log,
     warn,
@@ -259,6 +266,15 @@ def run_daytrading_cycle(
     execution_cfg: ExecutionConfig | None = None,
 ) -> Dict[str, Any]:
     cycle_id = uuid.uuid4().hex[:12]
+
+    # Hot-reload dt_knobs.env for operator toggles (liquidation, rails, sizing, etc.).
+    # This makes edits to dt_knobs.env take effect on the very next cycle.
+    try:
+        if maybe_reload_dt_knobs is not None:
+            _ = maybe_reload_dt_knobs()
+    except Exception:
+        # Never let knob reload break trading cycles.
+        pass
 
     # Lock to prevent overlapping cycles across processes.
     if str(os.getenv("DT_CYCLE_LOCK", "1")).strip().lower() not in {"0", "false", "no", "off"}:
