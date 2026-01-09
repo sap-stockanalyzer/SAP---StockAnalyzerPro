@@ -242,3 +242,46 @@ def reconcile_with_alpaca_positions(reg: Registry, alpaca_positions: Dict[str, f
         "mismatch_count": int(mismatches),
         "ts": _utc_iso(),
     }
+
+
+def can_sell_qty(reg: Registry, symbol: str, owner: str) -> float:
+    """Return how many shares a strategy is allowed to sell for a symbol.
+
+    Conservative rule: a strategy may only sell what it has reserved.
+    If alpaca_qty is known, clamp to broker qty too.
+    """
+    sym = (symbol or "").upper().strip()
+    owner = (owner or "").upper().strip() or "DT"
+    if not sym:
+        return 0.0
+
+    allowed = get_reserved_qty(reg, sym, owner)
+
+    node = reg.data.get("symbols", {}).get(sym)
+    if isinstance(node, dict):
+        a = node.get("alpaca_qty")
+        if a is not None:
+            allowed = min(float(allowed), _safe_float(a, 0.0))
+
+    return max(0.0, float(allowed))
+
+
+def reserve_on_fill(reg: Registry, symbol: str, side: str, qty: float, owner: str) -> Registry:
+    """Update reserved quantities after a known fill.
+
+    BUY  -> increase owner's reserved qty
+    SELL -> decrease owner's reserved qty
+    """
+    sym = (symbol or "").upper().strip()
+    side = (side or "").upper().strip()
+    owner = (owner or "").upper().strip() or "DT"
+    q = _safe_float(qty, 0.0)
+    if not sym or q <= 0:
+        return reg
+
+    if side == "BUY":
+        add_reserved_qty(reg, sym, owner, +q)
+    elif side == "SELL":
+        add_reserved_qty(reg, sym, owner, -q)
+
+    return reg
