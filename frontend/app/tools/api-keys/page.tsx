@@ -228,10 +228,10 @@ export default function ApiKeysSettingsPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="secondary" size="sm" disabled={loading || saving} onClick={fetchAll}>
+          <Button variant="outline" size="sm" disabled={loading || saving} onClick={fetchAll}>
             {loading ? "Loading…" : "Refresh"}
           </Button>
-          <Button variant="secondary" size="sm" disabled={loading || testing} onClick={handleTest}>
+          <Button variant="outline" size="sm" disabled={loading || testing} onClick={handleTest}>
             {testing ? "Testing…" : "Test"}
           </Button>
           <Button size="sm" disabled={loading || saving} onClick={handleSaveAll}>

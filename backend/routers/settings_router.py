@@ -237,3 +237,111 @@ def test_settings(payload: SettingsUpdate | None = None) -> Dict[str, Any]:
         "ok": ok,
         "missing_broker_keys": missing_broker,
     }
+
+
+# ==========================================================
+# Knobs Configuration Endpoints
+# ==========================================================
+
+class KnobsContent(BaseModel):
+    content: str
+
+
+@router.get("/knobs", summary="Get knobs.env content")
+def get_knobs() -> Dict[str, Any]:
+    """
+    Get knobs.env content for EOD/Nightly configuration.
+    
+    Returns:
+        {"content": "...file content..."}
+    """
+    root = PATHS.get("root")
+    if not root:
+        root = Path(os.getcwd())
+    
+    knobs_path = Path(root) / "knobs.env"
+    if not knobs_path.exists():
+        log(f"[settings] ⚠️ knobs.env not found at {knobs_path}")
+        raise HTTPException(status_code=404, detail="knobs.env not found")
+    
+    try:
+        content = knobs_path.read_text(encoding="utf-8")
+        return {"content": content}
+    except Exception as e:
+        log(f"[settings] ⚠️ Failed to read knobs.env: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to read knobs.env: {e}")
+
+
+@router.post("/knobs", summary="Save knobs.env content")
+def save_knobs(payload: KnobsContent) -> Dict[str, Any]:
+    """
+    Save knobs.env content for EOD/Nightly configuration.
+    
+    Payload:
+        {"content": "...file content..."}
+    """
+    root = PATHS.get("root")
+    if not root:
+        root = Path(os.getcwd())
+    
+    knobs_path = Path(root) / "knobs.env"
+    
+    try:
+        # Ensure parent directory exists
+        knobs_path.parent.mkdir(parents=True, exist_ok=True)
+        knobs_path.write_text(payload.content, encoding="utf-8")
+        log(f"[settings] ✅ Saved knobs.env to {knobs_path}")
+        return {"ok": True, "message": "Saved successfully"}
+    except Exception as e:
+        log(f"[settings] ⚠️ Failed to write knobs.env: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save knobs.env: {e}")
+
+
+@router.get("/dt-knobs", summary="Get dt_knobs.env content")
+def get_dt_knobs() -> Dict[str, Any]:
+    """
+    Get dt_knobs.env content for Intraday/day-trading configuration.
+    
+    Returns:
+        {"content": "...file content..."}
+    """
+    root = PATHS.get("root")
+    if not root:
+        root = Path(os.getcwd())
+    
+    dt_knobs_path = Path(root) / "dt_knobs.env"
+    if not dt_knobs_path.exists():
+        log(f"[settings] ⚠️ dt_knobs.env not found at {dt_knobs_path}")
+        raise HTTPException(status_code=404, detail="dt_knobs.env not found")
+    
+    try:
+        content = dt_knobs_path.read_text(encoding="utf-8")
+        return {"content": content}
+    except Exception as e:
+        log(f"[settings] ⚠️ Failed to read dt_knobs.env: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to read dt_knobs.env: {e}")
+
+
+@router.post("/dt-knobs", summary="Save dt_knobs.env content")
+def save_dt_knobs(payload: KnobsContent) -> Dict[str, Any]:
+    """
+    Save dt_knobs.env content for Intraday/day-trading configuration.
+    
+    Payload:
+        {"content": "...file content..."}
+    """
+    root = PATHS.get("root")
+    if not root:
+        root = Path(os.getcwd())
+    
+    dt_knobs_path = Path(root) / "dt_knobs.env"
+    
+    try:
+        # Ensure parent directory exists
+        dt_knobs_path.parent.mkdir(parents=True, exist_ok=True)
+        dt_knobs_path.write_text(payload.content, encoding="utf-8")
+        log(f"[settings] ✅ Saved dt_knobs.env to {dt_knobs_path}")
+        return {"ok": True, "message": "Saved successfully"}
+    except Exception as e:
+        log(f"[settings] ⚠️ Failed to write dt_knobs.env: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save dt_knobs.env: {e}")

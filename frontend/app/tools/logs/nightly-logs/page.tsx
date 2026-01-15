@@ -1,6 +1,6 @@
 "use client";
 
-// Re-export the existing viewer so Settings has a first-class entry point.
-// Keeps the look/feel identical to Tools > Nightly Logs.
+// Re-export the parent logs page
+// This creates a nested route that uses the same component
 
-export { default } from "../../tools/nightly-logs/page";
+export { default } from "../page";
