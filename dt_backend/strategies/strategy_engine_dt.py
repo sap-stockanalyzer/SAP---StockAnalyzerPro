@@ -128,6 +128,52 @@ def _allowed_in_micro(bot: str, micro: str) -> bool:
     return True
 
 
+def _recently_traded(sym: str, node: Dict[str, Any], *, min_minutes: int = 15) -> bool:
+    """Check if symbol was recently traded (entry or exit).
+    
+    Returns True if: 
+    - We have an open position
+    - We exited within min_minutes
+    - We entered within min_minutes
+    """
+    try:
+        # Check 1: Do we have an open position right now?
+        pos_dt = node.get("position_dt")
+        if isinstance(pos_dt, dict):
+            qty = float(pos_dt.get("qty") or 0.0)
+            if qty != 0.0:
+                return True  # Currently holding - don't re-enter
+        
+        # Check 2: Did we recently exit?
+        try:
+            from dt_backend.services.position_manager_dt import recent_exit_info
+            from dt_backend.core.time_override_dt import now_utc
+            
+            last_exit_ts, _ = recent_exit_info(sym)
+            if last_exit_ts is not None:
+                age_sec = (now_utc() - last_exit_ts).total_seconds()
+                if age_sec < (min_minutes * 60):
+                    return True  # Too soon after exit
+        except Exception:
+            pass
+        
+        # Check 3: Check position_manager state for recent entries
+        try:
+            from dt_backend.services.position_manager_dt import read_positions_state
+            pos_state = read_positions_state()
+            if sym in pos_state:
+                ps = pos_state.get(sym)
+                if isinstance(ps, dict) and ps.get("status") == "OPEN":
+                    return True  # Open in position manager
+        except Exception:
+            pass
+            
+    except Exception:
+        pass
+    
+    return False
+
+
 def _base_risk(atr: float, *, stop_mult: float, tp_mult: float, last: float, side: str) -> Tuple[Optional[float], Optional[float]]:
     if atr <= 0 or last <= 0:
         return None, None
@@ -537,9 +583,62 @@ def select_best_setup(
     allowed_bots: Optional[List[str]] = None,
     bot_weights: Optional[Dict[str, float]] = None,
 ) -> Optional[Dict[str, Any]]:
+    """Select best setup for a symbol, considering current regime and bot weights.
+    
+    NEW: Also filters out recently-traded symbols to prevent churn.
+    """
+    
+    # NEW: Trade frequency filter (prevents same-symbol spam)
+    min_gap = int(os.getenv("DT_MIN_TRADE_GAP_MINUTES", "15") or "15")
+    if _recently_traded(sym, node, min_minutes=min_gap):
+        # Optional: log for visibility
+        try:
+            from dt_backend.services.dt_truth_store import append_trade_event
+            append_trade_event({
+                "type": "setup_filtered",
+                "symbol": sym,
+                "reason": f"recently_traded_within_{min_gap}m",
+            })
+        except Exception:
+            pass
+        return None
+    
     setups = build_setups_for_symbol(sym, node, rolling=rolling, micro=micro)
     if not setups:
         return None
+    
+    # NEW: Apply recency decay to scores
+    try:
+        last_action_ts = node.get("_last_action_ts")
+        last_action_bot = node.get("_last_action_bot")
+        
+        if last_action_ts and last_action_bot:
+            from dt_backend.core.time_override_dt import now_utc
+            from datetime import datetime
+            
+            try:
+                ts = datetime.fromisoformat(str(last_action_ts).replace("Z", "+00:00"))
+                age_min = (now_utc() - ts).total_seconds() / 60.0
+                
+                # Decay scores for recently-acted symbols
+                decay_window = float(os.getenv("DT_SCORE_DECAY_MINUTES", "30") or "30")
+                
+                if age_min < decay_window:
+                    decay_factor = 0.40 + (0.60 * (age_min / decay_window))
+                    
+                    for s in setups:
+                        # Heavier decay if same bot tried recently
+                        bot = str(s.get("bot") or "").upper()
+                        if bot == str(last_action_bot).upper():
+                            s["score"] = float(s.get("score") or 0.0) * decay_factor * 0.5
+                            s["reason"] = str(s.get("reason") or "") + f" (same_bot_decay={decay_factor*0.5:.2f})"
+                        else:
+                            s["score"] = float(s.get("score") or 0.0) * decay_factor
+                            s["reason"] = str(s.get("reason") or "") + f" (decay={decay_factor:.2f})"
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # Weights from regime detector (Phase 2), optionally overridden/augmented
     # by a Phase 4 meta-controller.

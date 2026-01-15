@@ -188,6 +188,59 @@ def _write_candidate_universe(rolling: Dict[str, Any], scored: List[Tuple[str, f
 
     rescored.sort(key=lambda t: t[1], reverse=True)
     syms = [s for s, _ in rescored[:n]]
+    
+    # NEW: Filter out recently-traded symbols to encourage rotation
+    try:
+        rotation_enabled = str(os.getenv("DT_UNIVERSE_ROTATION", "1") or "1").strip().lower() in {"1", "true", "yes", "y"}
+        
+        if rotation_enabled:
+            exclusion_set = set()
+            
+            # Exclude currently open positions
+            try:
+                from dt_backend.services.position_manager_dt import read_positions_state
+                pos_state = read_positions_state()
+                open_syms = [s for s, ps in pos_state.items() 
+                            if isinstance(ps, dict) and ps.get("status") == "OPEN"]
+                exclusion_set.update(open_syms)
+            except Exception:
+                pass
+            
+            # Exclude recently exited (cooldown period)
+            cooldown_hours = int(os.getenv("DT_UNIVERSE_COOLDOWN_HOURS", "2") or "2")
+            if cooldown_hours > 0:
+                try:
+                    from dt_backend.services.position_manager_dt import read_positions_state
+                    from dt_backend.core.time_override_dt import now_utc as get_now_utc
+                    from datetime import datetime, timedelta
+                    
+                    pos_state = read_positions_state()
+                    cutoff = (now_utc or get_now_utc()) - timedelta(hours=cooldown_hours)
+                    
+                    for sym, ps in pos_state.items():
+                        if not isinstance(ps, dict):
+                            continue
+                        last_exit = ps.get("last_exit_ts")
+                        if last_exit:
+                            try:
+                                ts = datetime.fromisoformat(str(last_exit).replace("Z", "+00:00"))
+                                if ts > cutoff:
+                                    exclusion_set.add(sym)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            
+            # Filter candidates
+            original_count = len(syms)
+            syms = [s for s in syms if s not in exclusion_set]
+            filtered_count = original_count - len(syms)
+            
+            if filtered_count > 0:
+                log(f"[context_dt] 🔄 Filtered {filtered_count} recently-traded symbols for universe rotation")
+                
+    except Exception as e:
+        log(f"[context_dt] ⚠️ universe rotation filter failed: {e}")
 
     g = rolling.get("_GLOBAL_DT") if isinstance(rolling.get("_GLOBAL_DT"), dict) else {}
     g["candidate_universe_dt"] = {
