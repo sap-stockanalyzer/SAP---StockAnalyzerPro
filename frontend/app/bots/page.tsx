@@ -371,7 +371,7 @@ function BotRulesPanel({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {dirty ? <Badge variant="secondary">Unsaved</Badge> : <Badge variant="outline">Saved</Badge>}
+          {dirty ? <Badge variant="muted">Unsaved</Badge> : <Badge variant="outline">Saved</Badge>}
         </div>
       </div>
 
@@ -528,7 +528,7 @@ function LiveIntradayTape({
                   return (
                     <div key={i} className="flex items-center justify-between rounded-lg border bg-background/40 px-3 py-2 text-xs">
                       <div className="flex items-center gap-2">
-                        <Badge variant={side === "BUY" ? "secondary" : "outline"}>{side}</Badge>
+                        <Badge variant={side === "BUY" ? "muted" : "outline"}>{side}</Badge>
                         <span className="font-semibold">{(f.symbol ?? "—").toString()}</span>
                         <span className="text-white/60">{(f.ts ?? f.time ?? "—").toString()}</span>
                       </div>
@@ -554,7 +554,7 @@ function LiveIntradayTape({
                   return (
                     <div key={i} className="flex items-center justify-between rounded-lg border bg-background/40 px-3 py-2 text-xs">
                       <div className="flex items-center gap-2">
-                        <Badge variant={act === "BUY" ? "secondary" : "outline"}>{act}</Badge>
+                        <Badge variant={act === "BUY" ? "muted" : "outline"}>{act}</Badge>
                         <span className="font-semibold">{(s.symbol ?? "—").toString()}</span>
                         <span className="text-white/60">{(s.ts ?? s.time ?? "—").toString()}</span>
                       </div>
@@ -667,7 +667,7 @@ function BotRow({
           <div className="rounded-xl border bg-card/30 p-4 min-w-0">
             <div className="mb-2 flex items-center justify-between">
               <div className="text-sm font-semibold">Performance</div>
-              <Badge variant="secondary" className="text-xs">
+              <Badge variant="muted" className="text-xs">
                 {h.toUpperCase()}
               </Badge>
             </div>
@@ -715,8 +715,8 @@ function BotRow({
                   <div className="flex flex-wrap gap-2 text-xs">
                     <Badge variant="outline">SL {fmtPct(draft.stop_loss)}</Badge>
                     <Badge variant="outline">TP {fmtPct(draft.take_profit)}</Badge>
-                    <Badge variant="secondary">{riskLabel}</Badge>
-                    <Badge variant="secondary">Agg {fmtPct(draft.aggression)}</Badge>
+                    <Badge variant="muted">{riskLabel}</Badge>
+                    <Badge variant="muted">Agg {fmtPct(draft.aggression)}</Badge>
                   </div>
                 </div>
               </div>
@@ -752,8 +752,8 @@ function BotRow({
                   <div className="flex flex-wrap gap-2 text-xs">
                     <Badge variant="outline">SL {fmtPct(draft.stop_loss)}</Badge>
                     <Badge variant="outline">TP {fmtPct(draft.take_profit)}</Badge>
-                    <Badge variant="secondary">{riskLabel}</Badge>
-                    <Badge variant="secondary">Agg {fmtPct(draft.aggression)}</Badge>
+                    <Badge variant="muted">{riskLabel}</Badge>
+                    <Badge variant="muted">Agg {fmtPct(draft.aggression)}</Badge>
                   </div>
                 </div>
               </div>
