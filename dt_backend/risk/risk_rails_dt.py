@@ -425,11 +425,14 @@ def assess_and_update_risk_rails(*, now_utc: Optional[datetime] = None, rolling:
         reason = f"daily_drawdown_pct_hit dd={dd_pct:.4f} source={equity_source}"
     
     # weekly drawdown cap (NEW in v1.2)
+    # Note: max_weekly_dd_pct is stored as percentage (e.g., 8.0), 
+    # but weekly_dd_pct is calculated as decimal (e.g., 0.08)
     if not stand_down and max_weekly_dd_pct > 0 and weekly_dd_pct >= abs(max_weekly_dd_pct / 100.0):
         stand_down = True
         reason = f"weekly_drawdown_limit dd={weekly_dd_pct * 100:.2f}% threshold={max_weekly_dd_pct}%"
     
     # monthly drawdown cap (NEW in v1.2)
+    # Note: Same unit conversion as weekly
     if not stand_down and max_monthly_dd_pct > 0 and monthly_dd_pct >= abs(max_monthly_dd_pct / 100.0):
         stand_down = True
         reason = f"monthly_drawdown_limit dd={monthly_dd_pct * 100:.2f}% threshold={max_monthly_dd_pct}%"

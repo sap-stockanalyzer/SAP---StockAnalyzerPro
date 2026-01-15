@@ -160,5 +160,6 @@ def cleanup_test_files():
     if emergency_file.exists():
         try:
             emergency_file.unlink()
-        except Exception:
+        except (PermissionError, FileNotFoundError, OSError):
+            # Ignore cleanup errors - test environment might have restricted permissions
             pass

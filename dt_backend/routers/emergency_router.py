@@ -16,7 +16,7 @@ class EmergencyStopRequest(BaseModel):
 
 
 @router.post("/emergency/stop")
-def emergency_stop(request: EmergencyStopRequest = None):
+def emergency_stop(request: EmergencyStopRequest = EmergencyStopRequest()):
     """Trigger emergency stop to halt all trading.
     
     This creates a stop file that will prevent all trading operations
