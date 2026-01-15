@@ -714,13 +714,13 @@ def execute_from_policy(
                             meta=meta,
                             confidence=float(conf),
                         )
-                        
+
                         # Update position_dt in rolling cache so policy sees the position
                         try:
                             # Determine signed qty: positive for LONG, negative for SHORT
                             position_qty = float(filled_qty) if side == "BUY" else -float(filled_qty)
                             position_side = "LONG" if side == "BUY" else "SHORT"
-                            
+
                             node["position_dt"] = {
                                 "qty": position_qty,
                                 "avg_price": float(fill_price),
@@ -733,7 +733,7 @@ def execute_from_policy(
                     else:
                         if side == "SELL" and (pos is not None and getattr(pos, "qty", 0.0) > 0) and filled_qty > 0:
                             record_exit(sym, reason="manual_sell", now_utc=ts_now)
-                            
+
                             # Clear position_dt after exit
                             try:
                                 node["position_dt"] = {
@@ -775,13 +775,13 @@ def execute_from_policy(
             "eod_flattens": int(exit_summary.eod_flattens),
         },
     }
-    
+
     # Save rolling cache with updated position_dt fields for next cycle
     try:
         save_rolling(rolling)
         log("[dt_exec] 💾 saved rolling cache with position updates")
     except Exception as e:
         log(f"[dt_exec] ⚠️ failed to save rolling cache: {e}")
-    
+
     log(f"[dt_exec] ✅ execute_from_policy done: {out}")
     return out
