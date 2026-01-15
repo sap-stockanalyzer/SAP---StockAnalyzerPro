@@ -285,6 +285,24 @@ def recent_exit_info(symbol: str) -> Tuple[Optional[datetime], str]:
     return ts, side
 
 
+def _clear_position_dt(rolling: Dict[str, Any], sym: str, now_utc: Optional[datetime] = None) -> None:
+    """Clear position_dt in rolling cache after an exit."""
+    try:
+        sym_u = str(sym).upper().strip()
+        node = rolling.get(sym_u)
+        if isinstance(node, dict):
+            now = now_utc or _now_utc_override()
+            node["position_dt"] = {
+                "qty": 0.0,
+                "avg_price": 0.0,
+                "side": "FLAT",
+                "ts": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+            }
+            rolling[sym_u] = node
+    except Exception:
+        pass
+
+
 def process_exits(
     *,
     rolling: Dict[str, Any],
@@ -359,6 +377,7 @@ def process_exits(
             ps["last_exit_ts"] = _utc_iso(now)
             ps["last_exit_reason"] = exit_reason
             state[sym_u] = ps
+            _clear_position_dt(rolling, sym_u, now)
             continue
 
         # Time stop
@@ -377,6 +396,7 @@ def process_exits(
                 ps["last_exit_ts"] = _utc_iso(now)
                 ps["last_exit_reason"] = exit_reason
                 state[sym_u] = ps
+                _clear_position_dt(rolling, sym_u, now)
                 continue
 
         # Scratch rule: if it doesn't go anywhere, exit.
@@ -399,6 +419,7 @@ def process_exits(
                     ps["last_exit_ts"] = _utc_iso(now)
                     ps["last_exit_reason"] = exit_reason
                     state[sym_u] = ps
+                    _clear_position_dt(rolling, sym_u, now)
                     continue
 
         # Trailing stop update
@@ -445,6 +466,7 @@ def process_exits(
                 ps["last_exit_ts"] = _utc_iso(now)
                 ps["last_exit_reason"] = exit_reason
                 state[sym_u] = ps
+                _clear_position_dt(rolling, sym_u, now)
                 continue
 
         # If no partials, full TP exit
@@ -462,6 +484,7 @@ def process_exits(
                 ps["last_exit_ts"] = _utc_iso(now)
                 ps["last_exit_reason"] = exit_reason
                 state[sym_u] = ps
+                _clear_position_dt(rolling, sym_u, now)
                 continue
 
         state[sym_u] = ps
