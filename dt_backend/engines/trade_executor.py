@@ -718,16 +718,17 @@ def execute_from_policy(
                         # Update position_dt in rolling cache so policy sees the position
                         try:
                             # Determine signed qty: positive for LONG, negative for SHORT
-                            position_qty = float(filled_qty) if side == "BUY" else -float(filled_qty)
-                            position_side = "LONG" if side == "BUY" else "SHORT"
+                            if isinstance(node, dict):
+                                position_qty = float(filled_qty) if side == "BUY" else -float(filled_qty)
+                                position_side = "LONG" if side == "BUY" else "SHORT"
 
-                            node["position_dt"] = {
-                                "qty": position_qty,
-                                "avg_price": float(fill_price),
-                                "side": position_side,
-                                "ts": ts_now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-                            }
-                            rolling[sym] = node
+                                node["position_dt"] = {
+                                    "qty": position_qty,
+                                    "avg_price": float(fill_price),
+                                    "side": position_side,
+                                    "ts": ts_now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                                }
+                                rolling[sym] = node
                         except Exception:
                             pass
                     else:
@@ -736,13 +737,14 @@ def execute_from_policy(
 
                             # Clear position_dt after exit
                             try:
-                                node["position_dt"] = {
-                                    "qty": 0.0,
-                                    "avg_price": 0.0,
-                                    "side": "FLAT",
-                                    "ts": ts_now.isoformat(timespec="seconds").replace("+00:00", "Z"),
-                                }
-                                rolling[sym] = node
+                                if isinstance(node, dict):
+                                    node["position_dt"] = {
+                                        "qty": 0.0,
+                                        "avg_price": 0.0,
+                                        "side": "FLAT",
+                                        "ts": ts_now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                                    }
+                                    rolling[sym] = node
                             except Exception:
                                 pass
             except Exception:
