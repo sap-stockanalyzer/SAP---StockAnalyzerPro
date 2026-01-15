@@ -537,3 +537,54 @@ def count_trades_today(symbol: str) -> int:
         return 0
 
 
+def get_symbol_pnl_today(symbol: str) -> float:
+    """Calculate total realized P&L for symbol today (Phase 3).
+    
+    Scans dt_trades.jsonl for today's exit events for the given symbol
+    and sums up the realized P&L.
+    
+    Returns:
+        float: Total P&L for symbol today (negative = loss, positive = profit)
+    """
+    try:
+        from datetime import datetime, timezone
+        import json
+        from pathlib import Path
+        import os
+        
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        trades_file = Path(os.getenv("DT_TRUTH_DIR", "da_brains")) / "intraday" / "dt_trades.jsonl"
+        
+        if not trades_file.exists():
+            return 0.0
+        
+        sym = str(symbol).upper().strip()
+        pnl = 0.0
+        
+        with open(trades_file, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    evt = json.loads(line)
+                    evt_date = str(evt.get("ts", ""))[:10]  # YYYY-MM-DD
+                    
+                    if evt_date != today:
+                        continue
+                    
+                    # Look for exit events with realized P&L
+                    if evt.get("type") in {"exit", "fill_exit", "order_filled"}:
+                        if str(evt.get("symbol", "")).upper() == sym:
+                            # Add P&L from this exit
+                            evt_pnl = evt.get("pnl") or evt.get("realized_pnl") or 0.0
+                            try:
+                                pnl += float(evt_pnl)
+                            except (ValueError, TypeError):
+                                pass
+                except Exception:
+                    continue
+        
+        return float(pnl)
+        
+    except Exception:
+        return 0.0
+
+

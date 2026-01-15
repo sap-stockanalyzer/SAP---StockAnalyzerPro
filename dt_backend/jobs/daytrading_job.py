@@ -70,6 +70,19 @@ try:
 except Exception:  # pragma: no cover
     assess_and_update_risk_rails = None  # type: ignore
 
+# Phase 4: configuration validation (startup check)
+try:
+    from dt_backend.core.knob_validator_dt import validate_knobs
+    knob_errors = validate_knobs()
+    if knob_errors:
+        for err in knob_errors:
+            if err.startswith("WARNING:"):
+                warn(f"[daytrading_job] ⚠️ Config: {err}")
+            else:
+                warn(f"[daytrading_job] ❌ Config error: {err}")
+except Exception:  # pragma: no cover
+    pass
+
 
 # ----------------------------
 # Fast lane / slow lane helpers
@@ -266,6 +279,22 @@ def run_daytrading_cycle(
     execution_cfg: ExecutionConfig | None = None,
 ) -> Dict[str, Any]:
     cycle_id = uuid.uuid4().hex[:12]
+    
+    # Check emergency stop (Phase 4)
+    try:
+        from dt_backend.risk.emergency_stop_dt import check_emergency_stop
+        is_stopped, reason = check_emergency_stop()
+        if is_stopped:
+            log(f"[daytrading_job] 🛑 EMERGENCY STOP: {reason}")
+            append_trade_event({
+                "type": "emergency_stop",
+                "cycle_id": cycle_id,
+                "reason": reason,
+            })
+            return {"status": "stopped", "reason": reason, "cycle_id": cycle_id}
+    except Exception:
+        # Never let emergency stop check break trading cycles
+        pass
 
     # Hot-reload dt_knobs.env for operator toggles (liquidation, rails, sizing, etc.).
     # This makes edits to dt_knobs.env take effect on the very next cycle.

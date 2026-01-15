@@ -1,3 +1,4 @@
+"""Health check endpoints for EOD backend."""
 from __future__ import annotations
 
 import os
@@ -24,60 +25,46 @@ def check_broker_connection() -> Dict[str, Any]:
         if not api_key or not api_secret:
             return {"status": "degraded", "message": "Missing Alpaca credentials"}
         
-        # TODO: Add actual broker API ping once broker_api is imported
         return {"status": "healthy", "message": "Credentials configured"}
     except Exception as e:
         return {"status": "degraded", "message": f"Error: {str(e)}"}
 
 
-def check_data_freshness() -> Dict[str, Any]:
-    """Check if rolling data cache is fresh."""
+def check_data_availability() -> Dict[str, Any]:
+    """Check if core data files are available."""
     try:
-        rolling_path = os.getenv("DT_ROLLING_PATH", "da_brains/intraday/rolling_intraday.json.gz")
-        rolling_file = Path(rolling_path)
+        data_root = os.getenv("DATA_ROOT", "data")
+        data_dir = Path(data_root)
         
-        if not rolling_file.exists():
-            return {"status": "degraded", "message": "Rolling cache not found"}
+        if not data_dir.exists():
+            return {"status": "degraded", "message": "Data directory not found"}
         
-        # Check if file was modified in last 15 minutes
-        mtime = rolling_file.stat().st_mtime
-        age_minutes = (time.time() - mtime) / 60.0
-        
-        if age_minutes > 15:
-            return {
-                "status": "degraded",
-                "message": f"Rolling cache stale ({age_minutes:.1f} min old)"
-            }
-        
-        return {
-            "status": "healthy",
-            "message": f"Rolling cache fresh ({age_minutes:.1f} min old)"
-        }
+        return {"status": "healthy", "message": "Data directory available"}
     except Exception as e:
         return {"status": "degraded", "message": f"Error: {str(e)}"}
 
 
-def check_rolling_cache() -> Dict[str, Any]:
-    """Check if rolling cache file exists and is readable."""
+def check_ml_models() -> Dict[str, Any]:
+    """Check if ML models are available."""
     try:
-        rolling_path = os.getenv("DT_ROLLING_PATH", "da_brains/intraday/rolling_intraday.json.gz")
-        rolling_file = Path(rolling_path)
+        ml_models_root = os.getenv("ML_MODELS_ROOT", "ml_data/nightly/models")
+        models_dir = Path(ml_models_root)
         
-        if not rolling_file.exists():
-            return {"status": "down", "message": "Rolling cache file missing"}
+        if not models_dir.exists():
+            return {"status": "degraded", "message": "Models directory not found"}
         
-        # Check file size
-        size_mb = rolling_file.stat().st_size / (1024 * 1024)
+        # Count model files
+        model_files = list(models_dir.glob("**/*.txt")) + list(models_dir.glob("**/*.pkl"))
         
-        if size_mb < 0.001:  # Less than 1KB
-            return {"status": "degraded", "message": "Rolling cache file empty"}
+        if not model_files:
+            return {"status": "degraded", "message": "No models found"}
         
         return {
             "status": "healthy",
-            "message": f"Rolling cache available ({size_mb:.2f} MB)"
+            "message": f"{len(model_files)} model(s) available"
         }
     except Exception as e:
-        return {"status": "down", "message": f"Error: {str(e)}"}
+        return {"status": "degraded", "message": f"Error: {str(e)}"}
 
 
 def get_uptime() -> float:
@@ -85,20 +72,19 @@ def get_uptime() -> float:
     return time.time() - _START_TIME
 
 
-def get_last_cycle_time() -> str:
-    """Get timestamp of last trading cycle."""
+def get_last_nightly_run() -> str:
+    """Get timestamp of last nightly job run."""
     try:
-        # Try to read dt_state.json for last cycle time
-        truth_dir = os.getenv("DT_TRUTH_DIR", "da_brains")
-        state_file = Path(truth_dir) / "intraday" / "dt_state.json"
+        # Try to read last_nightly_summary.json
+        summary_file = Path("last_nightly_summary.json")
         
-        if not state_file.exists():
+        if not summary_file.exists():
             return "unknown"
         
         import json
-        with open(state_file, "r", encoding="utf-8") as f:
-            state = json.load(f)
-            return state.get("last_cycle_ts", "unknown")
+        with open(summary_file, "r", encoding="utf-8") as f:
+            summary = json.load(f)
+            return summary.get("timestamp", "unknown")
     except Exception:
         return "unknown"
 
@@ -108,8 +94,8 @@ def health_check():
     """System health status with component checks."""
     components = {
         "broker": check_broker_connection(),
-        "data": check_data_freshness(),
-        "rolling_cache": check_rolling_cache(),
+        "data": check_data_availability(),
+        "models": check_ml_models(),
     }
     
     # Determine overall status
@@ -122,10 +108,10 @@ def health_check():
     
     return {
         "status": overall_status,
-        "service": "dt_backend",
+        "service": "backend",
         "components": components,
         "uptime_seconds": get_uptime(),
-        "last_cycle_ts": get_last_cycle_time(),
+        "last_nightly_run": get_last_nightly_run(),
         "version": "v3.3",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -135,18 +121,18 @@ def health_check():
 def readiness_check():
     """Kubernetes readiness probe - system ready to accept traffic."""
     # System is ready if core components are available
-    rolling_status = check_rolling_cache()
+    data_status = check_data_availability()
     
-    if rolling_status["status"] == "down":
+    if data_status["status"] == "down":
         return {
             "ready": False,
-            "reason": "rolling_cache_unavailable",
-            "message": rolling_status["message"]
+            "reason": "data_unavailable",
+            "message": data_status["message"]
         }
     
     return {
         "ready": True,
-        "service": "dt_backend",
+        "service": "backend",
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -156,7 +142,7 @@ def liveness_check():
     """Kubernetes liveness probe - system is alive and responsive."""
     return {
         "alive": True,
-        "service": "dt_backend",
+        "service": "backend",
         "uptime_seconds": get_uptime(),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

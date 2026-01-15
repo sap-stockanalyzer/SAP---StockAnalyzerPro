@@ -668,6 +668,28 @@ def execute_from_policy(
                     continue  # Skip this symbol
             except Exception:
                 pass
+        
+        # NEW (Phase 3): Max loss per symbol per day check
+        import os
+        max_loss_per_symbol = _safe_float(os.getenv("DT_MAX_LOSS_PER_SYMBOL_DAY", "500.0"), 500.0)
+        if max_loss_per_symbol > 0:
+            try:
+                from dt_backend.services.dt_truth_store import get_symbol_pnl_today
+                symbol_pnl = get_symbol_pnl_today(sym)
+                
+                if symbol_pnl < -abs(max_loss_per_symbol):
+                    blocked += 1
+                    append_trade_event({
+                        "type": "no_trade",
+                        "symbol": sym,
+                        "reason": f"max_daily_loss_per_symbol pnl={symbol_pnl:.2f} limit={max_loss_per_symbol:.2f}",
+                        "side": side,
+                        "confidence": conf,
+                        "size": size,
+                    })
+                    continue  # Skip this symbol
+            except Exception:
+                pass
 
         try:
             last_px = _extract_last_price(node)

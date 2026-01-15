@@ -254,6 +254,52 @@ def _write_candidate_universe(rolling: Dict[str, Any], scored: List[Tuple[str, f
     rolling["_GLOBAL_DT"] = g
 
 
+def _fetch_vix_level() -> float:
+    """Fetch current VIX level from market data.
+    
+    Returns 0.0 if unavailable (safe default).
+    """
+    try:
+        # Try to get VIX from broker API or rolling cache
+        # For now, we'll try to read from rolling cache first
+        # If broker_api is available, we could fetch it there
+        
+        # Attempt 1: Check if VIX is in rolling cache
+        rolling = _read_rolling()
+        if rolling and isinstance(rolling, dict):
+            vix_node = rolling.get("VIX") or rolling.get("^VIX")
+            if isinstance(vix_node, dict):
+                # Try to get last price from intraday bars
+                bars = _extract_today_bars(vix_node)
+                if bars and len(bars) > 0:
+                    return float(bars[-1].get("price", 0.0))
+                
+                # Fallback to stored context
+                ctx = vix_node.get("context_dt")
+                if isinstance(ctx, dict):
+                    last_price = ctx.get("last_price")
+                    if last_price:
+                        return float(last_price)
+        
+        # Attempt 2: Use broker API if available
+        try:
+            from dt_backend.engines.broker_api import BrokerAPI  # type: ignore
+            b = BrokerAPI()
+            if hasattr(b, "get_latest_quote"):
+                quote = b.get_latest_quote("VIX")
+                if isinstance(quote, dict):
+                    price = quote.get("price") or quote.get("last") or quote.get("close")
+                    if price:
+                        return float(price)
+        except Exception:
+            pass
+        
+        # Default: return 0.0 (safe default, won't trigger spike)
+        return 0.0
+    except Exception:
+        return 0.0
+
+
 def build_intraday_context(
     *,
     target_date: Optional[date | str] = None,
@@ -317,7 +363,17 @@ def build_intraday_context(
 
     if build_candidates:
         _write_candidate_universe(rolling, scored, now_utc=now_utc)
+    
+    # Add VIX level to global context (NEW in Phase 3)
+    vix_level = _fetch_vix_level()
+    vix_threshold = _env_float("DT_VIX_SPIKE_THRESHOLD", 35.0)
+    gdt = rolling.get("_GLOBAL_DT") if isinstance(rolling.get("_GLOBAL_DT"), dict) else {}
+    gdt["vix_level"] = float(vix_level)
+    gdt["vix_spike"] = bool(vix_level >= vix_threshold)
+    gdt["vix_threshold"] = float(vix_threshold)
+    gdt["vix_ts"] = _utc_now_iso(now_utc)
+    rolling["_GLOBAL_DT"] = gdt
 
     save_rolling(rolling)
-    log(f"[context_dt] ✅ updated {updated} symbols.")
-    return {"symbols": len(keys), "updated": updated}
+    log(f"[context_dt] ✅ updated {updated} symbols. VIX={vix_level:.2f}")
+    return {"symbols": len(keys), "updated": updated, "vix_level": vix_level}

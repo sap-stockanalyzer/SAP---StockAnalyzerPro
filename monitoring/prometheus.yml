@@ -1,0 +1,55 @@
+# Prometheus scrape configuration for AION Analytics
+# Save this as /etc/prometheus/prometheus.yml or use with Docker Compose
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'aion-analytics'
+    environment: 'production'
+
+# Scrape configurations
+scrape_configs:
+  # DT Backend (Intraday Trading)
+  - job_name: 'dt_backend'
+    static_configs:
+      - targets: ['localhost:8010']
+        labels:
+          service: 'dt_backend'
+          component: 'intraday'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # EOD Backend (Nightly/Swing)
+  - job_name: 'backend'
+    static_configs:
+      - targets: ['localhost:8000']
+        labels:
+          service: 'backend'
+          component: 'eod'
+    metrics_path: '/health'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+  # Backend UI (Read-only)
+  - job_name: 'backend_ui'
+    static_configs:
+      - targets: ['localhost:8001']
+        labels:
+          service: 'backend_ui'
+          component: 'frontend_api'
+    metrics_path: '/health'
+    scrape_interval: 30s
+    scrape_timeout: 10s
+
+# Alerting configuration (optional)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+          # - 'localhost:9093'  # Add Alertmanager if you have one
+
+# Rule files for alerts (optional)
+rule_files:
+  # - "alerts/*.yml"

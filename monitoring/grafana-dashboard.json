@@ -1,0 +1,354 @@
+{
+  "dashboard": {
+    "title": "AION Analytics - Intraday Trading Dashboard",
+    "tags": ["aion", "trading", "dt_backend"],
+    "timezone": "America/New_York",
+    "schemaVersion": 27,
+    "version": 1,
+    "refresh": "10s",
+    "time": {
+      "from": "now-6h",
+      "to": "now"
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "System Health Status",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "up{job=\"dt_backend\"}",
+            "legendFormat": "DT Backend",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "mappings": [
+              {
+                "type": "value",
+                "value": "1",
+                "text": "Healthy"
+              },
+              {
+                "type": "value",
+                "value": "0",
+                "text": "Down"
+              }
+            ],
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "red",
+                  "value": 0
+                },
+                {
+                  "color": "green",
+                  "value": 1
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 0,
+          "y": 0
+        }
+      },
+      {
+        "id": 2,
+        "title": "Total Trades",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(dt_trades_total)",
+            "legendFormat": "Total Trades",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "blue",
+                  "value": 0
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 6,
+          "y": 0
+        }
+      },
+      {
+        "id": 3,
+        "title": "Open Positions",
+        "type": "gauge",
+        "targets": [
+          {
+            "expr": "dt_open_positions",
+            "legendFormat": "Open Positions",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "max": 10,
+            "min": 0,
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "green",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 3
+                },
+                {
+                  "color": "red",
+                  "value": 8
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 12,
+          "y": 0
+        }
+      },
+      {
+        "id": 4,
+        "title": "Current Equity",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "dt_equity_dollars",
+            "legendFormat": "Equity ($)",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "currencyUSD",
+            "color": {
+              "mode": "thresholds"
+            },
+            "thresholds": {
+              "steps": [
+                {
+                  "color": "red",
+                  "value": 0
+                },
+                {
+                  "color": "yellow",
+                  "value": 95000
+                },
+                {
+                  "color": "green",
+                  "value": 100000
+                }
+              ]
+            }
+          }
+        },
+        "gridPos": {
+          "h": 4,
+          "w": 6,
+          "x": 18,
+          "y": 0
+        }
+      },
+      {
+        "id": 5,
+        "title": "Daily P&L",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "dt_daily_pnl_dollars",
+            "legendFormat": "Daily P&L ($)",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {
+            "format": "currencyUSD",
+            "label": "P&L"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 4
+        },
+        "lines": true,
+        "fill": 1,
+        "linewidth": 2
+      },
+      {
+        "id": 6,
+        "title": "Trade Count by Side",
+        "type": "piechart",
+        "targets": [
+          {
+            "expr": "dt_trades_total{side=\"long\"}",
+            "legendFormat": "Long",
+            "refId": "A"
+          },
+          {
+            "expr": "dt_trades_total{side=\"short\"}",
+            "legendFormat": "Short",
+            "refId": "B"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 4
+        }
+      },
+      {
+        "id": 7,
+        "title": "Cycle Execution Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "dt_cycle_duration_seconds",
+            "legendFormat": "Cycle Duration (s)",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {
+            "format": "s",
+            "label": "Duration"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 0,
+          "y": 12
+        },
+        "lines": true,
+        "fill": 1,
+        "linewidth": 2,
+        "alert": {
+          "conditions": [
+            {
+              "evaluator": {
+                "params": [10],
+                "type": "gt"
+              },
+              "operator": {
+                "type": "and"
+              },
+              "query": {
+                "params": ["A", "5m", "now"]
+              },
+              "reducer": {
+                "params": [],
+                "type": "avg"
+              },
+              "type": "query"
+            }
+          ],
+          "executionErrorState": "alerting",
+          "for": "5m",
+          "frequency": "1m",
+          "handler": 1,
+          "name": "Cycle Duration Alert",
+          "noDataState": "no_data",
+          "notifications": []
+        }
+      },
+      {
+        "id": 8,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(dt_errors_total[5m])",
+            "legendFormat": "Errors/sec",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {
+            "format": "short",
+            "label": "Errors/sec"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 12,
+          "x": 12,
+          "y": 12
+        },
+        "lines": true,
+        "fill": 1,
+        "linewidth": 2
+      },
+      {
+        "id": 9,
+        "title": "Drawdown Percentage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "((dt_equity_dollars - 100000) / 100000) * 100",
+            "legendFormat": "Drawdown %",
+            "refId": "A"
+          }
+        ],
+        "yaxes": [
+          {
+            "format": "percent",
+            "label": "Drawdown"
+          }
+        ],
+        "gridPos": {
+          "h": 8,
+          "w": 24,
+          "x": 0,
+          "y": 20
+        },
+        "lines": true,
+        "fill": 2,
+        "linewidth": 2,
+        "thresholds": [
+          {
+            "value": -5,
+            "colorMode": "critical",
+            "op": "lt",
+            "fill": true,
+            "line": true
+          },
+          {
+            "value": -2,
+            "colorMode": "custom",
+            "op": "lt",
+            "fill": true,
+            "line": true,
+            "fillColor": "rgba(255, 165, 0, 0.2)",
+            "lineColor": "rgb(255, 165, 0)"
+          }
+        ]
+      }
+    ]
+  }
+}
