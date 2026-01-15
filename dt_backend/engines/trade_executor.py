@@ -648,6 +648,27 @@ def execute_from_policy(
             bump_metric("dry_run_intents", 1.0)
             continue
 
+        # NEW: Daily trade limit per symbol
+        max_daily = int(os.getenv("DT_MAX_TRADES_PER_SYMBOL_PER_DAY", "2") or "2")
+        if max_daily > 0:
+            try:
+                from dt_backend.services.dt_truth_store import count_trades_today
+                trades_today = count_trades_today(sym)
+                
+                if trades_today >= max_daily:
+                    blocked += 1
+                    plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else {}
+                    append_trade_event({
+                        "type": "no_trade",
+                        "symbol": sym,
+                        "reason": f"max_daily_trades({trades_today}/{max_daily})",
+                        "side": side,
+                        "bot": plan.get("bot") if isinstance(plan, dict) else None,
+                    })
+                    continue  # Skip this symbol
+            except Exception:
+                pass
+
         try:
             last_px = _extract_last_price(node)
             atr = _extract_atr(node)
@@ -728,6 +749,17 @@ def execute_from_policy(
                                     "side": position_side,
                                     "ts": ts_now.isoformat(timespec="seconds").replace("+00:00", "Z"),
                                 }
+                                rolling[sym] = node
+                        except Exception:
+                            pass
+                        
+                        # Mark symbol as recently acted upon
+                        try:
+                            from dt_backend.core.time_override_dt import now_utc
+                            if isinstance(node, dict):
+                                plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else {}
+                                node["_last_action_ts"] = now_utc().isoformat().replace("+00:00", "Z")
+                                node["_last_action_bot"] = str(plan.get("bot") or "").upper() if isinstance(plan, dict) else ""
                                 rolling[sym] = node
                         except Exception:
                             pass

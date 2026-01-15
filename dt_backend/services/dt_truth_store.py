@@ -493,3 +493,47 @@ def _positions_bucket_view(positions: Any) -> Dict[str, Any]:
     return dict(positions)
 
 
+def count_trades_today(symbol: str) -> int:
+    """Count how many trades (entries) we made on this symbol today.
+    
+    Reads from dt_trades.jsonl for today's date.
+    """
+    try:
+        from datetime import datetime, timezone
+        import json
+        from pathlib import Path
+        import os
+        
+        # Find today's trades file
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        trades_file = Path(os.getenv("DT_TRUTH_DIR", "da_brains")) / "intraday" / "dt_trades.jsonl"
+        
+        if not trades_file.exists():
+            return 0
+        
+        sym = str(symbol).upper().strip()
+        count = 0
+        
+        with open(trades_file, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    evt = json.loads(line)
+                    evt_date = str(evt.get("ts", ""))[:10]  # YYYY-MM-DD
+                    
+                    if evt_date != today:
+                        continue
+                    
+                    # Count entry signals (not exits)
+                    if evt.get("type") in {"order_submitted", "bracket_set"}:
+                        if str(evt.get("symbol", "")).upper() == sym:
+                            if str(evt.get("side", "")).upper() == "BUY":
+                                count += 1
+                except Exception:
+                    continue
+        
+        return count
+        
+    except Exception:
+        return 0
+
+
