@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from dt_backend.core.data_pipeline_dt import _read_rolling
+from dt_backend.core.data_pipeline_dt import _read_rolling, save_rolling
 from dt_backend.core.logger_dt import log
 from dt_backend.core.time_override_dt import now_utc as _now_utc_override
 from dt_backend.services.dt_truth_store import append_trade_event, bump_metric
@@ -714,9 +714,37 @@ def execute_from_policy(
                             meta=meta,
                             confidence=float(conf),
                         )
+                        
+                        # Update position_dt in rolling cache so policy sees the position
+                        try:
+                            # Determine signed qty: positive for LONG, negative for SHORT
+                            position_qty = float(filled_qty) if side == "BUY" else -float(filled_qty)
+                            position_side = "LONG" if side == "BUY" else "SHORT"
+                            
+                            node["position_dt"] = {
+                                "qty": position_qty,
+                                "avg_price": float(fill_price),
+                                "side": position_side,
+                                "ts": ts_now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                            }
+                            rolling[sym] = node
+                        except Exception:
+                            pass
                     else:
                         if side == "SELL" and (pos is not None and getattr(pos, "qty", 0.0) > 0) and filled_qty > 0:
                             record_exit(sym, reason="manual_sell", now_utc=ts_now)
+                            
+                            # Clear position_dt after exit
+                            try:
+                                node["position_dt"] = {
+                                    "qty": 0.0,
+                                    "avg_price": 0.0,
+                                    "side": "FLAT",
+                                    "ts": ts_now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                                }
+                                rolling[sym] = node
+                            except Exception:
+                                pass
             except Exception:
                 pass
         except Exception as e:
@@ -747,5 +775,13 @@ def execute_from_policy(
             "eod_flattens": int(exit_summary.eod_flattens),
         },
     }
+    
+    # Save rolling cache with updated position_dt fields for next cycle
+    try:
+        save_rolling(rolling)
+        log("[dt_exec] 💾 saved rolling cache with position updates")
+    except Exception as e:
+        log(f"[dt_exec] ⚠️ failed to save rolling cache: {e}")
+    
     log(f"[dt_exec] ✅ execute_from_policy done: {out}")
     return out

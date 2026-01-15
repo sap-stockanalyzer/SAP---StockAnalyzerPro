@@ -38,6 +38,12 @@ from dt_backend.tuning.dt_profile_loader import load_dt_profile
 
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
 
+# Import broker API for position sync (late import to avoid circular deps)
+try:
+    from dt_backend.engines.broker_api import get_positions
+except ImportError:
+    get_positions = None  # type: ignore
+
 
 class ExecConfig:
     """Tunable knobs for execution behavior."""
@@ -246,6 +252,70 @@ def _cooldown_active(
     return delta.total_seconds() < cfg.cooldown_minutes * 60
 
 
+def _attach_positions_to_rolling(rolling: Dict[str, Any], *, now_utc: Optional[datetime] = None) -> int:
+    """Read broker positions and attach them to rolling nodes as position_dt.
+    
+    This enables the policy engine's _has_position() checks to see current positions
+    and avoid redundant entry orders.
+    
+    Returns the number of positions attached.
+    """
+    if get_positions is None:
+        return 0
+    
+    try:
+        positions = get_positions()
+        if not isinstance(positions, dict):
+            return 0
+        
+        now_utc = now_utc or datetime.now(timezone.utc)
+        ts = now_utc.isoformat().replace("+00:00", "Z")
+        
+        attached = 0
+        for sym, pos in positions.items():
+            sym = str(sym).strip().upper()
+            if not sym or sym.startswith("_"):
+                continue
+            
+            try:
+                qty = float(getattr(pos, "qty", 0.0))
+                avg_price = float(getattr(pos, "avg_price", 0.0))
+                
+                # Only attach non-zero positions
+                if qty == 0.0:
+                    continue
+                
+                # Determine side
+                if qty > 0:
+                    side = "LONG"
+                elif qty < 0:
+                    side = "SHORT"
+                else:
+                    side = "FLAT"
+                
+                # Get or create node
+                node = ensure_symbol_node(rolling, sym)
+                
+                # Write position_dt
+                node["position_dt"] = {
+                    "qty": float(qty),
+                    "avg_price": float(avg_price),
+                    "side": side,
+                    "ts": ts,
+                }
+                
+                rolling[sym] = node
+                attached += 1
+                
+            except Exception:
+                continue
+        
+        return attached
+        
+    except Exception:
+        return 0
+
+
 def _symbols_to_process(
     rolling: Dict[str, Any],
     *,
@@ -326,6 +396,14 @@ def run_execution_intraday(
         return {"symbols": 0, "updated": 0}
 
     now_utc = now_utc or datetime.now(timezone.utc)
+
+    # Attach broker positions to rolling cache so policy can see current holdings
+    try:
+        pos_attached = _attach_positions_to_rolling(rolling, now_utc=now_utc)
+        if pos_attached > 0:
+            log(f"[exec_dt] 📌 attached {pos_attached} broker positions to rolling cache")
+    except Exception as e:
+        log(f"[exec_dt] ⚠️ failed to attach positions: {e}")
 
     # Phase 4: risk mode can modestly scale sizing (keeps a single code path).
     try:
