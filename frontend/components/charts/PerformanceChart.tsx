@@ -32,7 +32,25 @@ export function PerformanceChart({
   showFooter = false,
   className,
 }: PerformanceChartProps) {
-  // Calculate trend
+  // Calculate trend - handle edge cases
+  if (data.length === 0) {
+    return (
+      <Card className={`border-white/10 bg-white/5 ${className || ""}`}>
+        <CardHeader>
+          <CardTitle className="text-lg">{title}</CardTitle>
+          {description && (
+            <CardDescription className="text-white/60">{description}</CardDescription>
+          )}
+        </CardHeader>
+        <CardContent>
+          <div className="h-[200px] w-full flex items-center justify-center text-white/60">
+            No data available
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
   const firstValue = data[0]?.value || 0;
   const lastValue = data[data.length - 1]?.value || 0;
   const percentChange = firstValue !== 0 ? ((lastValue - firstValue) / firstValue) * 100 : 0;

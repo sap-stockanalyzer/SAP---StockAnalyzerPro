@@ -231,6 +231,7 @@ function MiniPerfChart({ data }: { data: Array<{ t: string; value: number }> }) 
     },
   } satisfies ChartConfig;
 
+  // Increased height from 120px to 140px to better accommodate chart with grid lines
   return (
     <div className="h-[140px] w-full">
       <ChartContainer config={chartConfig} className="h-full w-full">
