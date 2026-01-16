@@ -839,6 +839,30 @@ def run_nightly_job(
         if summary.get("status") == "running":
             summary["status"] = "ok"
         _write_summary(summary)
+        
+        # Send alert to appropriate channel
+        try:
+            from backend.monitoring.alerting import alert_nightly, alert_error
+            
+            duration_mins = round(summary.get("duration_secs", 0) / 60, 1)
+            phases = summary.get("phases", {})
+            phases_completed = sum(1 for v in phases.values() if isinstance(v, dict) and v.get("status") in ["ok", "skipped"])
+            total_phases = len(phases)
+            
+            if summary["status"] in ["ok", "ok_with_errors"]:
+                status_emoji = "✅" if summary["status"] == "ok" else "⚠️"
+                alert_nightly(
+                    f"{status_emoji} Nightly Job Completed",
+                    f"Duration: {duration_mins} minutes\nPhases: {phases_completed}/{total_phases}",
+                    context={
+                        "Status": summary["status"],
+                        "Duration": f"{duration_mins} min",
+                        "Phases": f"{phases_completed}/{total_phases}",
+                    },
+                )
+        except Exception:
+            pass  # Don't let alert failure affect nightly job status
+        
         return summary
 
     except Exception as e:
@@ -849,6 +873,25 @@ def run_nightly_job(
         summary["finished_at"] = datetime.now(TIMEZONE).isoformat()
         summary["phases"]["_fatal"] = {"error": str(e), "traceback": tb}
         _write_summary(summary)
+        
+        # Send error alert
+        try:
+            from backend.monitoring.alerting import alert_error
+            
+            duration_mins = round(summary.get("duration_secs", 0) / 60, 1)
+            failed_phases = [k for k, v in summary.get("phases", {}).items() if isinstance(v, dict) and v.get("status") == "error"]
+            
+            alert_error(
+                "❌ Nightly Job Failed",
+                f"Failed phases: {failed_phases if failed_phases else ['Fatal crash']}\nError: {str(e)}",
+                context={
+                    "Duration": f"{duration_mins} min",
+                    "Status": "crashed",
+                },
+            )
+        except Exception:
+            pass  # Don't let alert failure affect nightly job status
+        
         return summary
 
     finally:

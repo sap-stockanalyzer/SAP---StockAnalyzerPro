@@ -1,0 +1,183 @@
+# AION Analytics - Alert System
+
+## Slack Channel Architecture
+
+| Channel | Purpose | Alert Types |
+|---------|---------|-------------|
+| **#errors-tracebacks** | Critical errors, crashes | Unhandled exceptions, circuit breakers (@channel) |
+| **#trading-alerts** | Trading system alerts | Emergency stops, risk breaches (@channel) |
+| **#day_trading** | DT-specific alerts | Cycle status, intraday trades |
+| **#swing_trading** | Swing/EOD bot alerts | EOD trades, swing positions |
+| **#nightly-logs-summary** | Nightly job status | Job completions, phase summaries |
+| **#daily-pnl** | PnL tracking | Daily/weekly PnL, equity updates |
+| **#reports** | Insights & metrics | Model metrics, regime changes |
+| **#testing** | Development only | Test alerts |
+
+## Setup
+
+1. Copy webhook URLs to `.env`:
+   ```bash
+   SLACK_WEBHOOK_ERRORS=https://hooks.slack.com/...
+   SLACK_WEBHOOK_TRADING=https://hooks.slack.com/...
+   # ... etc
+   ```
+
+2. Test all channels:
+   ```bash
+   curl -X POST http://localhost:8000/api/test-alerts
+   ```
+
+3. Check each Slack channel for test message!
+
+## Usage
+
+```python
+from backend.monitoring.alerting import (
+    alert_error,      # → #errors-tracebacks (with @channel)
+    alert_critical,   # → #trading-alerts (with @channel)
+    alert_dt,         # → #day_trading
+    alert_swing,      # → #swing_trading
+    alert_nightly,    # → #nightly-logs-summary
+    alert_pnl,        # → #daily-pnl
+    alert_report,     # → #reports
+)
+
+# Examples
+alert_error("Database Connection Failed", "Cannot connect to Redis")
+alert_dt("Trade Executed", f"BUY {symbol} @ ${price}")
+alert_pnl(f"Daily PnL: ${pnl:+.2f}", f"MTD: ${mtd:+.2f}")
+```
+
+## Alert Context
+
+Add structured context to alerts:
+
+```python
+alert_critical(
+    "High Loss Day",
+    "Daily loss exceeded threshold",
+    channel="trading",
+    context={
+        "PnL": f"${daily_pnl:.2f}",
+        "Threshold": "$500",
+        "Action": "Review positions"
+    }
+)
+```
+
+Results in Slack message with formatted fields:
+```
+🚨 High Loss Day
+Daily loss exceeded threshold
+
+PnL: $-550.23
+Threshold: $500  
+Action: Review positions
+
+⏰ 2026-01-16 15:30:00 UTC
+```
+
+## Alert Levels
+
+### Critical (Red 🚨)
+- Emergency stops
+- System crashes
+- Critical errors
+- Uses @channel mention when `mention_channel=True`
+
+### Warning (Orange ⚠️)
+- Non-critical errors
+- Risk threshold breaches
+- Service degradations
+
+### Info (Green ℹ️)
+- Trade executions
+- Job completions
+- Status updates
+- PnL reports
+
+## Rate Limiting
+
+Alerts are rate-limited to prevent spam:
+- Default: 300 seconds (5 minutes) between identical alerts
+- Configure via `ALERT_RATE_LIMIT_SECONDS` environment variable
+- Set to `0` to disable rate limiting
+
+## Integration Points
+
+### Emergency Stop
+```python
+# dt_backend/risk/emergency_stop_dt.py
+trigger_emergency_stop("market_volatility")
+# → Sends alert to #trading-alerts with @channel
+```
+
+### Nightly Job
+```python
+# backend/jobs/nightly_job.py
+# Automatically sends alerts:
+# - Success → #nightly-logs-summary
+# - Failure → #errors-tracebacks
+```
+
+### Unhandled Exceptions
+```python
+# backend/core/error_handler.py
+# Global exception handler sends all unhandled exceptions
+# → #errors-tracebacks with @channel
+```
+
+### Circuit Breaker
+```python
+from backend.core.error_handler import CircuitBreaker
+
+breaker = CircuitBreaker("external_api", failure_threshold=5, cooldown_seconds=60)
+
+if breaker.can_execute():
+    try:
+        result = external_api.call()
+        breaker.record_success()
+    except Exception:
+        breaker.record_failure()
+        # → Sends alert to #errors-tracebacks when circuit opens
+```
+
+## Troubleshooting
+
+### No alerts received
+1. Check webhook URLs in `.env`
+2. Verify Slack workspace permissions
+3. Check logs for error messages: `grep "alerting" logs/*.log`
+
+### Rate limiting too aggressive
+Adjust `ALERT_RATE_LIMIT_SECONDS` in `.env` or pass `skip_rate_limit=True`:
+```python
+alert_critical("Important", "Message", skip_rate_limit=True)
+```
+
+### Wrong channel
+Check channel parameter:
+```python
+# Correct
+alert_critical("Stop", "Trading halted", channel="trading")
+
+# Wrong - goes to default channel
+alert_critical("Stop", "Trading halted")  # channel defaults to "trading"
+```
+
+## Best Practices
+
+1. **Use appropriate channels**: Route alerts to their intended channel for better organization
+2. **Add context**: Include relevant details in the `context` parameter
+3. **Use @channel sparingly**: Only for truly critical alerts that require immediate attention
+4. **Test before deploying**: Use the test endpoint to verify all channels work
+5. **Monitor alert volume**: Too many alerts = alert fatigue
+
+## Security
+
+⚠️ **Never commit webhook URLs to version control!**
+
+- Store webhooks in `.env` (gitignored)
+- Use different webhooks for dev/staging/production
+- Rotate webhooks if compromised
+- Restrict webhook permissions in Slack
