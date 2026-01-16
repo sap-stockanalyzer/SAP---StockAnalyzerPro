@@ -211,6 +211,11 @@ class TestAlertingSystem:
     
     def test_failed_request_handling(self, mock_env):
         """Test handling of failed Slack request."""
+        # Need to reload module to pick up env vars
+        import importlib
+        import backend.monitoring.alerting as alerting_module
+        importlib.reload(alerting_module)
+        
         with patch("backend.monitoring.alerting.requests.post") as mock_post:
             mock_response = Mock()
             mock_response.status_code = 500
@@ -225,6 +230,11 @@ class TestAlertingSystem:
     
     def test_request_exception_handling(self, mock_env):
         """Test handling of request exception."""
+        # Need to reload module to pick up env vars
+        import importlib
+        import backend.monitoring.alerting as alerting_module
+        importlib.reload(alerting_module)
+        
         with patch("backend.monitoring.alerting.requests.post") as mock_post:
             mock_post.side_effect = Exception("Network error")
             
