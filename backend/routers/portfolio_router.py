@@ -20,6 +20,7 @@ from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException
 
 from backend.core.config import PATHS
+from backend.core.data_pipeline import safe_float
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
@@ -52,15 +53,6 @@ def _load_json(path: Path) -> Optional[dict]:
             return json.load(f)
     except Exception:
         return None
-
-
-def _safe_float(x: Any, default: float = 0.0) -> float:
-    """Safely convert to float."""
-    try:
-        v = float(x)
-        return v if v == v else default  # NaN check
-    except Exception:
-        return default
 
 
 def _load_bot_state(path: Path) -> Optional[dict]:
@@ -178,8 +170,8 @@ def _load_all_positions() -> List[Dict[str, Any]]:
             symbol_upper = str(symbol).upper()
             
             # Extract position details
-            entry_price = _safe_float(pos_data.get("entry") or 0.0, 0.0)
-            quantity = _safe_float(pos_data.get("qty") or 0.0, 0.0)
+            entry_price = safe_float(pos_data.get("entry") or 0.0)
+            quantity = safe_float(pos_data.get("qty") or 0.0)
             
             if quantity <= 0:
                 continue
