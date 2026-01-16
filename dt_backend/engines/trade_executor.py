@@ -574,6 +574,24 @@ def execute_from_policy(
                     "size": size,
                 }
             )
+            
+            # Track missed opportunity if confidence was high
+            try:
+                if conf >= 0.60:
+                    from dt_backend.ml.missed_opportunity_tracker import track_missed_signal
+                    
+                    signal = {
+                        "symbol": sym,
+                        "label": side,
+                        "confidence": conf,
+                        "price": node.get("bars_1m", {}).get("close", 0.0),
+                        "timestamp": _now_utc_override().isoformat(),
+                        "lgb_prob": conf,
+                    }
+                    track_missed_signal(signal, f"conf<{cfg.min_confidence}")
+            except Exception:
+                pass
+            
             continue
 
         positions_now = broker.get_positions()

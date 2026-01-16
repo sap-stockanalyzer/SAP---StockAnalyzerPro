@@ -152,6 +152,15 @@ def run_dt_scheduler(
                         log(f"[dt_scheduler] market closed; running EOD cleanup for {today} …")
                         res = run_end_of_day_cleanup(clear_global_blocks=True)
                         log(f"[dt_scheduler] EOD cleanup result: {res}")
+                        
+                        # Run post-market learning analysis
+                        try:
+                            from dt_backend.jobs.post_market_analysis import run_post_market_analysis
+                            log(f"[dt_scheduler] running post-market analysis for {today} …")
+                            pm_res = run_post_market_analysis()
+                            log(f"[dt_scheduler] post-market analysis result: {pm_res.get('status', 'unknown')}")
+                        except Exception as e:
+                            warn(f"[dt_scheduler] post-market analysis failed: {e}\n{traceback.format_exc()}")
 
                         # Run DT nightly immediately after close (+1s), idempotent per session.
                         try:
