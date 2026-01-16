@@ -179,6 +179,35 @@ async def health():
         "enable_scheduler": ENABLE_SCHEDULER,
     }
 
+
+@app.post("/api/test-alerts")
+def test_all_alerts():
+    """Test all Slack channels."""
+    from backend.monitoring.alerting import (
+        alert_error,
+        alert_critical,
+        alert_dt,
+        alert_swing,
+        alert_nightly,
+        alert_pnl,
+        alert_report,
+    )
+    
+    # Test each channel
+    alert_error("Test: Error Alert", "Testing #errors-tracebacks")
+    alert_critical("Test: Trading Alert", "Testing #trading-alerts", channel="trading")
+    alert_dt("Test: DT Alert", "Testing #day_trading")
+    alert_swing("Test: Swing Alert", "Testing #swing_trading")
+    alert_nightly("Test: Nightly Alert", "Testing #nightly-logs-summary")
+    alert_pnl("Test: PnL Alert", "Testing #daily-pnl")
+    alert_report("Test: Report Alert", "Testing #reports")
+    
+    return {
+        "status": "ok",
+        "message": "Test alerts sent to all configured channels",
+        "channels": ["errors", "trading", "dt", "swing", "nightly", "pnl", "reports"],
+    }
+
 # -------------------------------------------------
 # Background Threads
 # -------------------------------------------------

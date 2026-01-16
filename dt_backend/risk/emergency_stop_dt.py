@@ -75,6 +75,19 @@ def trigger_emergency_stop(reason: str = "manual"):
             stop_file.chmod(0o666)
         except Exception:
             pass  # Not critical if chmod fails
+        
+        # Send alert to #trading-alerts
+        try:
+            from backend.monitoring.alerting import alert_critical
+            alert_critical(
+                "🚨 EMERGENCY STOP TRIGGERED",
+                f"Trading has been halted.\n\nReason: {reason}",
+                channel="trading",
+                mention_channel=True,
+                context={"System": "Day Trading", "Action": "Review logs and clear stop file"},
+            )
+        except Exception:
+            pass  # Don't let alert failure prevent emergency stop
             
     except Exception as e:
         raise IOError(f"Failed to create emergency stop file: {e}")
