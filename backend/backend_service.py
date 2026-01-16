@@ -63,6 +63,7 @@ from backend.routers.intraday_stream_router import router as stream_router
 from backend.routers.system_run_router import router as system_run_router
 from backend.routers.eod_bots_router import router as eod_bots_router
 from backend.routers.intraday_tape_router import router as intraday_tape_router
+from backend.routers.portfolio_router import router as portfolio_router
 
 from backend.admin.routes import router as admin_router
 from backend.admin.admin_tools_router import router as admin_tools_router
@@ -130,6 +131,7 @@ ROUTERS = [
     replay_router,
     swing_replay_router,
     dashboard_router,
+    portfolio_router,
     intraday_logs_router,
     stream_router,
     system_run_router,

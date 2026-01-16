@@ -19,8 +19,10 @@ Safe behaviors:
 from __future__ import annotations
 
 import json
+import gzip
 from pathlib import Path
-from typing import Dict, Any, List
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional
 
 from fastapi import APIRouter, HTTPException
 
@@ -38,6 +40,9 @@ ACCURACY_LATEST = ACCURACY_DIR / "accuracy_latest.json"
 
 INSIGHTS_DIR = Path(PATHS.get("insights", Path("ml_data") / "insights"))
 PRED_LATEST = INSIGHTS_DIR / "predictions_latest.json"
+
+STOCK_CACHE = Path(PATHS.get("stock_cache", "data_cache"))
+BOT_STATE_DIR = STOCK_CACHE / "master" / "bot"
 
 
 # ---------------------------------------------------------------------
@@ -86,6 +91,107 @@ def _extract_accuracy_30d(latest: Dict[str, Any]) -> float:
     return sum(vals) / sum(weights)
 
 
+def _load_gz_dict(path: Path) -> Optional[dict]:
+    """Load a gzipped JSON file."""
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _load_bot_state(path: Path) -> Optional[dict]:
+    """Load bot state from either .gz or plain .json."""
+    if not path.exists():
+        return None
+    if path.suffix.endswith(".gz"):
+        return _load_gz_dict(path)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _calculate_execution_accuracy() -> Optional[float]:
+    """
+    Calculate execution accuracy from closed positions in bot states.
+    
+    Returns:
+        Win rate (0.0 to 1.0) or None if insufficient data
+    """
+    try:
+        if not BOT_STATE_DIR.exists():
+            return None
+        
+        # Find all bot state files
+        state_files = list(BOT_STATE_DIR.glob("rolling_*.json.gz")) + list(BOT_STATE_DIR.glob("rolling_*.json"))
+        
+        all_closed_positions = []
+        cutoff_date = datetime.now() - timedelta(days=30)
+        
+        for state_file in state_files:
+            state = _load_bot_state(state_file)
+            if not isinstance(state, dict):
+                continue
+            
+            closed_positions = state.get("closed_positions") or []
+            if isinstance(closed_positions, list):
+                all_closed_positions.extend(closed_positions)
+        
+        # Filter to last 30 days and count wins
+        wins = 0
+        total = 0
+        
+        for pos in all_closed_positions:
+            if not isinstance(pos, dict):
+                continue
+            
+            # Check exit date
+            exit_date_str = pos.get("exit_date") or pos.get("close_date") or ""
+            if exit_date_str:
+                try:
+                    exit_date = datetime.fromisoformat(exit_date_str.replace("Z", "+00:00"))
+                    if exit_date < cutoff_date:
+                        continue
+                except Exception:
+                    pass
+            
+            # Determine if position was a win
+            pnl = pos.get("pnl")
+            entry_price = pos.get("entry_price") or pos.get("avg_entry_price")
+            exit_price = pos.get("exit_price") or pos.get("close_price")
+            
+            # Try using pnl first
+            if pnl is not None:
+                try:
+                    if float(pnl) > 0:
+                        wins += 1
+                    total += 1
+                    continue
+                except Exception:
+                    pass
+            
+            # Fall back to comparing prices
+            if entry_price is not None and exit_price is not None:
+                try:
+                    if float(exit_price) > float(entry_price):
+                        wins += 1
+                    total += 1
+                except Exception:
+                    pass
+        
+        # Require at least 10 trades for meaningful accuracy
+        if total < 10:
+            return None
+        
+        return wins / total if total > 0 else None
+        
+    except Exception as e:
+        log(f"[dashboard_router] ⚠️ Failed calculating execution accuracy: {e}")
+        return None
+
+
 def _load_ranked_predictions(horizon: str, limit: int = 50) -> List[Dict[str, Any]]:
     """
     Returns ranked predictions for a given horizon.
@@ -116,23 +222,44 @@ def _load_ranked_predictions(horizon: str, limit: int = 50) -> List[Dict[str, An
 @router.get("/metrics")
 def dashboard_metrics() -> Dict[str, Any]:
     """
-    Dashboard metrics summary.
+    Dashboard metrics summary with REAL trading accuracy.
 
     Response:
       {
-        "accuracy_30d": 0.57,
-        "updated_at": "2025-12-15T03:12:44Z"
+        "accuracy_30d": 0.62,  # Combined prediction + execution accuracy
+        "model_accuracy": 0.57,  # Model prediction accuracy only
+        "execution_accuracy": 0.68,  # Trade execution win rate
+        "updated_at": "2026-01-15T12:00:00Z"
       }
     """
     latest = _read_json(ACCURACY_LATEST)
 
-    acc_30d = _extract_accuracy_30d(latest)
+    # Get model accuracy
+    model_acc = _extract_accuracy_30d(latest)
     updated = latest.get("updated_at")
 
-    return {
-        "accuracy_30d": round(float(acc_30d), 4),
+    # Get execution accuracy from closed trades
+    exec_acc = _calculate_execution_accuracy()
+    
+    # Calculate combined accuracy
+    # Weight execution higher (60%) since it's real money
+    if exec_acc is not None:
+        combined_acc = (model_acc * 0.4) + (exec_acc * 0.6)
+    else:
+        # If no execution data, use model accuracy only
+        combined_acc = model_acc
+
+    result = {
+        "accuracy_30d": round(float(combined_acc), 4),
+        "model_accuracy": round(float(model_acc), 4),
         "updated_at": updated,
     }
+    
+    # Only include execution_accuracy if we have data
+    if exec_acc is not None:
+        result["execution_accuracy"] = round(float(exec_acc), 4)
+    
+    return result
 
 
 @router.get("/top/{horizon}")
