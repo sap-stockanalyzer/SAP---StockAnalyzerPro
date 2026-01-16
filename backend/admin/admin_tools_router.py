@@ -71,9 +71,14 @@ LOCK_FILES: list[Path] = [
 # Logs
 # --------------------------------------------------
 
+def get_live_logs() -> dict:
+    """Helper function to get logs without auth dependency for SSE."""
+    return {"lines": tail_lines(300)}
+
+
 @router.get("/logs")
 def get_logs(_: None = Depends(admin_required)):
-    return {"lines": tail_lines(300)}
+    return get_live_logs()
 
 
 # --------------------------------------------------

@@ -31,6 +31,8 @@ except Exception:
     # tolerate older config import shape
     from backend.config import PATHS, TIMEZONE  # type: ignore
 
+from backend.core.cache_utils import timed_lru_cache
+
 
 router = APIRouter(prefix="/api/bots", tags=["bots-page"])
 
@@ -251,10 +253,12 @@ def _load_intraday_fills_best_effort(limit: int = 50) -> Dict[str, Any]:
 # -------------------------
 
 @router.get("/page")
+@timed_lru_cache(seconds=5, maxsize=10)
 async def bots_page_bundle() -> Dict[str, Any]:
     """
     Single payload that contains everything the Bots page needs.
     Best-effort: sub-call failures become error objects instead of 500'ing the whole response.
+    Cached for 5 seconds to reduce file reads and computation.
     """
     out: Dict[str, Any] = {
         "as_of": datetime.now(TIMEZONE).isoformat(),

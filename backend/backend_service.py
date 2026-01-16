@@ -25,6 +25,7 @@ from datetime import datetime
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -67,6 +68,9 @@ from backend.routers.portfolio_router import router as portfolio_router
 
 from backend.admin.routes import router as admin_router
 from backend.admin.admin_tools_router import router as admin_tools_router
+
+# Events router for SSE
+from backend.routers.events_router import router as events_router
 
 # Optional cloud sync
 try:
@@ -112,6 +116,9 @@ app.add_middleware(
     allow_credentials=True,
 )
 
+# Add gzip compression for responses > 1KB
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
 # -------------------------------------------------
 # Mount Routers
 # -------------------------------------------------
@@ -139,6 +146,7 @@ ROUTERS = [
     admin_tools_router,
     eod_bots_router,
     intraday_tape_router,
+    events_router,  # SSE endpoints
 ]
 
 for r in ROUTERS:

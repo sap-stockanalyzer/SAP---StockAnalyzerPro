@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useSSE } from "@/hooks/useSSE";
 
 /* -------------------------------------------------- */
 /* Backend base (always via Next.js proxy)            */
@@ -65,6 +66,26 @@ export default function AdminPage() {
 
   const [liveLog, setLiveLog] = useState<string>("");
   const logRef = useRef<HTMLPreElement | null>(null);
+
+  const [useSSELogs, setUseSSELogs] = useState(true);
+
+  // SSE connection for admin logs (note: no auth token in SSE URL - SSE endpoints are public read)
+  const { data: sseLogsData, isConnected: logsConnected } = useSSE<{ lines: string[] | string }>({
+    url: "/api/backend/events/admin/logs",
+    enabled: !!token && useSSELogs,
+    onData: (data) => {
+      const lines = data?.lines;
+      if (Array.isArray(lines)) {
+        setLiveLog(lines.join(""));
+      } else if (typeof lines === "string") {
+        setLiveLog(lines);
+      }
+    },
+    onError: () => {
+      // Fallback to polling on SSE error
+      setUseSSELogs(false);
+    },
+  });
 
   /* ---------------- Smooth Progress ---------------- */
 
@@ -245,12 +266,13 @@ export default function AdminPage() {
     }
   }
 
+  // Fallback polling when SSE is disabled
   useEffect(() => {
-    if (!token) return;
+    if (!token || useSSELogs) return;
     fetchLiveLog();
     const t = setInterval(fetchLiveLog, 2000);
     return () => clearInterval(t);
-  }, [token]);
+  }, [token, useSSELogs]);
 
   useEffect(() => {
     if (logRef.current) {
@@ -493,7 +515,15 @@ export default function AdminPage() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-7xl mx-auto">
         {/* Live Log */}
         <div className="md:col-span-3 bg-black rounded-xl border border-gray-800 p-4">
-          <h3 className="mb-2 text-sm text-gray-300">Live Backend Log</h3>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm text-gray-300">Live Backend Log</h3>
+            {useSSELogs && logsConnected && (
+              <span className="text-xs text-green-400">● SSE Connected</span>
+            )}
+            {!useSSELogs && (
+              <span className="text-xs text-yellow-400">● Polling</span>
+            )}
+          </div>
           <pre
             ref={logRef}
             className="h-[260px] overflow-y-auto text-xs text-green-400 bg-black"

@@ -25,6 +25,8 @@ except Exception:  # fallback
 from dt_backend.core.data_pipeline_dt import _read_rolling
 from dt_backend.core.config_dt import DT_PATHS  # type: ignore
 
+from backend.core.cache_utils import timed_lru_cache
+
 
 def _load_rolling() -> Dict[str, Any]:
     """Best-effort load of intraday rolling cache."""
@@ -124,12 +126,14 @@ def get_top_signals(
     return [v for _, v in rows[:limit]]
 
 
+@timed_lru_cache(seconds=5, maxsize=10)
 def get_intraday_snapshot(limit: int = 50) -> Dict[str, Any]:
     """
     Quick dashboard snapshot:
         • timestamp
         • top BUY signals
         • top SELL signals
+    Cached for 5 seconds to reduce computation.
     """
     now = datetime.now(timezone.utc).isoformat()
     buys = get_top_signals("BUY", limit=limit)

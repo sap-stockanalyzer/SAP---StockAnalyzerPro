@@ -1,11 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, memo } from "react";
 import Link from "next/link";
 
 import { Activity, Clock, DollarSign, Shield, SlidersHorizontal, RefreshCw, Settings } from "lucide-react";
 
+import { useSSE } from "@/hooks/useSSE";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -811,10 +812,26 @@ export default function BotsPage() {
   const [err, setErr] = useState<string | null>(null);
 
   const [live, setLive] = useState(true);
+  const [useSSEMode, setUseSSEMode] = useState(true); // Toggle between SSE and polling
   const [pollMs, setPollMs] = useState(5000);
 
   const inFlightRef = useRef(false);
   const apiPrefixRef = useRef<string>("/api/backend"); // we’ll auto-detect
+
+  // SSE connection for real-time updates
+  const { data: sseData, error: sseError, isConnected } = useSSE<BotsPageBundle>({
+    url: "/api/backend/events/bots",
+    enabled: live && useSSEMode,
+    onData: (data) => {
+      setBundle(data);
+      setLoading(false);
+      setErr(null);
+    },
+    onError: () => {
+      // Fallback to polling on SSE error
+      setUseSSEMode(false);
+    },
+  });
 
   async function refresh() {
     if (inFlightRef.current) return;
@@ -841,23 +858,27 @@ export default function BotsPage() {
     }
   }
 
+  // Initial load with fallback
   useEffect(() => {
-    refresh();
+    if (!useSSEMode) {
+      refresh();
+    }
 
     const onVis = () => {
-      if (document.visibilityState === "visible") refresh();
+      if (document.visibilityState === "visible" && !useSSEMode) refresh();
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [useSSEMode]);
 
+  // Fallback polling when SSE is disabled
   useEffect(() => {
-    if (!live) return;
+    if (!live || useSSEMode) return;
     const t = setInterval(refresh, pollMs);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live, pollMs]);
+  }, [live, pollMs, useSSEMode]);
 
   const eodStatus: EodStatusResponse | null = (bundle?.swing?.status && !bundle?.swing?.status?.error)
     ? (bundle?.swing?.status as any)
@@ -961,6 +982,8 @@ export default function BotsPage() {
             <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
               <Switch checked={live} onCheckedChange={setLive} />
               <div className="text-xs text-white/70">Live</div>
+              {useSSEMode && isConnected && <Badge variant="outline" className="text-xs">SSE</Badge>}
+              {!useSSEMode && <Badge variant="outline" className="text-xs">Polling</Badge>}
               <Separator orientation="vertical" className="mx-2 h-5 bg-white/10" />
               <Button size="sm" variant={pollMs === 2000 ? "default" : "outline"} onClick={() => setPollMs(2000)}>
                 2s
