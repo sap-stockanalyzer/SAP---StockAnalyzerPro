@@ -22,12 +22,21 @@
    # ... etc
    ```
 
-2. Test all channels:
+2. Configure alert settings (optional):
+   ```bash
+   # Rate limiting: seconds between identical alerts (default: 300)
+   ALERT_RATE_LIMIT_SECONDS=300
+   
+   # Slack request timeout in seconds (default: 5)
+   SLACK_TIMEOUT_SECONDS=5
+   ```
+
+3. Test all channels:
    ```bash
    curl -X POST http://localhost:8000/api/test-alerts
    ```
 
-3. Check each Slack channel for test message!
+4. Check each Slack channel for test message!
 
 ## Usage
 
@@ -141,6 +150,30 @@ if breaker.can_execute():
         breaker.record_failure()
         # → Sends alert to #errors-tracebacks when circuit opens
 ```
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SLACK_WEBHOOK_ERRORS` | - | Webhook URL for #errors-tracebacks |
+| `SLACK_WEBHOOK_TRADING` | - | Webhook URL for #trading-alerts |
+| `SLACK_WEBHOOK_DT` | - | Webhook URL for #day_trading |
+| `SLACK_WEBHOOK_SWING` | - | Webhook URL for #swing_trading |
+| `SLACK_WEBHOOK_NIGHTLY` | - | Webhook URL for #nightly-logs-summary |
+| `SLACK_WEBHOOK_PNL` | - | Webhook URL for #daily-pnl |
+| `SLACK_WEBHOOK_REPORTS` | - | Webhook URL for #reports |
+| `SLACK_WEBHOOK_TESTING` | - | Webhook URL for #testing |
+| `ALERT_RATE_LIMIT_SECONDS` | 300 | Seconds between identical alerts (0 = no limit) |
+| `SLACK_TIMEOUT_SECONDS` | 5 | HTTP timeout for Slack API calls |
+
+### Performance Notes
+
+- **Timeout**: Default 5-second timeout prevents blocking in high-throughput scenarios
+- **Rate Limiting**: Prevents alert spam; identical alerts deduplicated within window
+- **Non-Blocking**: Failed alerts don't crash application, just log errors
+- **Graceful Degradation**: If webhook not configured, alert skipped with log message
 
 ## Troubleshooting
 
