@@ -273,6 +273,29 @@ def record_exit(symbol: str, *, reason: str, now_utc: Optional[datetime] = None)
         st[sym]["last_exit_ts"] = _utc_iso(now_utc)
         st[sym]["last_exit_reason"] = str(reason)[:120]
         write_positions_state(st)
+        
+        # Trigger trade outcome analysis
+        try:
+            from dt_backend.ml.trade_outcome_analyzer import analyze_trade_outcome
+            
+            # Build trade dict for analysis
+            trade_dict = {
+                "type": "exit",
+                "symbol": sym,
+                "side": st[sym].get("side", "BUY"),
+                "price": st[sym].get("entry_price", 0.0),  # Would need exit price
+                "entry_price": st[sym].get("entry_price", 0.0),
+                "entry_timestamp": st[sym].get("entry_ts", ""),
+                "timestamp": st[sym].get("last_exit_ts", ""),
+                "exit_reason": reason,
+                "confidence": st[sym].get("confidence", 0.5),
+                "qty": st[sym].get("qty", 0.0),
+            }
+            
+            analyze_trade_outcome(trade_dict)
+        except Exception:
+            # Don't fail the exit if analysis fails
+            pass
 
 
 def recent_exit_info(symbol: str) -> Tuple[Optional[datetime], str]:

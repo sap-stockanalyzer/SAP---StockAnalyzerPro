@@ -128,3 +128,212 @@ def update_dt_brain_from_rolling(rolling: Dict[str, Any]) -> Tuple[Dict[str, Any
     write_dt_brain(brain)
     summary = {"status": "ok", "audited": int(audited), "fills": int(fills), "brain_path": str(_brain_path())}
     return brain, summary
+
+
+# ============================================================
+#  DT BRAIN KNOB ADJUSTER (Phase 1 Continuous Learning)
+# ============================================================
+
+import numpy as np
+from typing import List, Tuple
+
+# Knob configuration with defaults and valid ranges
+KNOB_CONFIG = {
+    "DT_EXEC_MIN_CONF": {"default": 0.25, "range": [0.15, 0.40]},
+    "DT_MAX_POSITIONS": {"default": 3, "range": [1, 6]},
+    "DT_STOP_LOSS_PCT": {"default": 0.02, "range": [0.01, 0.04]},
+    "DT_TAKE_PROFIT_PCT": {"default": 0.04, "range": [0.02, 0.08]},
+    "DT_POSITION_SIZE_BASE_USD": {"default": 1000, "range": [500, 2000]},
+    "DT_MAX_ORDERS_PER_CYCLE": {"default": 3, "range": [1, 5]},
+    "DT_MIN_TRADE_GAP_MINUTES": {"default": 15, "range": [5, 30]},
+}
+
+
+class DTBrain:
+    """Day trading brain - learns from performance and adjusts knobs."""
+    
+    def __init__(self, brain_path: Path = None):
+        if brain_path is None:
+            brain_path = _brain_path().parent
+        self.brain_path = Path(brain_path)
+        self.brain_file = _brain_path()
+        self.adjustments_log = self.brain_path / "knob_adjustments.jsonl"
+    
+    def update(self) -> Dict[str, Any]:
+        """Main update cycle - analyze performance and adjust knobs."""
+        try:
+            perf = self._get_recent_performance()
+            regime = self._get_current_regime()
+            
+            adjustments = []
+            
+            # === CONFIDENCE THRESHOLD ===
+            win_rate = perf.get("win_rate", 0.0)
+            avg_confidence = perf.get("avg_confidence", 0.0)
+            
+            if win_rate >= 0.60 and avg_confidence >= 0.70:
+                adjustments.append(("DT_EXEC_MIN_CONF", 0.22, "high_accuracy"))
+            elif win_rate < 0.45:
+                adjustments.append(("DT_EXEC_MIN_CONF", 0.32, "low_win_rate"))
+            
+            # === MAX POSITIONS ===
+            sharpe = perf.get("sharpe_ratio", 0.0)
+            profit_factor = perf.get("profit_factor", 0.0)
+            drawdown = perf.get("drawdown_pct", 0.0)
+            
+            if sharpe > 2.0 and profit_factor > 1.5:
+                adjustments.append(("DT_MAX_POSITIONS", 5, "strong_performance"))
+            elif drawdown > 5.0:
+                adjustments.append(("DT_MAX_POSITIONS", 2, "drawdown"))
+            
+            # === STOP LOSS ===
+            avg_loss = perf.get("avg_loss", 0.0)
+            
+            if avg_loss > -0.015:
+                adjustments.append(("DT_STOP_LOSS_PCT", 0.015, "tight_losses"))
+            elif avg_loss < -0.03:
+                adjustments.append(("DT_STOP_LOSS_PCT", 0.025, "wide_losses"))
+            
+            # === TAKE PROFIT ===
+            avg_win_hold = perf.get("avg_win_hold_time", 0)
+            
+            if avg_win_hold > 60:
+                adjustments.append(("DT_TAKE_PROFIT_PCT", 0.06, "runners"))
+            elif avg_win_hold < 20:
+                adjustments.append(("DT_TAKE_PROFIT_PCT", 0.025, "scalps"))
+            
+            # === POSITION SIZING ===
+            consecutive_wins = perf.get("consecutive_wins", 0)
+            consecutive_losses = perf.get("consecutive_losses", 0)
+            
+            if consecutive_wins >= 5:
+                adjustments.append(("DT_POSITION_SIZE_BASE_USD", 1500, "hot_streak"))
+            elif consecutive_losses >= 3:
+                adjustments.append(("DT_POSITION_SIZE_BASE_USD", 700, "cold_streak"))
+            
+            # === REGIME ADJUSTMENTS ===
+            if regime == "volatile":
+                adjustments.append(("DT_STOP_LOSS_PCT", 0.03, "volatile_regime"))
+                adjustments.append(("DT_MAX_POSITIONS", 2, "volatile_regime"))
+            elif regime == "range":
+                adjustments.append(("DT_STOP_LOSS_PCT", 0.015, "range_regime"))
+                adjustments.append(("DT_MAX_ORDERS_PER_CYCLE", 4, "range_regime"))
+            
+            # Apply adjustments with EMA smoothing
+            applied = []
+            for knob, target, reason in adjustments:
+                if self._apply_adjustment(knob, target, reason):
+                    applied.append((knob, target, reason))
+            
+            self._save_brain_knobs()
+            
+            return {
+                "status": "success",
+                "adjustments_applied": len(applied),
+                "adjustments": applied,
+                "performance": perf,
+            }
+            
+        except Exception as e:
+            log(f"[dt_brain] ⚠️ Error in update: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+            }
+    
+    def _get_recent_performance(self) -> Dict[str, Any]:
+        """Get recent performance metrics."""
+        try:
+            from dt_backend.ml.trade_outcome_analyzer import TradeOutcomeAnalyzer
+            analyzer = TradeOutcomeAnalyzer()
+            return analyzer.get_performance_window(days=7)
+        except Exception as e:
+            log(f"[dt_brain] ⚠️ Error getting performance: {e}")
+            return {}
+    
+    def _get_current_regime(self) -> str:
+        """Get current market regime."""
+        try:
+            brain = read_dt_brain()
+            return brain.get("_meta", {}).get("regime", "unknown")
+        except Exception:
+            return "unknown"
+    
+    def _get_current_value(self, knob: str) -> float:
+        """Get current knob value from brain."""
+        try:
+            brain = read_dt_brain()
+            knobs = brain.get("knobs", {})
+            config = KNOB_CONFIG.get(knob, {})
+            return float(knobs.get(knob, config.get("default", 0.0)))
+        except Exception:
+            return KNOB_CONFIG.get(knob, {}).get("default", 0.0)
+    
+    def _apply_adjustment(self, knob: str, target: float, reason: str) -> bool:
+        """Apply knob adjustment with EMA smoothing (20% per update)."""
+        try:
+            current = self._get_current_value(knob)
+            config = KNOB_CONFIG.get(knob, {})
+            
+            if not config:
+                return False
+            
+            # EMA: 80% old + 20% target
+            new_value = 0.8 * current + 0.2 * target
+            min_val, max_val = config["range"]
+            new_value = float(np.clip(new_value, min_val, max_val))
+            
+            # Only apply if change is significant
+            if abs(new_value - current) > 0.01:
+                log(f"[dt_brain] 🧠 {knob}: {current:.3f} → {new_value:.3f} ({reason})")
+                self._set_knob(knob, new_value)
+                self._log_adjustment(knob, current, new_value, reason)
+                return True
+            
+            return False
+            
+        except Exception as e:
+            log(f"[dt_brain] ⚠️ Error applying adjustment: {e}")
+            return False
+    
+    def _set_knob(self, knob: str, value: float) -> None:
+        """Set knob value in brain."""
+        try:
+            brain = read_dt_brain()
+            brain.setdefault("knobs", {})
+            brain["knobs"][knob] = float(value)
+            write_dt_brain(brain)
+        except Exception as e:
+            log(f"[dt_brain] ⚠️ Error setting knob: {e}")
+    
+    def _save_brain_knobs(self) -> None:
+        """Ensure knobs are persisted."""
+        # Already saved in _set_knob
+        pass
+    
+    def _log_adjustment(self, knob: str, old_val: float, new_val: float, reason: str) -> None:
+        """Log knob adjustment to file."""
+        try:
+            record = {
+                "timestamp": _utc_now_iso(),
+                "knob": knob,
+                "old_value": old_val,
+                "new_value": new_val,
+                "reason": reason,
+            }
+            
+            with open(self.adjustments_log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                
+        except Exception as e:
+            log(f"[dt_brain] ⚠️ Error logging adjustment: {e}")
+
+
+def update_dt_brain() -> Dict[str, Any]:
+    """Entry point for post-market brain update."""
+    try:
+        brain = DTBrain()
+        return brain.update()
+    except Exception as e:
+        log(f"[dt_brain] ⚠️ Error in update_dt_brain: {e}")
+        return {"status": "error", "error": str(e)}

@@ -426,6 +426,9 @@ try:
         "dt_knob_overrides": (MLDT_ROOT / "config" / "dt_knob_overrides.json"),
         "dt_tuning_log": (MLDT_ROOT / "config" / "dt_tuning_log.jsonl"),
         "dt_knob_profiles_dir": (MLDT_ROOT / "config" / "dt_knob_profiles"),
+        
+        # Continuous learning paths
+        "learning": DA_BRAINS / "dt_learning",
     })
 except Exception:
     pass

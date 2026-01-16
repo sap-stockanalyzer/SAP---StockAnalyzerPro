@@ -82,6 +82,7 @@ def _derive_weights(metrics: Dict[str, Any]) -> EnsembleConfig:
 
 
 def run_continuous_learning_intraday() -> None:
+    """Legacy ensemble weight updater - kept for backward compatibility."""
     metrics = _load_metrics()
     if metrics is None:
         return
@@ -106,3 +107,32 @@ def run_continuous_learning_intraday() -> None:
 
 if __name__ == "__main__":
     run_continuous_learning_intraday()
+
+
+# ============================================================
+#  CONTINUOUS LEARNING DT ORCHESTRATOR (Phase 1-3)
+# ============================================================
+
+def run_continuous_learning_dt():
+    """Main continuous learning orchestrator for day trading.
+    
+    Coordinates all learning components:
+    - Trade outcome analysis
+    - Missed opportunity tracking  
+    - Performance monitoring
+    - Automatic retraining
+    - DT Brain updates
+    
+    This is the primary entry point called post-market.
+    """
+    try:
+        from dt_backend.jobs.post_market_analysis import run_post_market_analysis
+        return run_post_market_analysis()
+    except Exception as e:
+        log(f"[continuous_learning_dt] ⚠️ Error: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+def run_incremental_learning_dt():
+    """Alias for compatibility with existing code."""
+    return run_continuous_learning_dt()
