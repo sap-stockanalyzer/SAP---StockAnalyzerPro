@@ -14,7 +14,8 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 
-import { LineChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 
 // -----------------------------
 // Types
@@ -223,20 +224,37 @@ function OnOffDot({
 }
 
 function MiniPerfChart({ data }: { data: Array<{ t: string; value: number }> }) {
+  const chartConfig = {
+    value: {
+      label: "Equity",
+      color: "hsl(210, 100%, 60%)",
+    },
+  } satisfies ChartConfig;
+
+  // Increased height from 120px to 140px to better accommodate chart with grid lines
   return (
-    <div className="h-[120px] w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data}>
+    <div className="h-[140px] w-full">
+      <ChartContainer config={chartConfig} className="h-full w-full">
+        <LineChart
+          data={data}
+          margin={{ left: 0, right: 0, top: 5, bottom: 5 }}
+        >
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" vertical={false} />
           <XAxis dataKey="t" hide />
           <YAxis hide domain={["auto", "auto"]} />
-          <Tooltip
-            contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }}
-            labelStyle={{ color: "hsl(var(--muted-foreground))" }}
+          <ChartTooltip
+            content={<ChartTooltipContent hideLabel />}
+            cursor={{ stroke: "rgba(255,255,255,0.2)" }}
           />
-          <Line type="monotone" dataKey="value" stroke="hsl(var(--primary, 210 100% 60%))"
- strokeWidth={2} dot={false} isAnimationActive={false} />
+          <Line
+            dataKey="value"
+            type="monotone"
+            stroke="var(--color-value)"
+            strokeWidth={2}
+            dot={false}
+          />
         </LineChart>
-      </ResponsiveContainer>
+      </ChartContainer>
     </div>
   );
 }
