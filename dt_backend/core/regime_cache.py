@@ -247,7 +247,7 @@ def list_cached_dates(start_date: Optional[str] = None, end_date: Optional[str] 
         dates = []
         for cache_file in cache_dir.glob("*.json.gz"):
             # Extract date from filename (handle double extension)
-            date_str = cache_file.name.replace(".json.gz", "")
+            date_str = cache_file.name.removesuffix(".json.gz")
             
             # Apply filters
             if start_date and date_str < start_date:
@@ -284,7 +284,7 @@ def clear_regime_cache(start_date: Optional[str] = None, end_date: Optional[str]
         deleted_count = 0
         for cache_file in cache_dir.glob("*.json.gz"):
             # Extract date from filename (handle double extension)
-            date_str = cache_file.name.replace(".json.gz", "")
+            date_str = cache_file.name.removesuffix(".json.gz")
             
             # Apply filters
             if start_date and date_str < start_date:
