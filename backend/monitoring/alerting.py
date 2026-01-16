@@ -43,6 +43,7 @@ DEFAULT_CHANNEL = "trading"
 # Rate limiting
 _last_alert_times: Dict[str, float] = {}
 RATE_LIMIT_SECONDS = int(os.getenv("ALERT_RATE_LIMIT_SECONDS", "300"))
+SLACK_TIMEOUT_SECONDS = int(os.getenv("SLACK_TIMEOUT_SECONDS", "5"))
 
 
 def _send_slack_alert(
@@ -109,7 +110,7 @@ def _send_slack_alert(
     }
     
     try:
-        response = requests.post(webhook_url, json=payload, timeout=10)
+        response = requests.post(webhook_url, json=payload, timeout=SLACK_TIMEOUT_SECONDS)
         
         if response.status_code == 200:
             log(f"[alerting] ✅ Slack alert sent to #{channel}: {title}")

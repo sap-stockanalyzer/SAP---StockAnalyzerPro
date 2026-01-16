@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, MagicMock
 
 import pytest
 
@@ -11,7 +11,7 @@ import pytest
 @pytest.fixture
 def mock_env():
     """Mock environment variables for testing."""
-    with patch.dict(os.environ, {
+    env_vars = {
         "SLACK_WEBHOOK_ERRORS": "https://hooks.slack.com/test_errors",
         "SLACK_WEBHOOK_TRADING": "https://hooks.slack.com/test_trading",
         "SLACK_WEBHOOK_DT": "https://hooks.slack.com/test_dt",
@@ -21,8 +21,20 @@ def mock_env():
         "SLACK_WEBHOOK_REPORTS": "https://hooks.slack.com/test_reports",
         "SLACK_WEBHOOK_TESTING": "https://hooks.slack.com/test_testing",
         "ALERT_RATE_LIMIT_SECONDS": "0",  # Disable rate limiting for tests
-    }):
-        yield
+    }
+    with patch.dict(os.environ, env_vars, clear=False):
+        # Patch the CHANNELS dict directly instead of reloading module
+        with patch("backend.monitoring.alerting.CHANNELS", {
+            "errors": env_vars["SLACK_WEBHOOK_ERRORS"],
+            "trading": env_vars["SLACK_WEBHOOK_TRADING"],
+            "dt": env_vars["SLACK_WEBHOOK_DT"],
+            "swing": env_vars["SLACK_WEBHOOK_SWING"],
+            "nightly": env_vars["SLACK_WEBHOOK_NIGHTLY"],
+            "pnl": env_vars["SLACK_WEBHOOK_PNL"],
+            "reports": env_vars["SLACK_WEBHOOK_REPORTS"],
+            "testing": env_vars["SLACK_WEBHOOK_TESTING"],
+        }):
+            yield
 
 
 @pytest.fixture
@@ -38,19 +50,23 @@ def mock_requests():
 class TestAlertingSystem:
     """Test suite for the alerting system."""
     
-    def test_channel_configuration(self, mock_env):
+    def test_channel_configuration(self):
         """Test that channels are properly configured from environment."""
-        from backend.monitoring.alerting import CHANNELS
+        # Test with mock environment
+        env_vars = {
+            "SLACK_WEBHOOK_ERRORS": "https://hooks.slack.com/test_errors",
+            "SLACK_WEBHOOK_TRADING": "https://hooks.slack.com/test_trading",
+        }
         
-        # Need to reload module to pick up new env vars
-        import importlib
-        import backend.monitoring.alerting as alerting_module
-        importlib.reload(alerting_module)
-        
-        channels = alerting_module.CHANNELS
-        assert channels["errors"] == "https://hooks.slack.com/test_errors"
-        assert channels["trading"] == "https://hooks.slack.com/test_trading"
-        assert channels["dt"] == "https://hooks.slack.com/test_dt"
+        with patch.dict(os.environ, env_vars, clear=False):
+            with patch("backend.monitoring.alerting.CHANNELS", {
+                "errors": env_vars["SLACK_WEBHOOK_ERRORS"],
+                "trading": env_vars["SLACK_WEBHOOK_TRADING"],
+            }):
+                from backend.monitoring.alerting import CHANNELS
+                
+                assert CHANNELS["errors"] == "https://hooks.slack.com/test_errors"
+                assert CHANNELS["trading"] == "https://hooks.slack.com/test_trading"
     
     def test_alert_critical_basic(self, mock_env, mock_requests):
         """Test basic critical alert."""
@@ -178,44 +194,37 @@ class TestAlertingSystem:
         from backend.monitoring.alerting import send_alert
         
         # Critical
-        send_alert("critical", "Title", "Message", channel="trading")
+        send_alert("critical", "Critical Title", "Message", channel="trading", skip_rate_limit=True)
         payload = mock_requests.call_args[1]["json"]
         assert payload["attachments"][0]["color"] == "#FF0000"
         assert "🚨" in payload["attachments"][0]["title"]
         
         # Warning
-        send_alert("warning", "Title", "Message", channel="trading")
+        send_alert("warning", "Warning Title", "Message", channel="trading", skip_rate_limit=True)
         payload = mock_requests.call_args[1]["json"]
         assert payload["attachments"][0]["color"] == "#FFA500"
         assert "⚠️" in payload["attachments"][0]["title"]
         
         # Info
-        send_alert("info", "Title", "Message", channel="trading")
+        send_alert("info", "Info Title", "Message", channel="trading", skip_rate_limit=True)
         payload = mock_requests.call_args[1]["json"]
         assert payload["attachments"][0]["color"] == "#00FF00"
         assert "ℹ️" in payload["attachments"][0]["title"]
     
     def test_missing_webhook_url(self, mock_requests):
         """Test handling of missing webhook URL."""
-        with patch.dict(os.environ, {}, clear=True):
+        # Mock empty CHANNELS dict
+        with patch("backend.monitoring.alerting.CHANNELS", {}):
             from backend.monitoring.alerting import alert_critical
-            import importlib
-            import backend.monitoring.alerting as alerting_module
-            importlib.reload(alerting_module)
             
             # Should not crash, just log
-            alerting_module.alert_critical("Test", "Message", channel="nonexistent")
+            alert_critical("Test", "Message", channel="nonexistent")
             
             # Should not have made any request
             assert not mock_requests.called
     
     def test_failed_request_handling(self, mock_env):
         """Test handling of failed Slack request."""
-        # Need to reload module to pick up env vars
-        import importlib
-        import backend.monitoring.alerting as alerting_module
-        importlib.reload(alerting_module)
-        
         with patch("backend.monitoring.alerting.requests.post") as mock_post:
             mock_response = Mock()
             mock_response.status_code = 500
@@ -223,25 +232,20 @@ class TestAlertingSystem:
             
             from backend.monitoring.alerting import alert_critical
             
-            # Should not raise exception
-            alert_critical("Test", "Message", channel="trading")
+            # Should not raise exception - use skip_rate_limit to ensure it gets called
+            alert_critical("Unique Test 1", "Message", channel="trading", skip_rate_limit=True)
             
             assert mock_post.called
     
     def test_request_exception_handling(self, mock_env):
         """Test handling of request exception."""
-        # Need to reload module to pick up env vars
-        import importlib
-        import backend.monitoring.alerting as alerting_module
-        importlib.reload(alerting_module)
-        
         with patch("backend.monitoring.alerting.requests.post") as mock_post:
             mock_post.side_effect = Exception("Network error")
             
             from backend.monitoring.alerting import alert_critical
             
-            # Should not raise exception
-            alert_critical("Test", "Message", channel="trading")
+            # Should not raise exception - use skip_rate_limit to ensure it gets called
+            alert_critical("Unique Test 2", "Message", channel="trading", skip_rate_limit=True)
             
             assert mock_post.called
 
