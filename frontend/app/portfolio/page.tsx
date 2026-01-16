@@ -180,6 +180,7 @@ function calculatePerformance(curve: Array<{ t: string; value: number }>): strin
   if (curve.length < 2) return "0.00";
   const first = curve[0].value;
   const last = curve[curve.length - 1].value;
+  if (first === 0) return "0.00";
   const change = ((last - first) / first) * 100;
   return change.toFixed(2);
 }

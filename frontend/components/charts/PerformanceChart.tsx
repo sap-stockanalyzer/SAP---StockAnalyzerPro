@@ -35,7 +35,7 @@ export function PerformanceChart({
   // Calculate trend
   const firstValue = data[0]?.value || 0;
   const lastValue = data[data.length - 1]?.value || 0;
-  const percentChange = ((lastValue - firstValue) / firstValue) * 100;
+  const percentChange = firstValue !== 0 ? ((lastValue - firstValue) / firstValue) * 100 : 0;
   const isPositive = percentChange >= 0;
 
   const chartConfig = {
