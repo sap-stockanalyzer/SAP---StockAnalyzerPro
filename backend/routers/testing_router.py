@@ -115,9 +115,11 @@ def test_eod_status_endpoint() -> TestResult:
     
     try:
         # Import and call EOD bots endpoint
-        from backend.routers.eod_bots_router import get_eod_status
+        from backend.routers.eod_bots_router import eod_status
+        import asyncio
         
-        result = get_eod_status()
+        # Run async function
+        result = asyncio.run(eod_status())
         response_time_ms = (time.time() - start_time) * 1000
         
         test_result = TestResult(
@@ -156,9 +158,9 @@ def test_intraday_snapshot_endpoint() -> TestResult:
     
     try:
         # Import and call intraday snapshot
-        from backend.routers.intraday_router import get_intraday_snapshot
+        from backend.routers.intraday_router import api_intraday_snapshot
         
-        result = get_intraday_snapshot(limit=10)
+        result = api_intraday_snapshot(limit=10)
         response_time_ms = (time.time() - start_time) * 1000
         
         test_result = TestResult(
@@ -197,9 +199,10 @@ def test_live_prices_endpoint() -> TestResult:
     
     try:
         # Import and call live prices
-        from backend.routers.live_prices_router import get_live_prices
+        from backend.routers.live_prices_router import api_live_prices
+        import asyncio
         
-        result = get_live_prices()
+        result = asyncio.run(api_live_prices(symbols=None, limit=10, include_intraday=False))
         response_time_ms = (time.time() - start_time) * 1000
         
         test_result = TestResult(
@@ -238,9 +241,9 @@ def test_dashboard_endpoint() -> TestResult:
     
     try:
         # Import and call dashboard metrics
-        from backend.routers.dashboard_router import get_dashboard_metrics
+        from backend.routers.dashboard_router import dashboard_metrics
         
-        result = get_dashboard_metrics()
+        result = dashboard_metrics()
         response_time_ms = (time.time() - start_time) * 1000
         
         test_result = TestResult(

@@ -33,14 +33,43 @@ export default function TestButton({ testName, endpoint, category }: TestButtonP
     setResult(null);
 
     try {
+      // Determine if this is a testing endpoint (POST) or regular endpoint (GET)
+      const isTestingEndpoint = endpoint.includes("/testing/");
+      const method = isTestingEndpoint ? "POST" : "GET";
+      
+      const startTime = performance.now();
       const response = await fetch(endpoint, {
-        method: "POST",
+        method,
         cache: "no-store",
       });
+      const endTime = performance.now();
+      const responseTimeMs = endTime - startTime;
 
-      const data = await response.json();
-      setResult(data);
-      setState(data.status === "pass" ? "pass" : "fail");
+      // For testing endpoints, the response is already a TestResult
+      if (isTestingEndpoint) {
+        const data = await response.json();
+        setResult(data);
+        setState(data.status === "pass" ? "pass" : "fail");
+      } else {
+        // For regular endpoints, create a TestResult manually
+        const isSuccess = response.ok;
+        const data = await response.json().catch(() => null);
+        
+        const testResult: TestResult = {
+          test_name: testName,
+          status: isSuccess ? "pass" : "fail",
+          http_status: response.status,
+          response_time_ms: responseTimeMs,
+          timestamp: new Date().toISOString(),
+          message: isSuccess 
+            ? `${testName} endpoint responded successfully`
+            : `${testName} endpoint failed with status ${response.status}`,
+          error: !isSuccess ? `HTTP ${response.status} ${response.statusText}` : undefined,
+        };
+        
+        setResult(testResult);
+        setState(isSuccess ? "pass" : "fail");
+      }
     } catch (error: any) {
       setResult({
         test_name: testName,
