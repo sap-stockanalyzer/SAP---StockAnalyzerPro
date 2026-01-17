@@ -15,7 +15,7 @@ Set your backend URLs:
 ```bash
 cp .env.example .env.local
 # Edit the following variables:
-# - BACKEND_URL (main backend, port 8001)
+# - BACKEND_URL (main backend, port 8000)
 # - DT_BACKEND_URL (DT backend, port 8010)
 # - NEXT_PUBLIC_BACKEND_URL (client-side fallback)
 # - NEXT_PUBLIC_DT_BACKEND_URL (client-side fallback)
@@ -26,12 +26,12 @@ cp .env.example .env.local
 The frontend includes Next.js API routes that proxy requests to backend services:
 
 ### `/api/backend/[...path]`
-Forwards requests to the main backend (EOD/Nightly) running on port 8001.
+Forwards requests to the main backend (EOD/Nightly) running on port 8000.
 
 **Path Transformation:**
-- `/api/backend/bots/page` → `http://backend:8001/api/bots/page`
-- `/api/backend/dashboard/metrics` → `http://backend:8001/dashboard/metrics` (no /api prefix)
-- `/api/backend/admin/login` → `http://backend:8001/admin/login` (no /api prefix)
+- `/api/backend/bots/page` → `http://backend:8000/api/bots/page`
+- `/api/backend/dashboard/metrics` → `http://backend:8000/dashboard/metrics` (no /api prefix)
+- `/api/backend/admin/login` → `http://backend:8000/admin/login` (no /api prefix)
 
 ### `/api/dt/[...path]`
 Forwards requests to the DT backend (Intraday) running on port 8010.
