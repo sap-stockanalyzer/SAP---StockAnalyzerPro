@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from dt_backend.api.routers import health, jobs, data
-from dt_backend.routers import learning_router, emergency_router
+from dt_backend.routers import learning_router, emergency_router, replay_extended_router
 
 def create_app() -> FastAPI:
     app = FastAPI(
@@ -34,6 +34,7 @@ def create_app() -> FastAPI:
     app.include_router(data.router, prefix="/data", tags=["data"])
     app.include_router(learning_router.router, prefix="")  # Already has /api/dt/learning prefix
     app.include_router(emergency_router.router, prefix="")  # Emergency stop endpoints
+    app.include_router(replay_extended_router.router, prefix="")  # Replay and walk-forward validation
     return app
 
 app = create_app()

@@ -57,6 +57,12 @@ except ImportError:
     alert_dt = None  # type: ignore
     alert_error = None  # type: ignore
 
+# Decision recorder for replay/analysis
+try:
+    from dt_backend.services.decision_recorder import DecisionRecorder
+except ImportError:
+    DecisionRecorder = None  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -515,6 +521,17 @@ def execute_from_policy(
         log("[dt_exec] ⚠️ rolling empty; nothing to execute")
         return {"status": "empty", "orders": 0, "dry_run": cfg.dry_run}
 
+    # Initialize decision recorder for this cycle
+    recorder = None
+    cycle_id = None
+    try:
+        if DecisionRecorder is not None:
+            recorder = DecisionRecorder()
+            cycle_id = recorder.start_cycle()
+            log(f"[dt_exec] 📝 Decision recording started for cycle {cycle_id}")
+    except Exception as e:
+        log(f"[dt_exec] ⚠️ Failed to initialize decision recorder: {e}")
+
     broker = BrokerAPI()
 
     # Replay/backtest can drive time via DT_NOW_UTC; fall back to real time.
@@ -560,6 +577,26 @@ def execute_from_policy(
     
     if max_symbols is not None:
         sym_list = sym_list[: max(0, int(max_symbols))]
+
+    # Record symbol selection decision
+    try:
+        if recorder is not None and sym_list:
+            # Build ranking dict for selected symbols
+            ranking = {}
+            for sym in sym_list:
+                node = rolling.get(sym)
+                if isinstance(node, dict):
+                    _, _, conf = _extract_intent(node)
+                    ranking[sym] = float(conf)
+            
+            recorder.record_symbol_selection(
+                selected_symbols=sym_list[:max_symbols] if max_symbols else sym_list,
+                ranking=ranking,
+                max_symbols=max_symbols,
+                total_candidates=len(sym_list),
+            )
+    except Exception as e:
+        log(f"[dt_exec] ⚠️ Failed to record symbol selection: {e}")
 
     # Iterate symbols by ranking (highest conviction first).
     for sym in sym_list:
@@ -997,6 +1034,23 @@ def execute_from_policy(
                             now_utc=ts_now,
                         )
                         log(f"[dt_exec] 🎉 Phase 3 (recorded): {exec_id} complete")
+
+                        # Record entry decision for replay
+                        try:
+                            if recorder is not None:
+                                recorder.record_entry(
+                                    symbol=sym,
+                                    side=side,
+                                    qty=float(filled_qty),
+                                    price=float(fill_price),
+                                    reason=reason or "signal",
+                                    confidence=float(conf),
+                                    bot=bot,
+                                    stop=risk.get("stop"),
+                                    take_profit=risk.get("take_profit"),
+                                )
+                        except Exception as e:
+                            log(f"[dt_exec] ⚠️ Failed to record entry decision: {e}")
 
                         # Update position_dt in rolling cache so policy sees the position
                         try:
