@@ -48,6 +48,13 @@ from dt_backend.services.position_manager_dt import (
     recent_exit_info,
 )
 
+# Slack alerting for visibility
+try:
+    from backend.monitoring.alerting import alert_dt, alert_error
+except ImportError:
+    alert_dt = None  # type: ignore
+    alert_error = None  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -951,6 +958,27 @@ def execute_from_policy(
                             p = node.get("policy_dt") if isinstance(node.get("policy_dt"), dict) else {}
                             if isinstance(p, dict) and p.get("p_hit") is not None:
                                 meta["p_hit"] = float(p.get("p_hit") or 0.0)
+                            
+                            # Send Slack alert for position entry
+                            if alert_dt is not None and not cfg.dry_run:
+                                try:
+                                    feats = node.get("features_dt", {})
+                                    signal_strength = _safe_float(feats.get("signal_strength"), 0.0) if isinstance(feats, dict) else 0.0
+                                    alert_dt(
+                                        f"Position Opened: {sym}",
+                                        f"{side} {filled_qty} shares @ ${fill_price:.2f}",
+                                        level="info",
+                                        context={
+                                            "Bot": bot or "N/A",
+                                            "Confidence": f"{conf:.1%}",
+                                            "Signal Strength": f"{signal_strength:.3f}",
+                                            "Stop": f"${risk.get('stop', 0.0):.2f}" if risk.get('stop') else "N/A",
+                                            "Take Profit": f"${risk.get('take_profit', 0.0):.2f}" if risk.get('take_profit') else "N/A",
+                                            "Reason": reason[:100] if reason else "N/A",
+                                        }
+                                    )
+                                except Exception:
+                                    pass
 
                             feats = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
                             meta["entry_features"] = {

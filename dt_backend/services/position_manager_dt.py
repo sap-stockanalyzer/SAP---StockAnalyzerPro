@@ -60,6 +60,12 @@ from dt_backend.core.time_override_dt import now_utc as _now_utc_override
 from dt_backend.core.logger_dt import log
 from dt_backend.services.dt_truth_store import append_trade_event
 
+# Slack alerting for position exits
+try:
+    from backend.monitoring.alerting import alert_dt
+except ImportError:
+    alert_dt = None  # type: ignore
+
 
 def _utc_iso(now_utc: Optional[datetime] = None) -> str:
     # Replay/backtest can drive time via DT_NOW_UTC.
@@ -376,6 +382,42 @@ def _clear_position_dt(rolling: Dict[str, Any], sym: str, now_utc: Optional[date
         pass
 
 
+def _send_exit_alert(sym: str, exit_reason: str, entry_price: float, exit_price: float, qty: float, hold_duration_min: float, bot: Optional[str] = None) -> None:
+    """Send Slack alert for position exit."""
+    if alert_dt is None:
+        return
+    
+    try:
+        pnl_pct = 0.0
+        if entry_price > 0 and exit_price > 0:
+            pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
+        
+        pnl_usd = (exit_price - entry_price) * qty
+        
+        # Determine alert level based on outcome
+        level = "info"
+        if pnl_pct < -2.0:
+            level = "warning"
+        
+        emoji = "✅" if pnl_pct > 0 else "🔴" if pnl_pct < -1.0 else "⚪"
+        
+        alert_dt(
+            f"{emoji} Position Closed: {sym}",
+            f"Exit reason: {exit_reason}",
+            level=level,
+            context={
+                "Bot": bot or "N/A",
+                "Entry Price": f"${entry_price:.2f}",
+                "Exit Price": f"${exit_price:.2f}",
+                "PnL": f"{pnl_pct:+.2f}% (${pnl_usd:+.2f})",
+                "Qty": f"{qty:.0f}",
+                "Hold Duration": f"{hold_duration_min:.1f} min",
+            }
+        )
+    except Exception:
+        pass
+
+
 def process_exits(
     *,
     rolling: Dict[str, Any],
@@ -531,9 +573,18 @@ def process_exits(
                 exit_reason = "stop_hit"
                 exit_side = "SELL" if side == "BUY" else "BUY"
                 qty = float(pos_qty)
+                
+                # Calculate hold duration
+                t0 = _parse_iso(ps.get("entry_ts"))
+                hold_duration_min = 0.0
+                if t0 is not None:
+                    hold_duration_min = (now - t0).total_seconds() / 60.0
+                
                 append_trade_event({"ts": _utc_iso(now), "bot": ps.get("bot"), "meta": ps.get("meta"), "type": "exit_signal", "symbol": sym_u, "reason": exit_reason, "last": last, "qty": qty, "stop": stop})
                 if not dry_run:
                     broker.submit_order(type("O", (), {"symbol": sym_u, "side": exit_side, "qty": qty, "limit_price": None})(), last_price=last)
+                    # Send Slack alert
+                    _send_exit_alert(sym_u, exit_reason, entry, last, qty, hold_duration_min, ps.get("bot"))
                 out.exits_sent += 1
                 ps["status"] = "CLOSED"
                 ps["last_exit_ts"] = _utc_iso(now)
@@ -549,9 +600,18 @@ def process_exits(
                 exit_reason = "take_profit"
                 exit_side = "SELL" if side == "BUY" else "BUY"
                 qty = float(pos_qty)
+                
+                # Calculate hold duration
+                t0 = _parse_iso(ps.get("entry_ts"))
+                hold_duration_min = 0.0
+                if t0 is not None:
+                    hold_duration_min = (now - t0).total_seconds() / 60.0
+                
                 append_trade_event({"ts": _utc_iso(now), "bot": ps.get("bot"), "meta": ps.get("meta"), "type": "exit_signal", "symbol": sym_u, "reason": exit_reason, "last": last, "qty": qty, "tp": tp})
                 if not dry_run:
                     broker.submit_order(type("O", (), {"symbol": sym_u, "side": exit_side, "qty": qty, "limit_price": None})(), last_price=last)
+                    # Send Slack alert
+                    _send_exit_alert(sym_u, exit_reason, entry, last, qty, hold_duration_min, ps.get("bot"))
                 out.exits_sent += 1
                 ps["status"] = "CLOSED"
                 ps["last_exit_ts"] = _utc_iso(now)

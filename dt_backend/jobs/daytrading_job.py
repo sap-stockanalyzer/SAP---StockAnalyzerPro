@@ -26,6 +26,13 @@ try:
 except Exception:  # pragma: no cover
     maybe_reload_dt_knobs = None  # type: ignore
 
+# Slack alerting for cycle tracking
+try:
+    from backend.monitoring.alerting import alert_dt, alert_error
+except ImportError:
+    alert_dt = None  # type: ignore
+    alert_error = None  # type: ignore
+
 from dt_backend.core import (
     log,
     warn,
@@ -525,6 +532,31 @@ def run_daytrading_cycle(
         exec_summary: Dict[str, Any] | None = None
         if execute:
             exec_summary = execute_from_policy(execution_cfg)
+            
+            # Send cycle completion alert
+            if alert_dt is not None and exec_summary:
+                try:
+                    orders = exec_summary.get("orders", 0)
+                    considered = exec_summary.get("considered", 0)
+                    blocked = exec_summary.get("blocked", 0)
+                    exits_summary = exec_summary.get("exits", {})
+                    exits_sent = exits_summary.get("exits_sent", 0) if isinstance(exits_summary, dict) else 0
+                    
+                    if orders > 0 or exits_sent > 0:
+                        alert_dt(
+                            f"DT Cycle Complete: {cycle_id[:8]}",
+                            f"Lane: {lane_label} | Seq: {cycle_seq}",
+                            level="info",
+                            context={
+                                "Orders Sent": f"{orders}",
+                                "Exits Sent": f"{exits_sent}",
+                                "Considered": f"{considered}",
+                                "Blocked": f"{blocked}",
+                                "Symbols": f"{len(symbols_lane) if isinstance(symbols_lane, list) else 0}",
+                            }
+                        )
+                except Exception:
+                    pass
 
         log(f"[daytrading_job] ✅ intraday cycle complete cycle_id={cycle_id} lane={lane_label}")
         return {
