@@ -866,6 +866,9 @@ def execute_from_policy(
             atr = _extract_atr(node)
             order = Order(symbol=sym, side=side, qty=float(qty))
             
+            # Initialize exec_id to None for error handling
+            exec_id = None
+            
             # ==========================================================================
             # SAGA PATTERN: 3-Phase Commit
             # ==========================================================================
@@ -1086,15 +1089,15 @@ def execute_from_policy(
             bump_metric("order_errors", 1.0)
             
             # Try to record failure in ledger if we have exec_id
-            try:
-                if 'exec_id' in locals():
+            if exec_id is not None:
+                try:
                     execution_ledger.record_failed(
                         execution_id=exec_id,
                         error_msg=f"Broker submit error: {str(e)[:200]}",
                         now_utc=ts_now,
                     )
-            except Exception:
-                pass
+                except Exception:
+                    pass
             
             append_trade_event(
                 {

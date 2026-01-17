@@ -14,6 +14,7 @@ This prevents silent data loss and ensures system can resume cleanly after crash
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -184,7 +185,6 @@ def validate_position_consistency() -> Dict[str, Any]:
 
 def _today_date() -> str:
     """Get today's date in YYYY-MM-DD format."""
-    from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 

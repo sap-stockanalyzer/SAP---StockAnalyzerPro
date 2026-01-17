@@ -280,26 +280,47 @@ def record_entry(
             "current_pnl_pct": 0.0,  # Current profit/loss percentage
         }
         
-        # Write positions state (already locked)
-        write_positions_state(st)
+        # Write positions state directly (locks already held, don't acquire again)
+        try:
+            p = _pos_state_path()
+            data = json.dumps(st, ensure_ascii=False, indent=2)
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(data, encoding="utf-8")
+            tmp.replace(p)
+        except Exception as e:
+            log(f"[pos_mgr] ⚠️ failed to write dt_positions inside lock: {e}")
+            return
         
-        # Append trade event (already locked)
-        append_trade_event({
-            "ts": ts,
-            "type": "bracket_set",
-            "symbol": symbol,
-            "side": str(side).upper(),
-            "qty": float(qty),
-            "entry_price": float(entry_price),
-            "stop": st[symbol].get("stop"),
-            "take_profit": st[symbol].get("take_profit"),
-            "trail": st[symbol].get("trail"),
-            "time_stop_min": st[symbol].get("time_stop_min"),
-            "bot": st[symbol].get("bot"),
-            "reason": st[symbol].get("reason"),
-            "meta": meta,
-            "confidence": float(confidence) if confidence is not None else None,
-        })
+        # Append trade event directly (locks already held, don't acquire again)
+        try:
+            trade_event = {
+                "ts": ts,
+                "type": "bracket_set",
+                "symbol": symbol,
+                "side": str(side).upper(),
+                "qty": float(qty),
+                "entry_price": float(entry_price),
+                "stop": st[symbol].get("stop"),
+                "take_profit": st[symbol].get("take_profit"),
+                "trail": st[symbol].get("trail"),
+                "time_stop_min": st[symbol].get("time_stop_min"),
+                "bot": st[symbol].get("bot"),
+                "reason": st[symbol].get("reason"),
+                "meta": meta,
+                "confidence": float(confidence) if confidence is not None else None,
+            }
+            
+            line = json.dumps(trade_event, ensure_ascii=False)
+            if not line.endswith("\n"):
+                line = line + "\n"
+            
+            with open(trades_file, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception as e:
+            log(f"[pos_mgr] ⚠️ failed to append trade event inside lock: {e}")
+            return
         
         log(f"[pos_mgr] ✅ Atomic entry recorded: {symbol} {side} {qty} @ {entry_price}")
 

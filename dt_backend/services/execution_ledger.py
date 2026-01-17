@@ -352,24 +352,55 @@ def _find_record(execution_id: str) -> Optional[Dict[str, Any]]:
     """Find most recent record for execution_id in ledger.
     
     Scans ledger backward to find latest state.
+    Memory-efficient: processes one line at a time.
     """
     ledger_file = _ledger_path()
     if not ledger_file.exists():
         return None
     
     try:
-        # Read all lines and find last matching record
+        # Read file backward line by line for memory efficiency
+        result = None
         with open(ledger_file, "r", encoding="utf-8") as f:
-            lines = f.readlines()
+            # Seek to end
+            f.seek(0, 2)
+            file_size = f.tell()
+            
+            # Read backward in chunks
+            chunk_size = 8192
+            position = file_size
+            lines = []
+            
+            while position > 0:
+                chunk_size = min(chunk_size, position)
+                position -= chunk_size
+                f.seek(position)
+                chunk = f.read(chunk_size)
+                
+                # Split into lines and reverse
+                chunk_lines = chunk.split('\n')
+                lines = chunk_lines + lines
+                
+                # Process complete lines from the end
+                while len(lines) > 1:
+                    line = lines.pop()
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line.strip())
+                        if record.get("execution_id") == execution_id:
+                            return record
+                    except Exception:
+                        continue
         
-        # Scan backward for efficiency
-        for line in reversed(lines):
+        # Check remaining first line
+        if lines and lines[0].strip():
             try:
-                record = json.loads(line.strip())
+                record = json.loads(lines[0].strip())
                 if record.get("execution_id") == execution_id:
                     return record
             except Exception:
-                continue
+                pass
         
         return None
         
