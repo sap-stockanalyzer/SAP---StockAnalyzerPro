@@ -1,44 +1,43 @@
-"""dt_backend/core/logger_dt.py
+"""dt_backend/core/logger_dt.py — Compatibility wrapper for unified logger
 
-DT-backend local logging (kept separate from backend's logger).
+UPDATED: This module now forwards to the unified logger (utils.logger).
 
-Goals
------
-* Timestamped logs everywhere (UTC).
-* Always writes to a dt_backend-specific logfile directory.
-* Safe console output (never crash on Unicode).
-* Minimal dependencies; standard library only.
+The unified logger (utils.logger.Logger) provides:
+* Source-aware logging (swing/dt/backend)
+* Dependency injection for DT-specific features
+* Consistent format across all systems
+* UTF-8 safe console output
+* Daily rotating logfiles
 
-This intentionally does **not** import backend modules so dt_backend can
-run as a mostly-separate program.
+This wrapper maintains backward compatibility:
+* Functions (info, warn, error, log) forward to unified logger
+* DT logs go to logs/dt_backend/ subdirectory
+* Source is set to "dt"
+
+For new code, prefer importing directly from utils.logger:
+    from utils.logger import Logger
+    logger = Logger("my_component", source="dt")
 """
 
 from __future__ import annotations
 
-import os
-import sys
-import traceback
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+# Import unified logger
+from utils.logger import Logger as UnifiedLogger
 
-# ---------------------------------------------------------------------------
-# Log destination
-# ---------------------------------------------------------------------------
-
+# Resolve DT log directory for backward compatibility
 def _resolve_log_dir() -> Path:
     """Prefer dt_backend's configured log directory; fall back safely."""
     try:
-        # Local import to avoid import cycles.
         from dt_backend.core.config_dt import DT_PATHS  # type: ignore
-
         p = DT_PATHS.get("logs_dt")
         if isinstance(p, Path):
             return p
     except Exception:
         pass
-
+    
     # Fallback: project-root-ish logs/dt_backend
     try:
         here = Path(__file__).resolve()
@@ -48,80 +47,35 @@ def _resolve_log_dir() -> Path:
         return Path("logs") / "dt_backend"
 
 
-LOG_DIR: Path = _resolve_log_dir()
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+# Create default DT logger instance
+_dt_logger = UnifiedLogger(
+    name="dt_backend",
+    source="dt",
+    log_dir=_resolve_log_dir()
+)
 
 
 # ---------------------------------------------------------------------------
-# Formatting / I/O
-# ---------------------------------------------------------------------------
-
-def _utc_ts() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _logfile_path() -> Path:
-    # daily rotation: dt_backend_YYYY-MM-DD.log
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return LOG_DIR / f"dt_backend_{day}.log"
-
-
-def _safe_print(msg: str, *, stderr: bool = False) -> None:
-    stream = sys.stderr if stderr else sys.stdout
-    try:
-        # Bypass Windows' cp1252 by writing UTF-8 bytes.
-        stream.buffer.write((msg + "\n").encode("utf-8"))
-        stream.flush()
-    except Exception:
-        # Absolute fallback: strip non-ASCII.
-        safe = msg.encode("ascii", "ignore").decode("ascii", "ignore")
-        try:
-            print(safe, file=stream, flush=True)
-        except Exception:
-            pass
-
-
-def _write_file(line: str) -> None:
-    try:
-        fp = _logfile_path()
-        fp.parent.mkdir(parents=True, exist_ok=True)
-        with fp.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        # Logging must never take the system down.
-        pass
-
-
-def _fmt(level: str, message: str) -> str:
-    pid = os.getpid()
-    return f"[{_utc_ts()}] [{level}] [pid={pid}] {message}"
-
-
-# ---------------------------------------------------------------------------
-# Public API
+# Public API (backward compatible)
 # ---------------------------------------------------------------------------
 
 def info(message: str) -> None:
-    line = _fmt("INFO", message)
-    _safe_print(line)
-    _write_file(line)
+    """Log info level message."""
+    _dt_logger.info(message)
 
 
 def warn(message: str) -> None:
-    line = _fmt("WARN", message)
-    _safe_print(line)
-    _write_file(line)
+    """Log warning level message."""
+    _dt_logger.warn(message)
 
 
 def error(message: str, exc: Optional[BaseException] = None) -> None:
-    if exc is not None:
-        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-        message = f"{message}\n{tb}".rstrip()
-    line = _fmt("ERROR", message)
-    _safe_print(line, stderr=True)
-    _write_file(line)
+    """Log error level message with optional exception traceback."""
+    _dt_logger.error(message, exc=exc)
 
 
 # Convenience alias used across dt_backend (mirrors earlier core.data_pipeline_dt.log)
 def log(message: str) -> None:
-    info(message)
+    """Log info level message (alias for info)."""
+    _dt_logger.info(message)
+
