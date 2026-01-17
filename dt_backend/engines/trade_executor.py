@@ -47,6 +47,14 @@ from dt_backend.services.position_manager_dt import (
     record_exit,
     recent_exit_info,
 )
+from dt_backend.utils.trading_utils_dt import sort_by_ranking_metric
+
+# Slack alerting for visibility
+try:
+    from backend.monitoring.alerting import alert_dt, alert_error
+except ImportError:
+    alert_dt = None  # type: ignore
+    alert_error = None  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -543,11 +551,16 @@ def execute_from_policy(
     else:
         sym_list = [s for s in rolling.keys() if isinstance(s, str) and not s.startswith("_")]
 
-    sym_list = sorted(set([str(s).upper() for s in sym_list]))
+    # CRITICAL: Sort by signal strength + confidence, NOT alphabetically
+    # Alphabetical sorting causes "A" ticker bias (AAPL/AMD always first)
+    # Human day traders prioritize highest-conviction setups, not alphabet order
+    sym_list = list(set([str(s).upper() for s in sym_list]))
+    sym_list = sort_by_ranking_metric(sym_list, rolling)
+    
     if max_symbols is not None:
         sym_list = sym_list[: max(0, int(max_symbols))]
 
-    # Iterate symbols deterministically.
+    # Iterate symbols by ranking (highest conviction first).
     for sym in sym_list:
         if orders >= max(0, int(cfg.max_orders_per_cycle)):
             break
@@ -617,6 +630,144 @@ def execute_from_policy(
                         )
                         continue
         except Exception:
+            pass
+
+        # ============================================================================
+        # INTELLIGENT POSITION HOLDING (Human Day Trader Logic)
+        # ============================================================================
+        # If we have an open position and signal says SELL, apply hold strategy
+        # instead of immediately exiting. This prevents mechanical "buy cycle N, sell cycle N+1"
+        # behavior and lets winning positions run.
+        try:
+            if pos is not None and getattr(pos, "qty", 0.0) > 0:  # We have a LONG position
+                if side == "SELL":
+                    # Check if BUY signal is still active (different from execution intent)
+                    # Look at raw policy_dt for underlying signal strength
+                    policy = node.get("policy_dt", {})
+                    if isinstance(policy, dict):
+                        raw_intent = str(policy.get("intent") or "").upper()
+                        raw_conf = _safe_float(policy.get("confidence"), 0.0)
+                        
+                        # If BUY signal still active with confidence, HOLD position
+                        if raw_intent == "BUY" and raw_conf >= float(cfg.min_confidence):
+                            blocked += 1
+                            
+                            # Calculate current PnL
+                            entry_price = float(getattr(pos, "avg_price", 0.0))
+                            last_price = _extract_last_price(node)
+                            pnl_pct = 0.0
+                            if entry_price > 0 and last_price > 0:
+                                pnl_pct = ((last_price - entry_price) / entry_price) * 100.0
+                            
+                            # Update position hold tracking
+                            try:
+                                from dt_backend.services.position_manager_dt import update_position_hold_info
+                                update_position_hold_info(
+                                    sym,
+                                    hold_reason="buy_signal_still_active",
+                                    current_pnl_pct=pnl_pct,
+                                    now_utc=ts_now,
+                                )
+                            except Exception:
+                                pass
+                            
+                            append_trade_event({
+                                "type": "position_hold",
+                                "symbol": sym,
+                                "reason": "buy_signal_still_active",
+                                "raw_intent": raw_intent,
+                                "raw_confidence": raw_conf,
+                                "execution_side": side,
+                                "hold_strategy": "signal_active",
+                                "pnl_pct": pnl_pct,
+                            })
+                            continue
+                        
+                        # Check profit/loss for intelligent exit decisions
+                        try:
+                            entry_price = float(getattr(pos, "avg_price", 0.0))
+                            last_price = _extract_last_price(node)
+                            
+                            if entry_price > 0 and last_price > 0:
+                                pnl_pct = ((last_price - entry_price) / entry_price) * 100.0
+                                
+                                # Winning trade (>0.5% gain) - HOLD with trailing stop
+                                # Let winners run, don't exit just because rank dropped
+                                if pnl_pct > 0.5:
+                                    blocked += 1
+                                    
+                                    # Update position hold tracking
+                                    try:
+                                        from dt_backend.services.position_manager_dt import update_position_hold_info
+                                        update_position_hold_info(
+                                            sym,
+                                            hold_reason="winning_trade_let_run",
+                                            current_pnl_pct=pnl_pct,
+                                            now_utc=ts_now,
+                                        )
+                                    except Exception:
+                                        pass
+                                    
+                                    append_trade_event({
+                                        "type": "position_hold",
+                                        "symbol": sym,
+                                        "reason": "winning_trade_let_run",
+                                        "pnl_pct": pnl_pct,
+                                        "entry_price": entry_price,
+                                        "current_price": last_price,
+                                        "hold_strategy": "trail_winner",
+                                    })
+                                    # Trailing stop is handled by position_manager_dt.py
+                                    continue
+                                
+                                # Breakeven or small loss (-1% to 0%) - wait for reversal
+                                # Don't exit on noise, give it a chance to recover
+                                if -1.0 <= pnl_pct <= 0.0:
+                                    # Check time in position
+                                    from dt_backend.services.position_manager_dt import read_positions_state
+                                    pos_state = read_positions_state()
+                                    ps = pos_state.get(sym.upper(), {})
+                                    
+                                    if isinstance(ps, dict):
+                                        entry_ts = _parse_utc_iso(ps.get("entry_ts"))
+                                        if entry_ts is not None:
+                                            hold_minutes = (ts_now - entry_ts).total_seconds() / 60.0
+                                            
+                                            # If held < 15 minutes, give it more time
+                                            if hold_minutes < 15.0:
+                                                blocked += 1
+                                                
+                                                # Update position hold tracking
+                                                try:
+                                                    from dt_backend.services.position_manager_dt import update_position_hold_info
+                                                    update_position_hold_info(
+                                                        sym,
+                                                        hold_reason="breakeven_wait_reversal",
+                                                        current_pnl_pct=pnl_pct,
+                                                        now_utc=ts_now,
+                                                    )
+                                                except Exception:
+                                                    pass
+                                                
+                                                append_trade_event({
+                                                    "type": "position_hold",
+                                                    "symbol": sym,
+                                                    "reason": "breakeven_wait_reversal",
+                                                    "pnl_pct": pnl_pct,
+                                                    "hold_minutes": hold_minutes,
+                                                    "hold_strategy": "wait_reversal",
+                                                })
+                                                continue
+                                
+                                # Large loss (< -1%) - allow exit via stop loss from position_manager
+                                # But also respect hard stops from position_manager_dt
+                        except Exception as e:
+                            # Log error but continue - don't block trading on PnL calculation issues
+                            log(f"[dt_exec] ⚠️ Error calculating PnL for {sym}: {e}")
+                            pass
+        except Exception as e:
+            # Log error but continue - don't block trading on position hold logic issues
+            log(f"[dt_exec] ⚠️ Error in position hold logic for {sym}: {e}")
             pass
 
         # Don't stack entries in the same direction (keeps it sane).
@@ -747,6 +898,27 @@ def execute_from_policy(
                             p = node.get("policy_dt") if isinstance(node.get("policy_dt"), dict) else {}
                             if isinstance(p, dict) and p.get("p_hit") is not None:
                                 meta["p_hit"] = float(p.get("p_hit") or 0.0)
+                            
+                            # Send Slack alert for position entry
+                            if alert_dt is not None and not cfg.dry_run:
+                                try:
+                                    feats = node.get("features_dt", {})
+                                    signal_strength = _safe_float(feats.get("signal_strength"), 0.0) if isinstance(feats, dict) else 0.0
+                                    alert_dt(
+                                        f"Position Opened: {sym}",
+                                        f"{side} {filled_qty} shares @ ${fill_price:.2f}",
+                                        level="info",
+                                        context={
+                                            "Bot": bot or "N/A",
+                                            "Confidence": f"{conf:.1%}",
+                                            "Signal Strength": f"{signal_strength:.3f}",
+                                            "Stop": f"${risk.get('stop', 0.0):.2f}" if risk.get('stop') else "N/A",
+                                            "Take Profit": f"${risk.get('take_profit', 0.0):.2f}" if risk.get('take_profit') else "N/A",
+                                            "Reason": reason[:100] if reason else "N/A",
+                                        }
+                                    )
+                                except Exception:
+                                    pass
 
                             feats = node.get("features_dt") if isinstance(node.get("features_dt"), dict) else {}
                             meta["entry_features"] = {

@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from dt_backend.tuning.dt_profile_loader import load_dt_profile
 
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
+from dt_backend.utils.trading_utils_dt import sort_by_ranking_metric
 
 # Import broker API for position sync (late import to avoid circular deps)
 try:
@@ -322,14 +323,22 @@ def _symbols_to_process(
     symbols: Optional[List[str]] = None,
     max_symbols: Optional[int] = None,
 ) -> List[str]:
-    """Deterministic symbol selection for lane-aware processing."""
+    """Deterministic symbol selection for lane-aware processing.
+    
+    CRITICAL: Symbols are sorted by signal strength + confidence, NOT alphabetically.
+    Alphabetical sorting causes "A" ticker bias where AAPL/AMD always get priority.
+    Human day traders prioritize highest-conviction setups, not alphabet order.
+    """
     if isinstance(symbols, list) and symbols:
         wanted = {str(s).strip().upper() for s in symbols if str(s).strip()}
         syms = [str(s).upper() for s in rolling.keys() if isinstance(s, str) and not s.startswith("_") and str(s).upper() in wanted]
     else:
         syms = [str(s) for s in rolling.keys() if isinstance(s, str) and not s.startswith("_")]
 
-    syms = sorted(set(syms))
+    # DO NOT sort alphabetically - use signal-based ranking instead
+    syms = list(set(syms))
+    syms = sort_by_ranking_metric(syms, rolling)
+    
     if max_symbols is not None:
         try:
             syms = syms[: max(0, int(max_symbols))]
