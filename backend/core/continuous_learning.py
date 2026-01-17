@@ -569,6 +569,85 @@ def run_continuous_learning() -> Dict[str, Any]:
     }
 
 
+# ==========================================================
+# Adaptive Retraining Logic (new for ML Pipeline Feedback)
+# ==========================================================
+
+def should_retrain_models(rolling: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Check if models should be retrained based on per-symbol performance.
+    
+    Triggers retraining if >30% of symbols have Sharpe < 0.5 over last 3 days.
+    
+    Args:
+        rolling: Optional rolling data dict (will read if not provided)
+        
+    Returns:
+        True if retraining recommended, False otherwise
+    """
+    try:
+        from backend.services.model_performance_tracker import ModelPerformanceTracker
+        
+        tracker = ModelPerformanceTracker()
+        
+        # Get list of active symbols
+        if rolling is None:
+            rolling = _read_rolling()
+        
+        if not rolling or not isinstance(rolling, dict):
+            return False
+        
+        symbols = [s for s in rolling.keys() if not str(s).startswith("_")][:50]  # Sample
+        
+        if not symbols:
+            return False
+        
+        underperforming_symbols = []
+        
+        for symbol in symbols:
+            sharpe = tracker.get_rolling_sharpe(symbol, days=3)
+            
+            if sharpe < 0.5:
+                underperforming_symbols.append({
+                    "symbol": symbol,
+                    "sharpe": sharpe,
+                })
+        
+        # If >30% of symbols underperforming, trigger retraining
+        underperforming_ratio = len(underperforming_symbols) / len(symbols)
+        
+        if underperforming_ratio > 0.30:
+            log(
+                f"[continuous_learning] 🚨 Model underperforming: "
+                f"{len(underperforming_symbols)}/{len(symbols)} symbols "
+                f"({underperforming_ratio:.1%}) with Sharpe < 0.5"
+            )
+            return True
+        
+        return False
+        
+    except Exception as e:
+        log(f"[continuous_learning] ⚠️ Failed to check retraining trigger: {e}")
+        return False
+
+
+def run_adaptive_retraining(rolling: Optional[Dict[str, Any]] = None):
+    """
+    Check and trigger retraining if needed.
+    
+    This should be called periodically (e.g., from nightly job or intraday monitor).
+    
+    Args:
+        rolling: Optional rolling data dict (will read if not provided)
+    """
+    if should_retrain_models(rolling):
+        log("[continuous_learning] 🧠 Adaptive retraining recommended - trigger via nightly job")
+        # Note: Actual retraining is orchestrated by nightly_job.py
+        # This function just checks and logs the recommendation
+        return True
+    return False
+
+
 if __name__ == "__main__":
     out = run_continuous_learning()
     print(json.dumps(out, indent=2))

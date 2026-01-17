@@ -385,6 +385,20 @@ def train_model(
                     "seconds_ingest": float(mm.seconds_ingest),
                     "seconds_train": float(mm.seconds_train),
                 }
+                
+                # Track feature importance (adaptive ML pipeline)
+                try:
+                    from backend.core.ai_model.feature_importance import FeatureImportanceTracker
+                    importance_tracker = FeatureImportanceTracker()
+                    top_features = importance_tracker.compute_importance(
+                        booster,
+                        feature_cols,
+                        horizon,
+                        top_n=20
+                    )
+                    summaries[horizon]["top_features"] = list(top_features.keys())[:5]
+                except Exception as e:
+                    log(f"[ai_model] ⚠️ Feature importance tracking failed for {horizon}: {e}")
 
                 try:
                     rs = return_stats.get(horizon) if isinstance(return_stats, dict) else None
@@ -481,6 +495,20 @@ def train_model(
                 "validation": vdiag,
                 "clip_limit": float(clip_lim),
             }
+            
+            # Track feature importance (adaptive ML pipeline)
+            try:
+                from backend.core.ai_model.feature_importance import FeatureImportanceTracker
+                importance_tracker = FeatureImportanceTracker()
+                top_features = importance_tracker.compute_importance(
+                    model,
+                    feature_cols,
+                    horizon,
+                    top_n=20
+                )
+                summaries[horizon]["top_features"] = list(top_features.keys())[:5]
+            except Exception as e:
+                log(f"[ai_model] ⚠️ Feature importance tracking failed for {horizon}: {e}")
 
         except Exception as e:
             log(f"[ai_model] ❌ RF training failed for {horizon}: {e}")

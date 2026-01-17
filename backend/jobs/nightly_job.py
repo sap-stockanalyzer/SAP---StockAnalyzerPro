@@ -599,6 +599,20 @@ def run_nightly_job(
             _record_ok(summary, key, payload, t0)
             _write_summary(summary)
             log(f"✅ Predictions complete — symbols={preds_total} horizons={len(valid_horizons)}")
+            
+            # Check if adaptive retraining should be triggered (new ML feedback loop)
+            try:
+                from backend.core.continuous_learning import should_retrain_models
+                should_retrain = should_retrain_models(rolling)
+                summary["adaptive_retraining_check"] = {
+                    "recommended": bool(should_retrain),
+                    "checked_at": datetime.now(TIMEZONE).isoformat(),
+                }
+                if should_retrain:
+                    log("[nightly_job] ⚠️ Adaptive retraining recommended based on model performance")
+            except Exception as e:
+                log(f"[nightly_job] ⚠️ Adaptive retraining check failed: {e}")
+                summary["adaptive_retraining_check"] = {"error": str(e)}
         except Exception as e:
             _record_err(summary, key, e, t0)
             _write_summary(summary)
