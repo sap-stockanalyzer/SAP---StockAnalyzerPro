@@ -414,8 +414,9 @@ def _send_exit_alert(sym: str, exit_reason: str, entry_price: float, exit_price:
                 "Hold Duration": f"{hold_duration_min:.1f} min",
             }
         )
-    except Exception:
-        pass
+    except Exception as e:
+        # Log but don't fail position exit on alert failure
+        log(f"[pos_mgr] ⚠️ Failed to send exit alert for {sym}: {e}")
 
 
 def process_exits(

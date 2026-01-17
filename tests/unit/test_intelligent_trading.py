@@ -14,7 +14,7 @@ class TestSymbolSorting:
     
     def test_sort_by_ranking_metric_basic(self):
         """Test basic ranking by signal strength + confidence."""
-        from dt_backend.engines.trade_executor import _sort_by_ranking_metric
+        from dt_backend.utils.trading_utils_dt import sort_by_ranking_metric
         
         # Create test rolling data
         rolling = {
@@ -33,7 +33,7 @@ class TestSymbolSorting:
         }
         
         symbols = ["AAPL", "BBBB", "ZZZZ"]
-        sorted_symbols = _sort_by_ranking_metric(symbols, rolling)
+        sorted_symbols = sort_by_ranking_metric(symbols, rolling)
         
         # ZZZZ should be first (highest score), not last alphabetically
         assert sorted_symbols[0] == "ZZZZ", "Highest signal strength should be first"
@@ -42,7 +42,7 @@ class TestSymbolSorting:
     
     def test_sort_by_ranking_metric_no_alphabetical_bias(self):
         """Test that alphabetical order doesn't affect ranking."""
-        from dt_backend.engines.trade_executor import _sort_by_ranking_metric
+        from dt_backend.utils.trading_utils_dt import sort_by_ranking_metric
         
         # AAPL has lower score than TSLA, should not be prioritized
         rolling = {
@@ -57,7 +57,7 @@ class TestSymbolSorting:
         }
         
         symbols = ["AAPL", "TSLA"]
-        sorted_symbols = _sort_by_ranking_metric(symbols, rolling)
+        sorted_symbols = sort_by_ranking_metric(symbols, rolling)
         
         # TSLA should be first despite being later alphabetically
         assert sorted_symbols[0] == "TSLA", "Higher ranked symbol should be first, not alphabetical"

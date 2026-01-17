@@ -47,6 +47,7 @@ from dt_backend.services.position_manager_dt import (
     record_exit,
     recent_exit_info,
 )
+from dt_backend.utils.trading_utils_dt import sort_by_ranking_metric
 
 # Slack alerting for visibility
 try:
@@ -490,71 +491,6 @@ def _qty_from_size(size: float, cfg: ExecutionConfig) -> float:
     return max(0.0, float(cfg.default_qty) * size)
 
 
-def _sort_by_ranking_metric(symbols: List[str], rolling: Dict[str, Any]) -> List[str]:
-    """Sort symbols by signal strength + confidence (descending), NOT alphabetically.
-    
-    Human day traders prioritize by signal strength + volume + confidence.
-    Order matters: limited trade slots should go to highest-conviction setups.
-    
-    DO NOT sort alphabetically - causes "A" ticker bias where AAPL/AMD always
-    get priority over higher-quality setups with later alphabetical tickers.
-    
-    Args:
-        symbols: List of symbol strings to sort
-        rolling: Rolling data dict containing features_dt and policy_dt for each symbol
-        
-    Returns:
-        List of symbols sorted by composite score (highest first)
-    """
-    if not symbols or not rolling:
-        return symbols
-    
-    ranked = []
-    for sym in symbols:
-        node = rolling.get(sym, {})
-        if not isinstance(node, dict):
-            ranked.append((0.0, sym))
-            continue
-        
-        # Primary: signal strength from features_dt (volume, liquidity, momentum)
-        feats = node.get("features_dt", {})
-        if not isinstance(feats, dict):
-            feats = {}
-        
-        signal_strength = _safe_float(feats.get("signal_strength"), 0.0)
-        
-        # Fallback hierarchy: volume -> liquidity_score -> rel_volume
-        if signal_strength == 0.0:
-            signal_strength = _safe_float(feats.get("volume"), 0.0)
-        if signal_strength == 0.0:
-            signal_strength = _safe_float(feats.get("liquidity_score"), 0.0)
-        if signal_strength == 0.0:
-            signal_strength = _safe_float(feats.get("rel_volume"), 0.0)
-        
-        # Normalize large volume numbers to 0-1 range
-        if signal_strength > 1.0:
-            signal_strength = min(1.0, signal_strength / 1000000.0)
-        
-        # Secondary: confidence from policy_dt
-        pol = node.get("policy_dt", {})
-        if not isinstance(pol, dict):
-            pol = {}
-        confidence = _safe_float(pol.get("confidence"), 0.0)
-        
-        # Tertiary: p_hit from policy_dt (calibrated probability)
-        p_hit = _safe_float(pol.get("p_hit"), confidence)
-        
-        # Composite score: 50% signal_strength + 30% confidence + 20% p_hit
-        # This balances conviction with signal quality
-        score = (0.5 * signal_strength) + (0.3 * confidence) + (0.2 * p_hit)
-        
-        ranked.append((score, sym))
-    
-    # Sort descending (highest score first) - top setups get priority for limited slots
-    ranked.sort(reverse=True, key=lambda x: x[0])
-    return [sym for _, sym in ranked]
-
-
 def execute_from_policy(
     cfg: Optional[ExecutionConfig] = None,
     *,
@@ -619,7 +555,7 @@ def execute_from_policy(
     # Alphabetical sorting causes "A" ticker bias (AAPL/AMD always first)
     # Human day traders prioritize highest-conviction setups, not alphabet order
     sym_list = list(set([str(s).upper() for s in sym_list]))
-    sym_list = _sort_by_ranking_metric(sym_list, rolling)
+    sym_list = sort_by_ranking_metric(sym_list, rolling)
     
     if max_symbols is not None:
         sym_list = sym_list[: max(0, int(max_symbols))]
@@ -825,9 +761,13 @@ def execute_from_policy(
                                 
                                 # Large loss (< -1%) - allow exit via stop loss from position_manager
                                 # But also respect hard stops from position_manager_dt
-                        except Exception:
+                        except Exception as e:
+                            # Log error but continue - don't block trading on PnL calculation issues
+                            log(f"[dt_exec] ⚠️ Error calculating PnL for {sym}: {e}")
                             pass
-        except Exception:
+        except Exception as e:
+            # Log error but continue - don't block trading on position hold logic issues
+            log(f"[dt_exec] ⚠️ Error in position hold logic for {sym}: {e}")
             pass
 
         # Don't stack entries in the same direction (keeps it sane).
