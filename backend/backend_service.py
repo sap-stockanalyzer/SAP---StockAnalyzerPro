@@ -45,6 +45,8 @@ except ImportError:
 # ----------------------------------------------
 # Routers (centralized from backend/routers/)
 # ----------------------------------------------
+from backend.routers.health_router import router as health_router
+from backend.routers.testing_router import router as testing_router
 from backend.routers.system_status_router import router as system_router
 from backend.routers.diagnostics_router import router as diagnostics_router
 from backend.routers.insights_router import router as insights_router
@@ -124,6 +126,8 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # -------------------------------------------------
 
 ROUTERS = [
+    health_router,
+    testing_router,
     system_router,
     diagnostics_router,
     insights_router,
@@ -166,17 +170,6 @@ async def root():
         "quiet_startup": QUIET_STARTUP,
         "enable_scheduler": ENABLE_SCHEDULER,
         "enable_heartbeat": ENABLE_HEARTBEAT,
-    }
-
-
-@app.get("/health")
-async def health():
-    return {
-        "status": "ok",
-        "time": datetime.now(TIMEZONE).isoformat(),
-        "role": ROLE,
-        "quiet_startup": QUIET_STARTUP,
-        "enable_scheduler": ENABLE_SCHEDULER,
     }
 
 

@@ -7,6 +7,7 @@ import Link from "next/link";
 import { Activity, Clock, DollarSign, Shield, SlidersHorizontal, RefreshCw, Settings } from "lucide-react";
 
 import { useSSE } from "@/hooks/useSSE";
+import { invalidateCache } from "@/lib/clientCache";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -107,6 +108,16 @@ type BotDraft = EodBotConfig & {
   allow_etfs?: boolean;
   max_daily_trades?: number;
 };
+
+// -----------------------------
+// Constants
+// -----------------------------
+
+// Cache keys for client-side caching (used with SSE invalidation)
+const CACHE_KEYS = {
+  BOTS_PAGE_BACKEND: "api:/api/backend/bots/page",
+  BOTS_PAGE_DIRECT: "api:/api/bots/page",
+} as const;
 
 // -----------------------------
 // Small helpers
@@ -826,6 +837,11 @@ export default function BotsPage() {
       setBundle(data);
       setLoading(false);
       setErr(null);
+      
+      // Invalidate client-side cache when SSE pushes new data
+      // This ensures fresh data on next fetch if user switches to polling
+      invalidateCache(CACHE_KEYS.BOTS_PAGE_BACKEND);
+      invalidateCache(CACHE_KEYS.BOTS_PAGE_DIRECT);
     },
     onError: () => {
       // Fallback to polling on SSE error

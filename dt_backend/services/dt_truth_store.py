@@ -38,6 +38,7 @@ from typing import Any, Dict, Iterable, Optional
 
 from dt_backend.core.logger_dt import log
 from dt_backend.core.time_override_dt import utc_iso
+from dt_backend.core.file_locking import AppendLocked
 
 # Import shared truth store for unified logging
 try:
@@ -311,6 +312,7 @@ def append_trade_event(event: Dict[str, Any]) -> None:
     Now writes to shared_trades.jsonl with source="dt" for unified logging.
     Also maintains local dt_trades.jsonl for backward compatibility.
     """
+    """Append one event line to dt_trades.jsonl with file locking."""
     try:
         if not isinstance(event, dict):
             return
@@ -353,8 +355,13 @@ def append_trade_event(event: Dict[str, Any]) -> None:
         # Also write to local file for backward compatibility
         p = trades_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        
+        # Use locked append to prevent race conditions
+        line = json.dumps(event, ensure_ascii=False)
+        success = AppendLocked(p, line, timeout=5.0)
+        
+        if not success:
+            log(f"[dt_truth] ⚠️ failed to acquire lock for dt_trades append")
     except Exception as e:
         log(f"[dt_truth] ⚠️ failed to append dt_trades event: {e}")
 
@@ -365,7 +372,7 @@ def append_trade_event(event: Dict[str, Any]) -> None:
 
 
 def append_missed_opportunity(event: Dict[str, Any]) -> None:
-    """Append a 'missed opportunity candidate' line.
+    """Append a 'missed opportunity candidate' line with file locking.
 
     This is a Phase 1 artifact: a record of a trade-like setup that was rejected
     by a *soft* gate (thresholds, EV filters, etc.).
@@ -379,22 +386,32 @@ def append_missed_opportunity(event: Dict[str, Any]) -> None:
         event.setdefault("event_id", uuid.uuid4().hex)
         p = missed_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        
+        # Use locked append
+        line = json.dumps(event, ensure_ascii=False)
+        success = AppendLocked(p, line, timeout=5.0)
+        
+        if not success:
+            log(f"[dt_truth] ⚠️ failed to acquire lock for missed opportunity append")
     except Exception as e:
         log(f"[dt_truth] ⚠️ failed to append missed opportunity: {e}")
 
 
 def append_missed_eval(event: Dict[str, Any]) -> None:
-    """Append a labeled outcome line for a missed candidate (Phase 2)."""
+    """Append a labeled outcome line for a missed candidate (Phase 2) with file locking."""
     try:
         if not isinstance(event, dict):
             return
         event.setdefault("ts", _utc_iso())
         p = missed_evals_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        
+        # Use locked append
+        line = json.dumps(event, ensure_ascii=False)
+        success = AppendLocked(p, line, timeout=5.0)
+        
+        if not success:
+            log(f"[dt_truth] ⚠️ failed to acquire lock for missed eval append")
     except Exception as e:
         log(f"[dt_truth] ⚠️ failed to append missed eval: {e}")
 

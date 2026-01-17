@@ -214,7 +214,7 @@ if __name__ == "__main__":
     UVICORN_RELOAD = _env_bool("UVICORN_RELOAD", default=False)
 
     # ✅ Single backend process with multiple workers for performance
-    PRIMARY_WORKERS = _env_int("APP_WORKERS", 2)
+    PRIMARY_WORKERS = _env_int("APP_WORKERS", 1)
 
     DT_WORKERS = _env_int("DT_APP_WORKERS", 1)
     REPLAY_WORKERS = _env_int("REPLAY_APP_WORKERS", 1)

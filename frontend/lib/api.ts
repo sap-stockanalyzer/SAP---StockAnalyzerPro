@@ -5,6 +5,13 @@
 //  - Do NOT default to 0.0.0.0 (not a routable host)
 //  - Do NOT use relative fetch("/api/...") for backend calls (hits Next server)
 //  - One base URL used everywhere
+//
+// Caching Strategy:
+//  - Backend has NO cache (returns fresh data always)
+//  - Client implements localStorage cache with TTL
+//  - SSE pushes auto-invalidate cache for real-time updates
+
+import { fetchWithCache } from "./clientCache";
 
 export function getApiBaseUrl() {
   // Prefer env in dev/build pipelines
@@ -49,7 +56,17 @@ async function request(path: string, init: RequestInit = {}) {
   return data;
 }
 
-async function get(path: string) {
+async function get(path: string, options?: { cache?: boolean; ttl?: number }) {
+  const base = getApiBaseUrl();
+  const url = path.startsWith("http")
+    ? path
+    : `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+  
+  // Support client-side caching for GET requests
+  if (options?.cache && typeof window !== "undefined") {
+    return fetchWithCache(url, { ttl: options.ttl });
+  }
+  
   return request(path, { method: "GET" });
 }
 
@@ -63,9 +80,15 @@ async function post(path: string, body?: any) {
 
 // ---- Your exported API wrappers (examples) ----
 
-export async function getIntradaySnapshot(limit: number = 120) {
+export async function getIntradaySnapshot(limit: number = 120, useCache: boolean = false) {
   // IMPORTANT: use absolute backend base, not relative /api/*
-  return get(`/api/intraday/snapshot?limit=${limit}`);
+  const path = `/api/intraday/snapshot?limit=${limit}`;
+  return get(path, { cache: useCache, ttl: 5000 });
+}
+
+export async function getBotsPage(useCache: boolean = false) {
+  const path = "/api/bots/page";
+  return get(path, { cache: useCache, ttl: 5000 });
 }
 
 // ---- Settings / Configuration API ----

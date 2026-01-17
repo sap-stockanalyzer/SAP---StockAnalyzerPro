@@ -1356,6 +1356,14 @@ class SwingBot:
             f"[{self.cfg.bot_key}] ✅ FULL rebalance complete. "
             f"Trades={len(trades)}"
         )
+        
+        # SSE Broadcast Note:
+        # Rebalance completion triggers file updates:
+        # - rolling_<bot_key>.json.gz (bot state)
+        # - bot_logs/<horizon>/bot_activity_*.json (trade log)
+        # SSE polling in events_router.py (/events/bots) picks up changes every 5 seconds
+        # and pushes fresh data to connected clients. Client-side cache auto-invalidates
+        # on SSE push for instant UI updates without backend caching.
 
     def run_loop(self) -> None:
         """Intraday LOOP — risk checks only."""

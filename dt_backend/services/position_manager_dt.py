@@ -58,6 +58,7 @@ except Exception:  # pragma: no cover
 from dt_backend.core import DT_PATHS
 from dt_backend.core.time_override_dt import now_utc as _now_utc_override
 from dt_backend.core.logger_dt import log
+from dt_backend.core.file_locking import AcquireMultipleLocks, WriteLocked
 from dt_backend.services.dt_truth_store import append_trade_event
 
 # Slack alerting for position exits
@@ -122,11 +123,13 @@ def read_positions_state() -> Dict[str, Any]:
 
 
 def write_positions_state(state: Dict[str, Any]) -> None:
+    """Write positions state with file locking for atomicity."""
     p = _pos_state_path()
     try:
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(p)
+        data = json.dumps(state, ensure_ascii=False, indent=2)
+        success = WriteLocked(p, data, timeout=5.0)
+        if not success:
+            log(f"[pos_mgr] ⚠️ failed to acquire lock for dt_positions write")
     except Exception as e:
         log(f"[pos_mgr] ⚠️ failed to write dt_positions: {e}")
 
@@ -214,6 +217,7 @@ def record_entry(
 ) -> None:
     """Create/overwrite a position state entry for a new fill.
 
+    ATOMIC: Updates position state + appends trade event with locking.
     now_utc/meta exist to make historical replay deterministic and
     to attach regime/time-window tags without polluting core logic.
     """
@@ -225,55 +229,100 @@ def record_entry(
     risk = risk if isinstance(risk, dict) else {}
     meta = meta if isinstance(meta, dict) else {}
 
-    st = read_positions_state()
-    st[symbol] = {
-        "status": "OPEN",
-        "side": str(side).upper(),
-        "qty": float(qty),
-        "entry_price": float(entry_price),
-        "entry_ts": ts,
-        "stop": risk.get("stop"),
-        "take_profit": risk.get("take_profit"),
-        "trail": bool(risk.get("trail") is True),
-        "trail_atr_mult": float(_safe_float(risk.get("trail_atr_mult"), trail_atr_mult)),
-        "partials": bool(risk.get("partials") is True),
-        "partial_taken": False,
-        "time_stop_min": risk.get("time_stop_min"),
-        "scratch_min": int(_safe_float(risk.get("scratch_min"), scratch_min)),
-        "scratch_atr_frac": float(_safe_float(risk.get("scratch_atr_frac"), scratch_atr_frac)),
-        "bot": str(bot).upper() if bot else None,
-        "reason": str(reason)[:280] if reason else None,
-        "last_exit_ts": None,
-        "last_exit_reason": None,
-        "max_favorable": float(entry_price),
-        "min_favorable": float(entry_price),
-        "meta": meta,
-        "confidence": float(confidence) if confidence is not None else None,
-        # Intelligent hold tracking
-        "hold_count": 0,  # Number of cycles position was held instead of exited
-        "last_hold_reason": None,  # Why we held (signal_active, winning_trade, etc)
-        "last_hold_ts": None,  # Last time we decided to hold
-        "max_pnl_pct": 0.0,  # Peak profit percentage achieved
-        "current_pnl_pct": 0.0,  # Current profit/loss percentage
-    }
-    write_positions_state(st)
-
-    append_trade_event({
-        "ts": ts,
-        "type": "bracket_set",
-        "symbol": symbol,
-        "side": str(side).upper(),
-        "qty": float(qty),
-        "entry_price": float(entry_price),
-        "stop": st[symbol].get("stop"),
-        "take_profit": st[symbol].get("take_profit"),
-        "trail": st[symbol].get("trail"),
-        "time_stop_min": st[symbol].get("time_stop_min"),
-        "bot": st[symbol].get("bot"),
-        "reason": st[symbol].get("reason"),
-        "meta": meta,
-        "confidence": float(confidence) if confidence is not None else None,
-    })
+    # Atomic: lock both positions file and trades file
+    # Lock ordering: positions -> trades (per file_locking.py convention)
+    pos_path = _pos_state_path()
+    
+    try:
+        from dt_backend.services.dt_truth_store import trades_path
+        trades_file = trades_path()
+    except Exception:
+        # Fallback if import fails
+        trades_file = _intraday_dir() / "dt_trades.jsonl"
+    
+    files_to_lock = [pos_path, trades_file]
+    
+    with AcquireMultipleLocks(files_to_lock, timeout=10.0) as acquired:
+        if not acquired:
+            log(f"[pos_mgr] ⚠️ Failed to acquire locks for atomic entry: {symbol}")
+            return
+        
+        # Critical section: update position state + append trade event atomically
+        st = read_positions_state()
+        st[symbol] = {
+            "status": "OPEN",
+            "side": str(side).upper(),
+            "qty": float(qty),
+            "entry_price": float(entry_price),
+            "entry_ts": ts,
+            "stop": risk.get("stop"),
+            "take_profit": risk.get("take_profit"),
+            "trail": bool(risk.get("trail") is True),
+            "trail_atr_mult": float(_safe_float(risk.get("trail_atr_mult"), trail_atr_mult)),
+            "partials": bool(risk.get("partials") is True),
+            "partial_taken": False,
+            "time_stop_min": risk.get("time_stop_min"),
+            "scratch_min": int(_safe_float(risk.get("scratch_min"), scratch_min)),
+            "scratch_atr_frac": float(_safe_float(risk.get("scratch_atr_frac"), scratch_atr_frac)),
+            "bot": str(bot).upper() if bot else None,
+            "reason": str(reason)[:280] if reason else None,
+            "last_exit_ts": None,
+            "last_exit_reason": None,
+            "max_favorable": float(entry_price),
+            "min_favorable": float(entry_price),
+            "meta": meta,
+            "confidence": float(confidence) if confidence is not None else None,
+            # Intelligent hold tracking
+            "hold_count": 0,  # Number of cycles position was held instead of exited
+            "last_hold_reason": None,  # Why we held (signal_active, winning_trade, etc)
+            "last_hold_ts": None,  # Last time we decided to hold
+            "max_pnl_pct": 0.0,  # Peak profit percentage achieved
+            "current_pnl_pct": 0.0,  # Current profit/loss percentage
+        }
+        
+        # Write positions state directly (locks already held, don't acquire again)
+        try:
+            p = _pos_state_path()
+            data = json.dumps(st, ensure_ascii=False, indent=2)
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            tmp.write_text(data, encoding="utf-8")
+            tmp.replace(p)
+        except Exception as e:
+            log(f"[pos_mgr] ⚠️ failed to write dt_positions inside lock: {e}")
+            return
+        
+        # Append trade event directly (locks already held, don't acquire again)
+        try:
+            trade_event = {
+                "ts": ts,
+                "type": "bracket_set",
+                "symbol": symbol,
+                "side": str(side).upper(),
+                "qty": float(qty),
+                "entry_price": float(entry_price),
+                "stop": st[symbol].get("stop"),
+                "take_profit": st[symbol].get("take_profit"),
+                "trail": st[symbol].get("trail"),
+                "time_stop_min": st[symbol].get("time_stop_min"),
+                "bot": st[symbol].get("bot"),
+                "reason": st[symbol].get("reason"),
+                "meta": meta,
+                "confidence": float(confidence) if confidence is not None else None,
+            }
+            
+            line = json.dumps(trade_event, ensure_ascii=False)
+            if not line.endswith("\n"):
+                line = line + "\n"
+            
+            with open(trades_file, "a", encoding="utf-8") as f:
+                f.write(line)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception as e:
+            log(f"[pos_mgr] ⚠️ failed to append trade event inside lock: {e}")
+            return
+        
+        log(f"[pos_mgr] ✅ Atomic entry recorded: {symbol} {side} {qty} @ {entry_price}")
 
 
 

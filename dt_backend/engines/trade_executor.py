@@ -32,6 +32,7 @@ from dt_backend.core.data_pipeline_dt import _read_rolling, save_rolling
 from dt_backend.core.logger_dt import log
 from dt_backend.core.time_override_dt import now_utc as _now_utc_override
 from dt_backend.services.dt_truth_store import append_trade_event, bump_metric
+from dt_backend.services import execution_ledger
 
 # Optional: dt_state tags (safe if unavailable)
 try:
@@ -864,6 +865,27 @@ def execute_from_policy(
             last_px = _extract_last_price(node)
             atr = _extract_atr(node)
             order = Order(symbol=sym, side=side, qty=float(qty))
+            
+            # Initialize exec_id to None for error handling
+            exec_id = None
+            
+            # ==========================================================================
+            # SAGA PATTERN: 3-Phase Commit
+            # ==========================================================================
+            # Phase 1: Record pending BEFORE broker API call
+            exec_id = execution_ledger.record_pending(
+                symbol=sym,
+                side=side,
+                qty=qty,
+                price=last_px if last_px > 0 else 0.0,
+                bot=(node.get("execution_plan_dt") or {}).get("bot") if isinstance(node.get("execution_plan_dt"), dict) else None,
+                confidence=conf,
+                meta=_entry_meta_from_global(rolling, ts_now),
+                now_utc=ts_now,
+            )
+            log(f"[dt_exec] 📝 Phase 1 (pending): {exec_id} {side} {qty} {sym}")
+            
+            # Submit order to broker
             res = broker.submit_order(order, last_price=(last_px if last_px > 0 else None))
             orders += 1
             bump_metric("orders_submitted", 1.0)
@@ -874,6 +896,7 @@ def execute_from_policy(
                     "side": side,
                     "qty": qty,
                     "result": res,
+                    "execution_id": exec_id,  # Link to ledger
                 }
             )
 
@@ -886,6 +909,16 @@ def execute_from_policy(
                     is_entry = side == "BUY" or (side == "SELL" and cfg.allow_shorts and (pos is None or getattr(pos, "qty", 0.0) <= 0))
 
                     if is_entry and filled_qty > 0 and fill_price > 0:
+                        # Phase 2: Record confirmed AFTER broker confirms fill
+                        broker_order_id = str(res.get("order_id") or res.get("id") or "unknown")
+                        execution_ledger.record_confirmed(
+                            execution_id=exec_id,
+                            broker_order_id=broker_order_id,
+                            fill_price=fill_price,
+                            now_utc=ts_now,
+                        )
+                        log(f"[dt_exec] ✅ Phase 2 (confirmed): {exec_id} filled @ {fill_price}")
+                        
                         risk = _plan_risk(node, side=side, last_price=fill_price, atr=atr, cfg=cfg)
                         plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else {}
                         bot = str(plan.get("bot") or "") if isinstance(plan, dict) else ""
@@ -932,6 +965,8 @@ def execute_from_policy(
                         except Exception:
                             pass
 
+                        # Phase 3: Record atomic update (position + truth store)
+                        # Note: record_entry now does atomic locking internally
                         record_entry(
                             symbol=sym,
                             side=side,
@@ -947,6 +982,21 @@ def execute_from_policy(
                             meta=meta,
                             confidence=float(conf),
                         )
+                        
+                        # Mark as recorded in saga ledger
+                        position_snapshot = {
+                            "symbol": sym,
+                            "side": side,
+                            "qty": filled_qty,
+                            "entry_price": fill_price,
+                            "ts": ts_now.isoformat(timespec="seconds").replace("+00:00", "Z"),
+                        }
+                        execution_ledger.record_recorded(
+                            execution_id=exec_id,
+                            position_state=position_snapshot,
+                            now_utc=ts_now,
+                        )
+                        log(f"[dt_exec] 🎉 Phase 3 (recorded): {exec_id} complete")
 
                         # Update position_dt in rolling cache so policy sees the position
                         try:
@@ -976,8 +1026,25 @@ def execute_from_policy(
                         except Exception:
                             pass
                     else:
+                        # Not an entry, mark as completed (exit)
                         if side == "SELL" and (pos is not None and getattr(pos, "qty", 0.0) > 0) and filled_qty > 0:
+                            # Phase 2: Confirmed
+                            broker_order_id = str(res.get("order_id") or res.get("id") or "unknown")
+                            execution_ledger.record_confirmed(
+                                execution_id=exec_id,
+                                broker_order_id=broker_order_id,
+                                fill_price=fill_price if fill_price > 0 else last_px,
+                                now_utc=ts_now,
+                            )
+                            
                             record_exit(sym, reason="manual_sell", now_utc=ts_now)
+                            
+                            # Phase 3: Recorded
+                            execution_ledger.record_recorded(
+                                execution_id=exec_id,
+                                position_state={"symbol": sym, "side": "FLAT", "qty": 0.0},
+                                now_utc=ts_now,
+                            )
 
                             # Clear position_dt after exit
                             try:
@@ -991,11 +1058,47 @@ def execute_from_policy(
                                     rolling[sym] = node
                             except Exception:
                                 pass
-            except Exception:
-                pass
+                        else:
+                            # Order filled but not an entry or exit we track, mark as recorded
+                            execution_ledger.record_recorded(
+                                execution_id=exec_id,
+                                position_state={"info": "non-tracked fill"},
+                                now_utc=ts_now,
+                            )
+                else:
+                    # Order not filled (rejected, pending, etc.)
+                    # Mark as failed in saga ledger
+                    status = str(res.get("status") or res.get("state") or "unknown").lower() if isinstance(res, dict) else "unknown"
+                    if status not in {"filled", "partially_filled"}:
+                        execution_ledger.record_failed(
+                            execution_id=exec_id,
+                            error_msg=f"Order not filled: status={status}",
+                            now_utc=ts_now,
+                        )
+                        log(f"[dt_exec] ❌ Order not filled: {exec_id} status={status}")
+            except Exception as e:
+                # Something went wrong during position update, record failure
+                log(f"[dt_exec] ⚠️ Error in saga phase 2/3 for {exec_id}: {e}")
+                execution_ledger.record_failed(
+                    execution_id=exec_id,
+                    error_msg=f"Phase 2/3 error: {str(e)[:200]}",
+                    now_utc=ts_now,
+                )
         except Exception as e:
             blocked += 1
             bump_metric("order_errors", 1.0)
+            
+            # Try to record failure in ledger if we have exec_id
+            if exec_id is not None:
+                try:
+                    execution_ledger.record_failed(
+                        execution_id=exec_id,
+                        error_msg=f"Broker submit error: {str(e)[:200]}",
+                        now_utc=ts_now,
+                    )
+                except Exception:
+                    pass
+            
             append_trade_event(
                 {
                     "type": "order_error",

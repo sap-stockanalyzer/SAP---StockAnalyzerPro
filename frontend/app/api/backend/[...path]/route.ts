@@ -157,6 +157,12 @@ async function handleRequest(
       proxyResponse.headers.set(key, value);
     });
 
+    // Add cache control headers for client-side caching
+    // Backend returns fresh data always - client handles caching with TTL
+    proxyResponse.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+    proxyResponse.headers.set("Pragma", "no-cache");
+    proxyResponse.headers.set("Expires", "0");
+
     return proxyResponse;
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
