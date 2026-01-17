@@ -7,6 +7,7 @@ import Link from "next/link";
 import { Activity, Clock, DollarSign, Shield, SlidersHorizontal, RefreshCw, Settings } from "lucide-react";
 
 import { useSSE } from "@/hooks/useSSE";
+import { invalidateCache } from "@/lib/clientCache";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -826,6 +827,11 @@ export default function BotsPage() {
       setBundle(data);
       setLoading(false);
       setErr(null);
+      
+      // Invalidate client-side cache when SSE pushes new data
+      // This ensures fresh data on next fetch if user switches to polling
+      invalidateCache("api:/api/backend/bots/page");
+      invalidateCache("api:/api/bots/page");
     },
     onError: () => {
       // Fallback to polling on SSE error
