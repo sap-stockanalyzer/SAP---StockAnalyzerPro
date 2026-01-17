@@ -11,7 +11,7 @@
 //  - Client implements localStorage cache with TTL
 //  - SSE pushes auto-invalidate cache for real-time updates
 
-import { getCached, setCached, fetchWithCache as _fetchWithCache } from "./clientCache";
+import { fetchWithCache } from "./clientCache";
 
 export function getApiBaseUrl() {
   // Prefer env in dev/build pipelines
@@ -57,17 +57,14 @@ async function request(path: string, init: RequestInit = {}) {
 }
 
 async function get(path: string, options?: { cache?: boolean; ttl?: number }) {
+  const base = getApiBaseUrl();
+  const url = path.startsWith("http")
+    ? path
+    : `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+  
   // Support client-side caching for GET requests
   if (options?.cache && typeof window !== "undefined") {
-    const cacheKey = `api:${path}`;
-    const cached = getCached(cacheKey);
-    if (cached !== null) {
-      return cached;
-    }
-    
-    const data = await request(path, { method: "GET" });
-    setCached(cacheKey, data, { ttl: options.ttl });
-    return data;
+    return fetchWithCache(url, { ttl: options.ttl });
   }
   
   return request(path, { method: "GET" });

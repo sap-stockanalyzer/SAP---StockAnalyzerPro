@@ -131,6 +131,7 @@ export function clearAllCache(): void {
  * 
  * Usage:
  *   const data = await fetchWithCache("/api/bots/page", { ttl: 5000 });
+ *   const data = await fetchWithCache("/api/bots/page", { key: "custom_key", ttl: 5000 });
  * 
  * - First checks cache
  * - If cache miss or expired, fetches from API
@@ -139,10 +140,10 @@ export function clearAllCache(): void {
  */
 export async function fetchWithCache<T>(
   url: string,
-  options: CacheOptions & RequestInit = { key: "", ttl: DEFAULT_TTL }
+  options: Partial<CacheOptions> & RequestInit = {}
 ): Promise<T> {
   const { key, ttl, ...fetchOptions } = options;
-  const cacheKey = key || url;
+  const cacheKey = key || url; // Default to URL if no key provided
 
   // Try cache first
   const cached = getCached<T>(cacheKey);
@@ -170,17 +171,3 @@ export async function fetchWithCache<T>(
   return data;
 }
 
-/**
- * Hook to auto-invalidate cache when SSE data arrives
- * 
- * Usage:
- *   const { data } = useSSE({ url: "/events/bots" });
- *   useEffect(() => {
- *     if (data) {
- *       invalidateCache("bots_page");
- *     }
- *   }, [data]);
- */
-export function invalidateCacheOnSSE(cacheKeys: string[]): void {
-  cacheKeys.forEach((key) => invalidateCache(key));
-}
