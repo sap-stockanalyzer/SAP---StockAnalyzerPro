@@ -102,6 +102,44 @@ def _save_intraday_ui_configs(obj: Dict[str, Any]) -> None:
         return
 
 
+def _infer_intraday_bot_names(last_day: Optional[str]) -> List[str]:
+    """Infer bot names from most recent day's log files."""
+    if not last_day or not SIM_LOG_DIR.exists():
+        return []
+    
+    bots: List[str] = []
+    for f in SIM_LOG_DIR.glob(f"{last_day}_*.json"):
+        bot_name = f.stem.replace(f"{last_day}_", "")
+        if bot_name:
+            bots.append(bot_name)
+    return sorted(set(bots))
+
+
+# Default UI configuration for intraday bots
+_DEFAULT_INTRADAY_UI: Dict[str, Any] = {
+    "enabled": True,
+    "type": "intraday",
+    "horizon": "1d",
+    "risk": "moderate",
+    "rules": BOT_KNOBS_DEFAULTS.get("intraday", {}),
+}
+
+
+def _ensure_intraday_ui_defaults(bots: List[str], store: Dict[str, Any]) -> None:
+    """Ensure all discovered bots have default UI configs."""
+    if "bots" not in store or not isinstance(store["bots"], dict):
+        store["bots"] = {}
+    
+    changed = False
+    for bot_name in bots:
+        if bot_name not in store["bots"]:
+            store["bots"][bot_name] = dict(_DEFAULT_INTRADAY_UI)
+            changed = True
+    
+    if changed:
+        _save_intraday_ui_configs(store)
+
+
 def _ensure_intraday_defaults() -> None:
     """Create default UI configs for discovered intraday bots."""
     bots = _list_bot_names()

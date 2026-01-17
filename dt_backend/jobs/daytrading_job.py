@@ -559,6 +559,16 @@ def run_daytrading_cycle(
                     pass
 
         log(f"[daytrading_job] ✅ intraday cycle complete cycle_id={cycle_id} lane={lane_label}")
+        
+        # SSE Broadcast Note:
+        # Data changes are picked up by SSE polling in events_router.py (/events/bots, /events/intraday)
+        # which polls every 5 seconds. When this cycle completes, file writes update:
+        # - rolling.json.gz (intraday signals)
+        # - sim_logs/*.json (bot activity)
+        # - sim_summary.json (PnL summary)
+        # The next SSE poll will fetch fresh data and push to connected clients.
+        # Client-side cache auto-invalidates on SSE push for instant UI updates.
+        
         return {
             "cycle_id": cycle_id,
             "cycle_seq": cycle_seq,
