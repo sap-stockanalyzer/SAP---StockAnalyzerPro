@@ -573,6 +573,13 @@ def run_continuous_learning() -> Dict[str, Any]:
 # Adaptive Retraining Logic (new for ML Pipeline Feedback)
 # ==========================================================
 
+# Configuration constants for adaptive retraining
+SAMPLE_SYMBOLS_LIMIT = 50  # Maximum symbols to check for performance
+UNDERPERFORMING_THRESHOLD_SHARPE = 0.5  # Sharpe ratio below which symbol is underperforming
+UNDERPERFORMING_THRESHOLD_RATIO = 0.30  # Fraction of symbols underperforming that triggers retraining
+PERFORMANCE_WINDOW_DAYS = 3  # Days to look back for Sharpe calculation
+
+
 def should_retrain_models(rolling: Optional[Dict[str, Any]] = None) -> bool:
     """
     Check if models should be retrained based on per-symbol performance.
@@ -597,7 +604,10 @@ def should_retrain_models(rolling: Optional[Dict[str, Any]] = None) -> bool:
         if not rolling or not isinstance(rolling, dict):
             return False
         
-        symbols = [s for s in rolling.keys() if not str(s).startswith("_")][:50]  # Sample
+        symbols = [
+            s for s in rolling.keys() 
+            if not str(s).startswith("_")
+        ][:SAMPLE_SYMBOLS_LIMIT]  # Sample to avoid excessive computation
         
         if not symbols:
             return False
@@ -605,22 +615,22 @@ def should_retrain_models(rolling: Optional[Dict[str, Any]] = None) -> bool:
         underperforming_symbols = []
         
         for symbol in symbols:
-            sharpe = tracker.get_rolling_sharpe(symbol, days=3)
+            sharpe = tracker.get_rolling_sharpe(symbol, days=PERFORMANCE_WINDOW_DAYS)
             
-            if sharpe < 0.5:
+            if sharpe < UNDERPERFORMING_THRESHOLD_SHARPE:
                 underperforming_symbols.append({
                     "symbol": symbol,
                     "sharpe": sharpe,
                 })
         
-        # If >30% of symbols underperforming, trigger retraining
+        # If >threshold of symbols underperforming, trigger retraining
         underperforming_ratio = len(underperforming_symbols) / len(symbols)
         
-        if underperforming_ratio > 0.30:
+        if underperforming_ratio > UNDERPERFORMING_THRESHOLD_RATIO:
             log(
                 f"[continuous_learning] 🚨 Model underperforming: "
                 f"{len(underperforming_symbols)}/{len(symbols)} symbols "
-                f"({underperforming_ratio:.1%}) with Sharpe < 0.5"
+                f"({underperforming_ratio:.1%}) with Sharpe < {UNDERPERFORMING_THRESHOLD_SHARPE}"
             )
             return True
         
