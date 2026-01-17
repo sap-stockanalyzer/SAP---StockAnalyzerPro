@@ -95,26 +95,18 @@ def _fmt(level: str, text: str) -> str:
 # ---------------------------------------------------------
 
 def log(message: str) -> None:
-    """Normal info log."""
-    msg = _fmt("INFO", message)
-    _safe_print_utf8(msg)
-    _write_file(msg)
+    """Normal info log (delegates to default logger)."""
+    _default_logger.info(message)
 
 
 def warn(message: str) -> None:
-    msg = _fmt("WARN", message)
-    _safe_print_utf8(msg)
-    _write_file(msg)
+    """Warning log (delegates to default logger)."""
+    _default_logger.warn(message)
 
 
 def error(message: str, exc: Optional[Exception] = None) -> None:
-    if exc:
-        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-        message = f"{message}\n{tb}"
-
-    msg = _fmt("ERROR", message)
-    _safe_print_utf8(msg, stderr=True)
-    _write_file(msg)
+    """Error log with optional exception (delegates to default logger)."""
+    _default_logger.error(message, exc=exc)
 
 
 # ---------------------------------------------------------

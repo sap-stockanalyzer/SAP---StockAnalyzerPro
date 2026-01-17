@@ -44,10 +44,18 @@ import json
 import os
 import sys
 import time
-import fcntl
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+# Import fcntl for file locking (Unix only)
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    # Windows doesn't have fcntl - locking will be best-effort
+    fcntl = None  # type: ignore
+    HAS_FCNTL = False
 
 try:
     from config import PATHS  # type: ignore
@@ -137,8 +145,8 @@ class SharedTruthStore:
             
             with open(self.trades_file, "a", encoding="utf-8") as f:
                 try:
-                    # Try to acquire exclusive lock (Unix)
-                    if hasattr(fcntl, 'flock'):
+                    # Try to acquire exclusive lock (Unix only)
+                    if HAS_FCNTL and fcntl is not None:
                         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 except Exception:
                     # Windows or locking unavailable - continue anyway
@@ -147,7 +155,7 @@ class SharedTruthStore:
                 f.write(line)
                 
                 try:
-                    if hasattr(fcntl, 'flock'):
+                    if HAS_FCNTL and fcntl is not None:
                         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
                 except Exception:
                     pass

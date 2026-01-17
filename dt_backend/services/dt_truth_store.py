@@ -57,6 +57,12 @@ except Exception:  # pragma: no cover
         DT_PATHS = {}  # type: ignore
 
 
+# Shared store event field exclusions (for forwarding events)
+_SHARED_STORE_TRADE_FIELDS = {"source", "symbol", "side", "qty", "price", "reason", "pnl", "realized_pnl", "ts"}
+_SHARED_STORE_SIGNAL_FIELDS = {"type", "source", "symbol", "signal_type", "confidence", "ts"}
+_SHARED_STORE_NO_TRADE_FIELDS = {"type", "source", "symbol", "reason", "ts"}
+
+
 def _utc_iso() -> str:
     # Backward-compat wrapper (modules may import this symbol).
     return utc_iso()
@@ -326,7 +332,7 @@ def append_trade_event(event: Dict[str, Any]) -> None:
                     price=event.get("price", 0.0),
                     reason=event.get("reason", ""),
                     pnl=event.get("pnl") or event.get("realized_pnl"),
-                    **{k: v for k, v in event.items() if k not in ["source", "symbol", "side", "qty", "price", "reason", "pnl", "realized_pnl", "ts"]}
+                    **{k: v for k, v in event.items() if k not in _SHARED_STORE_TRADE_FIELDS}
                 )
             elif event_type == "signal" and "symbol" in event:
                 shared_store.append_signal_event(
@@ -334,14 +340,14 @@ def append_trade_event(event: Dict[str, Any]) -> None:
                     symbol=event.get("symbol", ""),
                     signal_type=event.get("signal_type", ""),
                     confidence=event.get("confidence"),
-                    **{k: v for k, v in event.items() if k not in ["type", "source", "symbol", "signal_type", "confidence", "ts"]}
+                    **{k: v for k, v in event.items() if k not in _SHARED_STORE_SIGNAL_FIELDS}
                 )
             elif event_type == "no_trade" and "symbol" in event:
                 shared_store.append_no_trade_event(
                     source="dt",
                     symbol=event.get("symbol", ""),
                     reason=event.get("reason", ""),
-                    **{k: v for k, v in event.items() if k not in ["type", "source", "symbol", "reason", "ts"]}
+                    **{k: v for k, v in event.items() if k not in _SHARED_STORE_NO_TRADE_FIELDS}
                 )
         
         # Also write to local file for backward compatibility
