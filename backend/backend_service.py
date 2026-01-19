@@ -67,6 +67,7 @@ from backend.routers.system_run_router import router as system_run_router
 from backend.routers.eod_bots_router import router as eod_bots_router
 from backend.routers.intraday_tape_router import router as intraday_tape_router
 from backend.routers.portfolio_router import router as portfolio_router
+from backend.routers.unified_cache_router import router as unified_cache_router
 
 from backend.admin.routes import router as admin_router
 from backend.admin.admin_tools_router import router as admin_tools_router
@@ -151,6 +152,7 @@ ROUTERS = [
     eod_bots_router,
     intraday_tape_router,
     events_router,  # SSE endpoints
+    unified_cache_router,  # Unified frontend cache
 ]
 
 for r in ROUTERS:
@@ -213,6 +215,23 @@ def _backend_heartbeat():
         time.sleep(3600)
 
 
+def _cache_updater_thread():
+    """Run unified cache updater every 5 seconds."""
+    try:
+        from backend.jobs.cache_updater_job import update_frontend_cache
+        print("[CacheUpdater] 🔄 Starting unified cache updater...", flush=True)
+        
+        while True:
+            try:
+                update_frontend_cache()
+            except Exception as e:
+                print(f"[CacheUpdater] ⚠️ Update failed: {e}", flush=True)
+            time.sleep(5)
+            
+    except Exception as e:
+        print(f"[CacheUpdater] ❌ Cache updater crashed: {e}", flush=True)
+
+
 def _scheduler_thread():
     """Run scheduler if available."""
     if scheduler_main is None:
@@ -269,6 +288,11 @@ async def on_startup():
     # Heartbeat: only in primary / non-quiet
     if ENABLE_HEARTBEAT and not QUIET_STARTUP:
         threading.Thread(target=_backend_heartbeat, daemon=True).start()
+
+    # Cache updater: run in primary only (avoid duplicate updates)
+    if not QUIET_STARTUP:
+        threading.Thread(target=_cache_updater_thread, daemon=True).start()
+        print("[Backend] 🔄 Cache updater thread enabled.", flush=True)
 
     # Scheduler: MUST be gated (primary only)
     if ENABLE_SCHEDULER and not QUIET_STARTUP:

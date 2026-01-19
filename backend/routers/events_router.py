@@ -18,6 +18,11 @@ from typing import AsyncGenerator, Dict, Any
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+try:
+    from backend.core.config import TIMEZONE
+except ImportError:
+    from backend.config import TIMEZONE  # type: ignore
+
 router = APIRouter(prefix="/events", tags=["events"])
 
 
@@ -36,9 +41,13 @@ async def stream_bots(request: Request):
     """
     Server-Sent Events stream for bots page data.
     Updates every 5 seconds.
+    Enhanced error handling to keep stream alive even if data fetch fails.
     """
     async def event_generator() -> AsyncGenerator[str, None]:
         from backend.routers.bots_page_router import bots_page_bundle
+        
+        consecutive_errors = 0
+        max_consecutive_errors = 10
         
         try:
             while True:
@@ -46,16 +55,46 @@ async def stream_bots(request: Request):
                 if await request.is_disconnected():
                     break
                 
-                # Fetch latest data (cached internally)
-                data = await _safe_call(bots_page_bundle)
-                
-                # Send SSE event
-                yield f"data: {json.dumps(data)}\n\n"
+                try:
+                    # Fetch latest data (cached internally)
+                    data = await _safe_call(bots_page_bundle)
+                    
+                    # Reset error count on success
+                    if "error" not in data:
+                        consecutive_errors = 0
+                    
+                    # Send SSE event
+                    yield f"data: {json.dumps(data)}\n\n"
+                    
+                except Exception as fetch_error:
+                    # Log error but don't break the stream
+                    consecutive_errors += 1
+                    error_data = {
+                        "error": str(fetch_error),
+                        "error_type": type(fetch_error).__name__,
+                        "timestamp": datetime.now(TIMEZONE).isoformat(),
+                    }
+                    yield f"data: {json.dumps(error_data)}\n\n"
+                    
+                    # If too many consecutive errors, break the stream
+                    if consecutive_errors >= max_consecutive_errors:
+                        break
                 
                 # Wait 5 seconds before next update
                 await asyncio.sleep(5)
+                
         except asyncio.CancelledError:
             pass
+        except Exception as stream_error:
+            # Final fallback: send error and close
+            error_data = {
+                "error": f"Stream error: {stream_error}",
+                "error_type": type(stream_error).__name__,
+            }
+            try:
+                yield f"data: {json.dumps(error_data)}\n\n"
+            except Exception:
+                pass
     
     return StreamingResponse(
         event_generator(),

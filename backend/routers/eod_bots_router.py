@@ -41,9 +41,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 try:
-    from backend.core.config import PATHS
+    from backend.core.config import PATHS, TIMEZONE
 except ImportError:
-    from backend.config import PATHS  # type: ignore
+    from backend.config import PATHS, TIMEZONE  # type: ignore
 
 # We import SwingBotConfig for typing only; config I/O is handled lazily
 from backend.bots.base_swing_bot import SwingBotConfig  # type: ignore
@@ -283,6 +283,115 @@ def _latest_day() -> Optional[str]:
     return days[-1] if days else None
 
 
+def _build_equity_curve(bot_key: str, current_equity: float) -> List[Dict[str, Any]]:
+    """
+    Build equity curve from bot activity logs.
+    
+    Returns list of {t: "YYYY-MM-DD", value: float} points.
+    Falls back to simple 2-point curve if no logs available.
+    """
+    curve: List[Dict[str, Any]] = []
+    
+    # Extract horizon from bot_key (e.g., "eod_1w" -> "1w")
+    horizon = None
+    for h in HORIZONS:
+        if bot_key.endswith(h):
+            horizon = h
+            break
+    
+    if not horizon or not BOT_LOG_ROOT.exists():
+        # Fallback: simple 2-point curve
+        cfg = None
+        try:
+            cfg = _get_bot_config(bot_key)
+        except Exception:
+            pass
+        
+        initial = _safe_float(getattr(cfg, "initial_cash", None), current_equity) if cfg else current_equity
+        # Create a simple curve: start at initial, end at current
+        days = _list_log_days()
+        if days and len(days) >= 2:
+            return [
+                {"t": days[0], "value": initial},
+                {"t": days[-1], "value": current_equity}
+            ]
+        # Ultimate fallback
+        today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+        return [
+            {"t": today, "value": current_equity}
+        ]
+    
+    # Read bot activity logs to build curve
+    hdir = BOT_LOG_ROOT / horizon
+    if not hdir.exists():
+        # Fallback
+        today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+        return [{"t": today, "value": current_equity}]
+    
+    # Collect all days with logs for this horizon
+    log_files = sorted(hdir.glob("bot_activity_*.json"))
+    
+    # Extract equity from each day's log
+    equity_by_day: Dict[str, float] = {}
+    
+    for log_file in log_files:
+        # Extract date from filename: bot_activity_YYYY-MM-DD.json
+        fname = log_file.name
+        if not fname.startswith("bot_activity_"):
+            continue
+        day = fname.replace("bot_activity_", "").replace(".json", "")
+        
+        # Load log
+        log_data = _load_json(log_file)
+        if not isinstance(log_data, dict):
+            continue
+        
+        # Get bot's data
+        bot_data = log_data.get(bot_key)
+        if not isinstance(bot_data, dict):
+            continue
+        
+        # Try to extract equity from various possible fields
+        equity_val = None
+        
+        # Check if it's a list of actions with equity
+        if isinstance(bot_data, list):
+            for action in bot_data:
+                if isinstance(action, dict):
+                    eq = action.get("equity") or action.get("equity_after")
+                    if eq is not None:
+                        equity_val = _safe_float(eq)
+                        break
+        elif isinstance(bot_data, dict):
+            # Check for direct equity field
+            equity_val = _safe_float(
+                bot_data.get("equity") 
+                or bot_data.get("equity_after")
+                or bot_data.get("ending_equity")
+                or bot_data.get("final_equity")
+            )
+        
+        if equity_val and equity_val > 0:
+            equity_by_day[day] = equity_val
+    
+    # Build curve from collected data
+    for day in sorted(equity_by_day.keys()):
+        curve.append({"t": day, "value": equity_by_day[day]})
+    
+    # If we have curve data, append current equity as latest point
+    if curve:
+        today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+        # Only add if today is different from last log day
+        if curve[-1]["t"] != today:
+            curve.append({"t": today, "value": current_equity})
+    else:
+        # No historical data, create simple curve
+        today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
+        curve = [{"t": today, "value": current_equity}]
+    
+    return curve
+
+
 # -------------------------------------------------------------------
 # Status endpoint — current PnL / positions
 # -------------------------------------------------------------------
@@ -437,6 +546,9 @@ async def eod_status():
             if last_updated:
                 last_updates.append(last_updated)
 
+            # Build equity curve for charts
+            equity_curve = _build_equity_curve(bot_key, equity)
+
             bots_out[bot_key] = {
                 "enabled": enabled,
                 "cash": cash,
@@ -444,6 +556,7 @@ async def eod_status():
                 "allocated": allocated,
                 "holdings_count": len(pos_list),
                 "equity": equity,
+                "equity_curve": equity_curve,
                 "last_update": last_updated,
                 "positions": pos_list,
             }
