@@ -5,12 +5,20 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select } from "@/components/ui/select";
 import { OptimizerResults } from "@/components/OptimizerResults";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Play, AlertCircle } from "lucide-react";
 import { api } from "@/lib/api";
 import type { OptimizerParams, OptimizerResults as OptimizerResultsType } from "@/lib/types";
+
+const horizonOptions = [
+  { label: "1 Week", value: "1w" },
+  { label: "1 Month", value: "1m" },
+  { label: "3 Months", value: "3m" },
+  { label: "6 Months", value: "6m" },
+  { label: "1 Year", value: "1y" },
+];
 
 export default function OptimizerPage() {
   const [params, setParams] = useState<OptimizerParams>({
@@ -62,21 +70,12 @@ export default function OptimizerPage() {
                 <Label htmlFor="horizon">Target Horizon</Label>
                 <Select
                   value={params.target_horizon}
-                  onValueChange={(value: any) =>
+                  onChange={(value: any) =>
                     setParams({ ...params, target_horizon: value })
                   }
-                >
-                  <SelectTrigger id="horizon" className="bg-slate-900 border-white/10">
-                    <SelectValue placeholder="Select horizon" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-slate-900 border-white/10">
-                    <SelectItem value="1w">1 Week</SelectItem>
-                    <SelectItem value="1m">1 Month</SelectItem>
-                    <SelectItem value="3m">3 Months</SelectItem>
-                    <SelectItem value="6m">6 Months</SelectItem>
-                    <SelectItem value="1y">1 Year</SelectItem>
-                  </SelectContent>
-                </Select>
+                  options={horizonOptions}
+                  placeholder="Select horizon"
+                />
               </div>
 
               {/* Risk Tolerance */}
@@ -185,7 +184,7 @@ export default function OptimizerPage() {
                 <Play size={48} className="mx-auto mb-4 opacity-40" />
                 <p className="text-lg font-medium mb-2">Ready to Optimize</p>
                 <p className="text-sm">
-                  Configure the parameters above and click "Run Optimization" to find the optimal
+                  Configure the parameters above and click &quot;Run Optimization&quot; to find the optimal
                   portfolio allocation
                 </p>
               </div>

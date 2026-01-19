@@ -4,13 +4,27 @@ import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select } from "@/components/ui/select";
 import { ModelCard } from "@/components/ModelCard";
 import { ModelDetailsPanel } from "@/components/ModelDetailsPanel";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Search, AlertCircle, Brain } from "lucide-react";
 import { api } from "@/lib/api";
 import type { ModelEntry, ModelDetails } from "@/lib/types";
+
+const typeFilterOptions = [
+  { label: "All Types", value: "all" },
+  { label: "Swing", value: "swing" },
+  { label: "Intraday", value: "intraday" },
+  { label: "Ensemble", value: "ensemble" },
+];
+
+const statusFilterOptions = [
+  { label: "All Status", value: "all" },
+  { label: "Active", value: "active" },
+  { label: "Inactive", value: "inactive" },
+  { label: "Deprecated", value: "deprecated" },
+];
 
 export default function ModelsPage() {
   const [models, setModels] = useState<ModelEntry[]>([]);
@@ -88,32 +102,20 @@ export default function ModelsPage() {
 
               {/* Type Filter */}
               <div className="w-full md:w-40">
-                <Select value={typeFilter} onValueChange={setTypeFilter}>
-                  <SelectTrigger className="bg-slate-900 border-white/10">
-                    <SelectValue placeholder="Type" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-slate-900 border-white/10">
-                    <SelectItem value="all">All Types</SelectItem>
-                    <SelectItem value="swing">Swing</SelectItem>
-                    <SelectItem value="intraday">Intraday</SelectItem>
-                    <SelectItem value="ensemble">Ensemble</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Select
+                  value={typeFilter}
+                  onChange={setTypeFilter}
+                  options={typeFilterOptions}
+                />
               </div>
 
               {/* Status Filter */}
               <div className="w-full md:w-40">
-                <Select value={statusFilter} onValueChange={setStatusFilter}>
-                  <SelectTrigger className="bg-slate-900 border-white/10">
-                    <SelectValue placeholder="Status" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-slate-900 border-white/10">
-                    <SelectItem value="all">All Status</SelectItem>
-                    <SelectItem value="active">Active</SelectItem>
-                    <SelectItem value="inactive">Inactive</SelectItem>
-                    <SelectItem value="deprecated">Deprecated</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Select
+                  value={statusFilter}
+                  onChange={setStatusFilter}
+                  options={statusFilterOptions}
+                />
               </div>
             </div>
           </CardContent>

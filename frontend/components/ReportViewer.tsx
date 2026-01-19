@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { X, Download, TrendingUp, TrendingDown } from "lucide-react";
@@ -36,6 +37,7 @@ interface ReportViewerProps {
 }
 
 export function ReportViewer({ report, onClose, onDownload, className }: ReportViewerProps) {
+  const [activeTab, setActiveTab] = useState("summary");
   const formatDate = (dateString: string) => {
     try {
       return new Date(dateString).toLocaleDateString("en-US", {
@@ -95,7 +97,7 @@ export function ReportViewer({ report, onClose, onDownload, className }: ReportV
         </CardHeader>
 
         <CardContent className="flex-1 overflow-y-auto p-6">
-          <Tabs defaultValue="summary" className="w-full">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
             <TabsList className="grid w-full grid-cols-3 bg-white/5">
               <TabsTrigger value="summary">Summary</TabsTrigger>
               <TabsTrigger value="metrics">Metrics</TabsTrigger>

@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
@@ -13,51 +14,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
-interface ModelDetails {
-  id: string;
-  name: string;
-  description?: string;
-  type: "swing" | "intraday" | "ensemble";
-  version: string;
-  accuracy: number;
-  precision?: number;
-  recall?: number;
-  f1_score?: number;
-  trained_at: string;
-  training_data_size: number;
-  features_count: number;
-  status: "active" | "inactive" | "deprecated";
-  performance_metrics: {
-    accuracy: number;
-    precision: number;
-    recall: number;
-    f1_score: number;
-    auc_roc: number;
-    confusion_matrix: number[][];
-  };
-  training_history: Array<{
-    epoch: number;
-    timestamp: string;
-    training_loss: number;
-    validation_loss: number;
-    metrics: Record<string, number>;
-  }>;
-  hyperparameters: Record<string, any>;
-  feature_importance: Array<{
-    feature_name: string;
-    importance_score: number;
-    rank: number;
-  }>;
-  training_config: {
-    algorithm: string;
-    hyperparameters: Record<string, any>;
-    training_data_source: string;
-    validation_split: number;
-    test_split: number;
-    random_seed: number;
-  };
-}
+import type { ModelDetails } from "@/lib/types";
 
 interface ModelDetailsPanelProps {
   model: ModelDetails;
@@ -66,6 +23,7 @@ interface ModelDetailsPanelProps {
 }
 
 export function ModelDetailsPanel({ model, onClose, className }: ModelDetailsPanelProps) {
+  const [activeTab, setActiveTab] = useState("overview");
   const getTypeColor = (type: string) => {
     const colors: Record<string, string> = {
       swing: "bg-blue-500/20 text-blue-400 border-blue-500/30",
@@ -111,7 +69,7 @@ export function ModelDetailsPanel({ model, onClose, className }: ModelDetailsPan
         </CardHeader>
 
         <CardContent className="flex-1 overflow-y-auto p-6">
-          <Tabs defaultValue="overview" className="w-full">
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
             <TabsList className="grid w-full grid-cols-4 bg-white/5">
               <TabsTrigger value="overview">Overview</TabsTrigger>
               <TabsTrigger value="metrics">Metrics</TabsTrigger>

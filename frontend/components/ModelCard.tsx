@@ -3,16 +3,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Brain, Calendar, TrendingUp } from "lucide-react";
-
-interface ModelEntry {
-  id: string;
-  name: string;
-  type: "swing" | "intraday" | "ensemble";
-  version: string;
-  accuracy: number;
-  trained_at: string;
-  status: "active" | "inactive" | "deprecated";
-}
+import type { ModelEntry } from "@/lib/types";
 
 interface ModelCardProps {
   model: ModelEntry;

@@ -4,13 +4,21 @@ import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select } from "@/components/ui/select";
 import { ReportCard } from "@/components/ReportCard";
 import { ReportViewer } from "@/components/ReportViewer";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Search, AlertCircle, FileText } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Report, ReportDetails } from "@/lib/types";
+
+const filterOptions = [
+  { label: "All Types", value: "all" },
+  { label: "Backtest", value: "backtest" },
+  { label: "Model", value: "model" },
+  { label: "Performance", value: "performance" },
+  { label: "Analysis", value: "analysis" },
+];
 
 export default function ReportsPage() {
   const [reports, setReports] = useState<Report[]>([]);
@@ -101,18 +109,7 @@ export default function ReportsPage() {
 
               {/* Filter */}
               <div className="w-full md:w-48">
-                <Select value={filter} onValueChange={setFilter}>
-                  <SelectTrigger className="bg-slate-900 border-white/10">
-                    <SelectValue placeholder="Filter by type" />
-                  </SelectTrigger>
-                  <SelectContent className="bg-slate-900 border-white/10">
-                    <SelectItem value="all">All Types</SelectItem>
-                    <SelectItem value="backtest">Backtest</SelectItem>
-                    <SelectItem value="model">Model</SelectItem>
-                    <SelectItem value="performance">Performance</SelectItem>
-                    <SelectItem value="analysis">Analysis</SelectItem>
-                  </SelectContent>
-                </Select>
+                <Select value={filter} onChange={setFilter} options={filterOptions} />
               </div>
             </div>
           </CardContent>
