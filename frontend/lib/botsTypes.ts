@@ -94,6 +94,21 @@ export type BotsPageBundle = {
     configs?: any;  // Intraday config structure varies
     log_days?: any;  // Dynamic log data structure
     pnl_last_day?: IntradayPnlResponse | any;  // Can be error object or PnL
+    fills_recent?: {
+      source?: string | null;
+      updated_at?: string | null;
+      fills?: IntradayFill[];
+      error?: string;
+    };
+    signals_latest?: {
+      source?: string | null;
+      updated_at?: string | null;
+      signals?: IntradaySignal[];
+      error?: string;
+    };
+    // Legacy tape field - DEPRECATED as of v1.0.0 (January 2026)
+    // Use fills_recent and signals_latest instead
+    // This field will be removed in v2.0.0
     tape?: {
       updated_at?: string | null;
       fills?: IntradayFill[];
