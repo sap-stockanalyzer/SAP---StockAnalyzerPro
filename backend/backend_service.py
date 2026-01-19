@@ -155,8 +155,22 @@ ROUTERS = [
     unified_cache_router,  # Unified frontend cache
 ]
 
+# Mount all routers with logging
 for r in ROUTERS:
     app.include_router(r)
+
+# -------------------------------------------------
+# Router Verification on Startup
+# -------------------------------------------------
+
+def _log_mounted_routers():
+    """Log all mounted routers for verification."""
+    if not QUIET_STARTUP:
+        print(f"[Backend] 📋 Mounted {len(ROUTERS)} routers:", flush=True)
+        for r in ROUTERS:
+            prefix = getattr(r, "prefix", "")
+            tags = getattr(r, "tags", [])
+            print(f"  • {prefix or '/'} ({', '.join(tags) if tags else 'no tags'})", flush=True)
 
 # -------------------------------------------------
 # Basic Endpoints
@@ -265,6 +279,7 @@ async def on_startup():
         print("🚀 AION Analytics Backend — Starting…", flush=True)
         print("────────────────────────────────────────", flush=True)
         _print_root_path()
+        _log_mounted_routers()
 
     # IMPORTANT:
     # Bot bootstrap writes files. If you run it in 2 workers you can race and get noise.
