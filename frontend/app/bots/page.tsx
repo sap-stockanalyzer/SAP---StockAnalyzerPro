@@ -19,142 +19,32 @@ import { Separator } from "@/components/ui/separator";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 
-// -----------------------------
-// Types
-// -----------------------------
+// Import centralized bots API client and types
+import {
+  getBotsPageBundle,
+  detectApiPrefix,
+  updateEodBotConfig,
+  updateIntradayBotConfig,
+  getBotsSSEUrl,
+  BOTS_CACHE_KEYS,
+} from "@/lib/botsApi";
 
-type EodBotConfig = {
-  max_alloc: number;
-  max_positions: number;
-  stop_loss: number;
-  take_profit: number;
-  aggression: number;
-  enabled?: boolean;
-};
-
-type EodConfigResponse = { configs: Record<string, EodBotConfig> };
-
-type EodStatusResponse = {
-  running?: boolean;
-  last_update?: string;
-  bots?: Record<
-    string,
-    {
-      cash?: number;
-      invested?: number;
-      allocated?: number;
-      holdings_count?: number;
-      equity?: number;
-      last_update?: string;
-      type?: string;
-      equity_curve?: Array<{ t?: string; value?: number } | number>;
-      pnl_curve?: Array<{ t?: string; value?: number } | number>;
-      positions?: any[];
-      enabled?: boolean;
-    }
-  >;
-};
-
-type IntradayPnlResponse = {
-  total?: { realized?: number; unrealized?: number; total?: number; updated_at?: string };
-  bots?: Record<string, { realized?: number; unrealized?: number; total?: number }>;
-  // sometimes your intraday summary is shaped differently; keep loose
-  date?: string;
-};
-
-type IntradayFill = {
-  ts?: string;
-  time?: string;
-  symbol?: string;
-  side?: string;
-  action?: string;
-  qty?: number;
-  price?: number;
-  pnl?: number;
-};
-
-type IntradaySignal = {
-  ts?: string;
-  time?: string;
-  symbol?: string;
-  action?: string;
-  side?: string;
-  confidence?: number;
-};
-
-type BotsPageBundle = {
-  as_of?: string;
-  swing?: {
-    status?: EodStatusResponse | any;
-    configs?: EodConfigResponse | any;
-    log_days?: any;
-  };
-  intraday?: {
-    status?: any;
-    configs?: any;
-    log_days?: any;
-    pnl_last_day?: IntradayPnlResponse | any;
-    tape?: {
-      updated_at?: string | null;
-      fills?: IntradayFill[];
-      signals?: IntradaySignal[];
-    };
-  };
-};
-
-// Draft config
-type BotDraft = EodBotConfig & {
-  penny_only?: boolean;
-  allow_etfs?: boolean;
-  max_daily_trades?: number;
-};
+import type {
+  BotsPageBundle,
+  EodStatusResponse,
+  EodConfigResponse,
+  IntradayPnlResponse,
+  IntradayFill,
+  IntradaySignal,
+  BotDraft,
+} from "@/lib/botsTypes";
 
 // -----------------------------
 // Constants
 // -----------------------------
 
-// Cache keys for client-side caching (used with SSE invalidation)
-const CACHE_KEYS = {
-  BOTS_PAGE_BACKEND: "api:/api/backend/bots/page",
-  BOTS_PAGE_DIRECT: "api:/api/bots/page",
-} as const;
-
-// -----------------------------
-// Small helpers
-// -----------------------------
-
-function withBust(url: string) {
-  const bust = `_ts=${Date.now()}`;
-  return url.includes("?") ? `${url}&${bust}` : `${url}?${bust}`;
-}
-
-async function apiGet<T>(url: string): Promise<T> {
-  const r = await fetch(withBust(url), { method: "GET", cache: "no-store" });
-  if (!r.ok) throw new Error(`GET ${url} failed: ${r.status}`);
-  return (await r.json()) as T;
-}
-
-async function apiPostJson<T>(url: string, body: any): Promise<T> {
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`POST ${url} failed: ${r.status}`);
-  return (await r.json()) as T;
-}
-
-async function tryGetFirst<T>(urls: string[]): Promise<{ url: string; data: T } | null> {
-  for (const u of urls) {
-    try {
-      const data = await apiGet<T>(u);
-      return { url: u, data };
-    } catch {
-      // ignore
-    }
-  }
-  return null;
-}
+// Re-export cache keys for use in this component
+const CACHE_KEYS = BOTS_CACHE_KEYS;
 
 function fmtMoney(n: any): string {
   const x = Number(n);
@@ -648,11 +538,11 @@ function BotRow({
   async function save() {
     setSaving(true);
     try {
-      // try the mounted prefix first
+      // Use centralized API client
       if (botType === "swing") {
-        await apiPostJson(`${apiPrefix}/eod/configs`, { bot_key: botKey, config: draft });
+        await updateEodBotConfig(botKey, draft, apiPrefix);
       } else {
-        await apiPostJson(`${apiPrefix}/intraday/configs`, { bot_key: botKey, config: draft });
+        await updateIntradayBotConfig(botKey, draft, apiPrefix);
       }
       setDirty(false);
     } catch {
@@ -831,7 +721,7 @@ export default function BotsPage() {
 
   // SSE connection for real-time updates
   const { data: sseData, error: sseError, isConnected } = useSSE<BotsPageBundle>({
-    url: "/api/backend/events/bots",
+    url: getBotsSSEUrl(),
     enabled: live && useSSEMode,
     onData: (data) => {
       setBundle(data);
@@ -840,8 +730,8 @@ export default function BotsPage() {
       
       // Invalidate client-side cache when SSE pushes new data
       // This ensures fresh data on next fetch if user switches to polling
-      invalidateCache(CACHE_KEYS.BOTS_PAGE_BACKEND);
-      invalidateCache(CACHE_KEYS.BOTS_PAGE_DIRECT);
+      invalidateCache(CACHE_KEYS.PAGE_BACKEND);
+      invalidateCache(CACHE_KEYS.PAGE_DIRECT);
     },
     onError: () => {
       // Fallback to polling on SSE error
@@ -855,17 +745,12 @@ export default function BotsPage() {
 
     setErr(null);
     try {
-      const hit = await tryGetFirst<BotsPageBundle>([
-        "/api/backend/bots/page",
-        "/api/bots/page",
-      ]);
-
-      if (!hit) throw new Error("Bots bundle endpoint not found (check backend router mount).");
-
-      // remember which prefix worked for saves
-      apiPrefixRef.current = hit.url.startsWith("/api/backend") ? "/api/backend" : "/api";
-
-      setBundle(hit.data);
+      const data = await getBotsPageBundle();
+      setBundle(data);
+      
+      // Detect which API prefix is working for save operations
+      const prefix = await detectApiPrefix();
+      apiPrefixRef.current = prefix;
     } catch (e: any) {
       setErr(e?.message ?? "Failed to load");
     } finally {

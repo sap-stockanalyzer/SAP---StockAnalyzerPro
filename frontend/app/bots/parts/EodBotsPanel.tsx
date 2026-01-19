@@ -95,8 +95,8 @@ export default function EodBotsPanel() {
       setError(null);
       setRefreshing(true);
 
-      const baseUrl = process.env.NEXT_PUBLIC_API_URL || "";
-      const res = await fetch(`${baseUrl}/api/eod/status`);
+      // Use proxy route instead of direct backend call
+      const res = await fetch("/api/backend/eod/status");
 
       if (!res.ok) {
         throw new Error(`failed (status ${res.status})`);
