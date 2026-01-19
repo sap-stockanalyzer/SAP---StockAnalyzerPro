@@ -202,6 +202,7 @@ PIPELINE: List[Tuple[str, str]] = [
     ("performance", "Performance aggregation (system metrics)"),
     ("aion_brain", "AION brain update (behavioral memory)"),
     ("policy", "Policy engine (brain-aligned)"),
+    ("swing_bot_eod", "Swing Bot EOD Rebalance"),
     ("insights", "Insights builder"),
     ("supervisor", "Supervisor agent"),
 ]
@@ -743,6 +744,48 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
+        # 19) Swing Bot EOD Rebalance (after policy)
+        key, title = PIPELINE[18]
+        _phase(title, 19, TOTAL_PHASES)
+        t0 = time.time()
+        try:
+            import subprocess
+            
+            bots = ["1w", "2w", "4w"]
+            results = {}
+            
+            for bot in bots:
+                try:
+                    cmd = [
+                        sys.executable, "-u", "-m",
+                        f"backend.bots.runner_{bot}",
+                        "--mode", "full"
+                    ]
+                    proc = subprocess.run(
+                        cmd,
+                        cwd=ROOT,
+                        capture_output=True,
+                        text=True,
+                        timeout=600  # 10 min timeout per bot
+                    )
+                    results[bot] = {
+                        "exit_code": proc.returncode,
+                        "success": proc.returncode == 0,
+                    }
+                except subprocess.TimeoutExpired:
+                    results[bot] = {"exit_code": -1, "success": False, "error": "timeout"}
+                except Exception as e:
+                    results[bot] = {"exit_code": -1, "success": False, "error": str(e)}
+            
+            success_count = sum(1 for r in results.values() if r.get("success"))
+            _record_ok(summary, key, {"rebalanced": success_count, "total": len(bots), "results": results}, t0)
+            _write_summary(summary)
+            log(f"✅ Swing bot EOD rebalance complete — {success_count}/{len(bots)} successful.")
+        except Exception as e:
+            _record_err(summary, key, e, t0)
+            _write_summary(summary)
+            log(f"⚠️ Swing bot rebalance failed (non-fatal, continuing): {e}")
+
         # Post-policy UI refresh (latest_predictions.json) — do NOT append ledger twice
         try:
             if log_predictions is not None:
@@ -759,9 +802,9 @@ def run_nightly_job(
         except Exception as e_refresh:
             log(f"[nightly_job] ⚠️ post-policy UI refresh failed (continuing): {e_refresh}")
 
-        # 19) Insights builder
-        key, title = PIPELINE[18]
-        _phase(title, 19, TOTAL_PHASES)
+        # 20) Insights builder
+        key, title = PIPELINE[19]
+        _phase(title, 20, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(build_daily_insights, "backend.services.insights_builder.build_daily_insights")
@@ -773,9 +816,9 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 20) Supervisor agent
-        key, title = PIPELINE[19]
-        _phase(title, 20, TOTAL_PHASES)
+        # 21) Supervisor agent
+        key, title = PIPELINE[20]
+        _phase(title, 21, TOTAL_PHASES)
         t0 = time.time()
         try:
             _require(run_supervisor_agent, "backend.core.supervisor_agent.run_supervisor_agent")
@@ -787,7 +830,7 @@ def run_nightly_job(
             _record_err(summary, key, e, t0)
             _write_summary(summary)
 
-        # 21) Phase 6: auto knob tuner (best-effort; does not affect pipeline status)
+        # 22) Phase 6: auto knob tuner (best-effort; does not affect pipeline status)
         t0 = time.time()
         try:
             if run_swing_knob_tuner is None:
@@ -809,7 +852,7 @@ def run_nightly_job(
             }
             _write_summary(summary)
 
-        # 22) EOD Snapshot capture (only in live mode, not replay)
+        # 23) EOD Snapshot capture (only in live mode, not replay)
         if mode != "replay":
             t0 = time.time()
             try:
