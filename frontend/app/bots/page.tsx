@@ -6,8 +6,6 @@ import Link from "next/link";
 
 import { Activity, Clock, DollarSign, Shield, SlidersHorizontal, RefreshCw, Settings } from "lucide-react";
 
-import { useSSE } from "@/hooks/useSSE";
-import { invalidateCache } from "@/lib/clientCache";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,8 +23,6 @@ import {
   detectApiPrefix,
   updateEodBotConfig,
   updateIntradayBotConfig,
-  getBotsSSEUrl,
-  BOTS_CACHE_KEYS,
 } from "@/lib/botsApi";
 
 import type {
@@ -43,8 +39,7 @@ import type {
 // Constants
 // -----------------------------
 
-// Re-export cache keys for use in this component
-const CACHE_KEYS = BOTS_CACHE_KEYS;
+
 
 function fmtMoney(n: any): string {
   const x = Number(n);
@@ -712,32 +707,11 @@ export default function BotsPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  const [live, setLive] = useState(true);
-  const [useSSEMode, setUseSSEMode] = useState(true); // Toggle between SSE and polling
+    const [live, setLive] = useState(true);
   const [pollMs, setPollMs] = useState(5000);
 
   const inFlightRef = useRef(false);
-  const apiPrefixRef = useRef<string>("/api/backend"); // we’ll auto-detect
-
-  // SSE connection for real-time updates
-  const { data: sseData, error: sseError, isConnected } = useSSE<BotsPageBundle>({
-    url: getBotsSSEUrl(),
-    enabled: live && useSSEMode,
-    onData: (data) => {
-      setBundle(data);
-      setLoading(false);
-      setErr(null);
-      
-      // Invalidate client-side cache when SSE pushes new data
-      // This ensures fresh data on next fetch if user switches to polling
-      invalidateCache(CACHE_KEYS.PAGE_BACKEND);
-      invalidateCache(CACHE_KEYS.PAGE_DIRECT);
-    },
-    onError: () => {
-      // Fallback to polling on SSE error
-      setUseSSEMode(false);
-    },
-  });
+  const apiPrefixRef = useRef<string>("/api/backend"); // we'll auto-detect
 
   async function refresh() {
     if (inFlightRef.current) return;
@@ -759,27 +733,25 @@ export default function BotsPage() {
     }
   }
 
-  // Initial load with fallback
+  // Initial load
   useEffect(() => {
-    if (!useSSEMode) {
-      refresh();
-    }
+    refresh();
 
     const onVis = () => {
-      if (document.visibilityState === "visible" && !useSSEMode) refresh();
+      if (document.visibilityState === "visible") refresh();
     };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [useSSEMode]);
+  }, []);
 
-  // Fallback polling when SSE is disabled
+  // Auto-refresh polling when live mode enabled
   useEffect(() => {
-    if (!live || useSSEMode) return;
+    if (!live) return;
     const t = setInterval(refresh, pollMs);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live, pollMs, useSSEMode]);
+  }, [live, pollMs]);
 
   const eodStatus: EodStatusResponse | null = (bundle?.swing?.status && !bundle?.swing?.status?.error)
     ? (bundle?.swing?.status as any)
@@ -794,14 +766,22 @@ export default function BotsPage() {
     : null;
 
   const fillsArr = useMemo(() => {
-    return (bundle?.intraday?.tape?.fills ?? []) as IntradayFill[];
+    const fillsData = bundle?.intraday?.fills_recent;
+    if (fillsData && !fillsData?.error && Array.isArray(fillsData?.fills)) {
+      return fillsData.fills as IntradayFill[];
+    }
+    return [];
   }, [bundle]);
 
   const signalsArr = useMemo(() => {
-    return (bundle?.intraday?.tape?.signals ?? []) as IntradaySignal[];
+    const signalsData = bundle?.intraday?.signals_latest;
+    if (signalsData && !signalsData?.error && Array.isArray(signalsData?.signals)) {
+      return signalsData.signals as IntradaySignal[];
+    }
+    return [];
   }, [bundle]);
 
-  const dtUpdatedAt = bundle?.intraday?.tape?.updated_at ?? null;
+  const dtUpdatedAt = bundle?.intraday?.fills_recent?.updated_at ?? bundle?.intraday?.signals_latest?.updated_at ?? null;
 
   const swingBots = useMemo(() => {
     const bots = eodStatus?.bots ?? {};
@@ -883,8 +863,7 @@ export default function BotsPage() {
             <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
               <Switch checked={live} onCheckedChange={setLive} />
               <div className="text-xs text-white/70">Live</div>
-              {useSSEMode && isConnected && <Badge variant="outline" className="text-xs">SSE</Badge>}
-              {!useSSEMode && <Badge variant="outline" className="text-xs">Polling</Badge>}
+              <Badge variant="outline" className="text-xs">Polling</Badge>
               <Separator orientation="vertical" className="mx-2 h-5 bg-white/10" />
               <Button size="sm" variant={pollMs === 2000 ? "default" : "outline"} onClick={() => setPollMs(2000)}>
                 2s
