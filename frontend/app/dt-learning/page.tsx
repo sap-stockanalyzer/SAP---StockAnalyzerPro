@@ -2,54 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-
-interface LearningMetrics {
-  performance_7d: {
-    win_rate: number;
-    accuracy: number;
-    total_trades: number;
-    profit_factor: number;
-    sharpe_ratio: number;
-    avg_win: number;
-    avg_loss: number;
-    consecutive_wins: number;
-    consecutive_losses: number;
-  };
-  performance_30d: {
-    win_rate: number;
-    accuracy: number;
-    total_trades: number;
-  };
-  baseline: {
-    win_rate: number;
-    accuracy: number;
-    profit_factor: number;
-  };
-  model_health: {
-    days_since_retrain: number;
-    confidence_calibration: number;
-    next_retrain_estimate: string;
-  };
-  missed_opportunities: {
-    total_evaluated: number;
-    profitable_missed_pct: number;
-    missed_pnl_usd: number;
-    suggestions: string[];
-  };
-  dt_brain_knobs: Record<string, {
-    current: number;
-    default: number;
-    range: [number, number];
-    diff: number;
-    diff_pct: number;
-  }>;
-  trade_quality: {
-    total_trades_7d: number;
-    win_rate_7d: number;
-    profit_factor_7d: number;
-    sharpe_ratio_7d: number;
-  };
-}
+import { getDtLearningMetrics } from "@/lib/dtApi";
+import type { LearningMetrics } from "@/lib/dtTypes";
 
 function MetricCard({ 
   label, 
@@ -142,11 +96,7 @@ export default function DTLearningDashboard() {
     const fetchMetrics = async () => {
       try {
         setLoading(true);
-        const response = await fetch("/api/backend/api/dt/learning/metrics");
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        const data = await response.json();
+        const data = await getDtLearningMetrics();
         setMetrics(data);
         setError(null);
       } catch (e) {

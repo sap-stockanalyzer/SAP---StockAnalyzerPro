@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useSSE } from "@/hooks/useSSE";
+import { startDtReplay, getDtReplayStatus } from "@/lib/dtApi";
+import type { ReplayStatusResponse } from "@/lib/dtTypes";
 
 /* -------------------------------------------------- */
 /* Backend base (always via Next.js proxy)            */
@@ -11,13 +13,6 @@ function getBackendBaseUrl() {
   return "/api/backend";
 }
 
-// Your dt_backend proxy base. This MUST match your Next.js route folder.
-// If your route is: app/api/dt/[...path]/route.ts  -> keep "/api/dt"
-// If your route is: app/api/dt-backend/[...path]/route.ts -> change to "/api/dt-backend"
-function getDtBackendBaseUrl() {
-  return "/api/dt";
-}
-
 /* -------------------------------------------------- */
 /* Types                                              */
 /* -------------------------------------------------- */
@@ -25,13 +20,6 @@ function getDtBackendBaseUrl() {
 type ReplayStatus = {
   status?: string;
   percent_complete?: number;
-  current_day?: string | null;
-  eta_secs?: number | null;
-};
-
-type DtReplayStatus = {
-  status?: string;
-  progress?: number; // 0..1
   current_day?: string | null;
   eta_secs?: number | null;
 };
@@ -56,7 +44,7 @@ export default function AdminPage() {
   const [lastActionResult, setLastActionResult] = useState<any>(null);
 
   const [replay, setReplay] = useState<ReplayStatus | null>(null);
-  const [dtReplay, setDtReplay] = useState<DtReplayStatus | null>(null);
+  const [dtReplay, setDtReplay] = useState<ReplayStatusResponse | null>(null);
 
   // Use browser-safe timer type (avoids NodeJS typings in client bundles)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -194,18 +182,16 @@ export default function AdminPage() {
   /* ================================================== */
 
   async function fetchDtReplayStatus() {
-    // DT endpoints do not require swing admin token in your current backend;
-    // they are protected (or not) by dt_backend itself.
-    const res = await fetch(`${getDtBackendBaseUrl()}/api/replay/status`, {
-      cache: "no-store",
-    });
+    try {
+      const data = await getDtReplayStatus();
+      setDtReplay(data);
 
-    const data = await res.json().catch(() => null);
-    if (data) setDtReplay(data);
-
-    const st = String(data?.status || "");
-    if (["idle", "done", "complete", "stopped"].includes(st)) {
-      stopDtPolling();
+      const st = String(data?.status || "");
+      if (["idle", "done", "complete", "stopped"].includes(st)) {
+        stopDtPolling();
+      }
+    } catch (e) {
+      console.error("Error fetching DT replay status:", e);
     }
   }
 
@@ -222,21 +208,17 @@ export default function AdminPage() {
     }
   }
 
-  async function startDtReplay() {
-    setStatus("Starting DT replay...");
-    const res = await fetch(`${getDtBackendBaseUrl()}/api/replay/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ weeks: 4 }),
-      cache: "no-store",
-    });
-
-    if (res.ok) {
-      setDtReplay((r) => ({ ...(r || {}), status: "running", progress: 0 }));
+  async function startDtReplayHandler() {
+    try {
+      setStatus("Starting DT replay...");
+      const response = await startDtReplay(4);
+      setDtReplay({ status: "running", progress: 0 });
       startDtPolling();
-    } else {
-      const msg = await res.text().catch(() => "");
-      setStatus(`Failed to start DT replay ❌ ${msg}`);
+      setStatus(`DT replay started: ${response.job_id || "success"} ✅`);
+    } catch (e) {
+      const errorMsg = e instanceof Error ? e.message : "Unknown error";
+      setStatus(`Failed to start DT replay ❌ ${errorMsg}`);
+      console.error("Error starting DT replay:", e);
     }
   }
 
@@ -589,7 +571,7 @@ export default function AdminPage() {
           </div>
           <div className="text-xs mb-2">{dtTargetPct.toFixed(1)}%</div>
           {dtReplay?.current_day && <div className="text-xs mb-3">Day: {dtReplay.current_day}</div>}
-          <button onClick={startDtReplay} className="w-full bg-sky-600 hover:bg-sky-700 py-2 rounded">
+          <button onClick={startDtReplayHandler} className="w-full bg-sky-600 hover:bg-sky-700 py-2 rounded">
             Start DT Replay
           </button>
         </div>
