@@ -26,9 +26,15 @@ interface RawBotState {
   positions: RawBotPosition[];
 }
 
-interface StatusApiResponse {
-  price_status: string;
-  bots: Record<string, RawBotState>;
+interface BotsPageBundle {
+  as_of?: string;
+  swing?: {
+    status?: {
+      running?: boolean;
+      last_update?: string;
+      bots?: Record<string, RawBotState>;
+    };
+  };
 }
 
 /** UI-facing summary for each bot */
@@ -95,18 +101,20 @@ export default function EodBotsPanel() {
       setError(null);
       setRefreshing(true);
 
-      const baseUrl = process.env.NEXT_PUBLIC_API_URL || "";
-      const res = await fetch(`${baseUrl}/api/eod/status`);
+      // Fetch from unified bots page endpoint (via Next.js proxy)
+      const res = await fetch("/api/backend/bots/page", { cache: "no-store" });
 
       if (!res.ok) {
         throw new Error(`failed (status ${res.status})`);
       }
 
-      const data = (await res.json()) as StatusApiResponse;
+      const bundle = (await res.json()) as BotsPageBundle;
 
-      setPriceStatus(data.price_status ?? "unknown");
+      // Extract EOD/swing bot status from the bundle
+      const statusData = bundle?.swing?.status;
+      setPriceStatus(statusData?.running ? "ok" : "idle");
 
-      const rawBots = data.bots ?? {};
+      const rawBots = statusData?.bots ?? {};
 
       // ---- Build BotSummary[] for the top cards + table ----
       const uiBots: BotSummary[] = Object.entries(rawBots).map(

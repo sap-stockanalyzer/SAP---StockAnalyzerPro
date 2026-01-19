@@ -5,9 +5,10 @@ import { useSearchParams } from "next/navigation";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { TrendingUp, TrendingDown, AlertCircle } from "lucide-react";
+import { getApiBaseUrl } from "@/lib/api";
 
 // API endpoints via Next.js proxy
-const API_BASE = "";
+const API_BASE = getApiBaseUrl();
 
 // Type definitions
 type LivePrice = {
@@ -103,7 +104,7 @@ function PredictPageContent() {
       try {
         // Fetch live prices
         const priceRes = await fetch(
-          `${API_BASE}/api/backend/api/live-prices/prices?symbols=${ticker}`,
+          `${API_BASE}/api/live-prices/prices?symbols=${ticker}`,
           { cache: "no-store" }
         );
 
@@ -118,7 +119,7 @@ function PredictPageContent() {
         // Fetch predictions
         try {
           const predRes = await fetch(
-            `${API_BASE}/api/backend/api/models/predict?symbols=${ticker}`,
+            `${API_BASE}/api/models/predict?symbols=${ticker}`,
             { cache: "no-store" }
           );
 
@@ -134,7 +135,7 @@ function PredictPageContent() {
         // Fetch intraday signals (optional)
         try {
           const intradayRes = await fetch(
-            `${API_BASE}/api/backend/api/intraday/symbol/${ticker}`,
+            `${API_BASE}/api/intraday/symbol/${ticker}`,
             { cache: "no-store" }
           );
 

@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import clsx from "clsx";
+import { getApiBaseUrl } from "@/lib/api";
 
 type TaskStatus = "idle" | "queued" | "running" | "done" | "error";
 
@@ -96,9 +97,7 @@ function ProgressButton(props: {
 }
 
 export default function OverridesPage() {
-  const API_BASE =
-    process.env.NEXT_PUBLIC_BACKEND_URL ??
-    "http://209.126.82.160:8000";
+  const API_BASE = getApiBaseUrl();
 
   // Per-task UI state
   const [tasks, setTasks] = useState<Record<string, TaskUI>>(() => {
