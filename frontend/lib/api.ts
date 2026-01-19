@@ -116,6 +116,120 @@ export async function getBotsPage(useCache: boolean = false) {
   return get(path, { cache: useCache, ttl: 5000 });
 }
 
+// ========== Optimizer API ==========
+
+/**
+ * Run portfolio optimization with specified parameters
+ */
+export async function runPortfolioOptimizer(params: any): Promise<any> {
+  return post("/api/optimizer/run", params);
+}
+
+/**
+ * Get efficient frontier data for visualization
+ */
+export async function getEfficientFrontier(): Promise<any> {
+  return get("/api/optimizer/frontier");
+}
+
+// ========== Reports API ==========
+
+/**
+ * List all available reports
+ */
+export async function listReports(): Promise<any[]> {
+  return get("/api/reports/list");
+}
+
+/**
+ * Get detailed information about a specific report
+ */
+export async function getReportDetails(reportId: string): Promise<any> {
+  return get(`/api/reports/${reportId}`);
+}
+
+/**
+ * Download a report in the specified format
+ */
+export async function downloadReport(
+  reportId: string,
+  format: "pdf" | "csv" | "json"
+): Promise<Blob> {
+  const base = getApiBaseUrl();
+  const url = `${base}/api/reports/${reportId}/download?format=${format}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Failed to download report: ${res.status} ${res.statusText}`);
+  }
+  return res.blob();
+}
+
+/**
+ * Generate a new report with specified parameters
+ */
+export async function generateReport(params: any): Promise<any> {
+  return post("/api/reports/generate", params);
+}
+
+// ========== Model Registry API ==========
+
+/**
+ * List all models in the registry
+ */
+export async function listModels(): Promise<any[]> {
+  return get("/api/models/list");
+}
+
+/**
+ * Get detailed information about a specific model
+ */
+export async function getModelDetails(modelId: string): Promise<any> {
+  return get(`/api/models/${modelId}`);
+}
+
+/**
+ * Get performance metrics for a model
+ */
+export async function getModelPerformance(modelId: string): Promise<any> {
+  return get(`/api/models/${modelId}/performance`);
+}
+
+/**
+ * Upload/create a new model
+ */
+export async function uploadModel(modelData: any): Promise<any> {
+  const formData = new FormData();
+  formData.append("file", modelData.file);
+  formData.append("name", modelData.name);
+  formData.append("type", modelData.type);
+  if (modelData.description) {
+    formData.append("description", modelData.description);
+  }
+  if (modelData.hyperparameters) {
+    formData.append("hyperparameters", JSON.stringify(modelData.hyperparameters));
+  }
+  
+  const base = getApiBaseUrl();
+  const url = `${base}/api/models/upload`;
+  const res = await fetch(url, {
+    method: "POST",
+    body: formData,
+  });
+  
+  if (!res.ok) {
+    throw new Error(`Failed to upload model: ${res.status} ${res.statusText}`);
+  }
+  
+  return res.json();
+}
+
+/**
+ * Get model training history
+ */
+export async function getModelTrainingHistory(modelId: string): Promise<any[]> {
+  return get(`/api/models/${modelId}/history`);
+}
+
 // ---- Settings / Configuration API ----
 
 /**
@@ -207,6 +321,29 @@ export const api = {
 
   // Portfolio
   portfolio: getPortfolio,
+
+  // Optimizer
+  optimizer: {
+    run: runPortfolioOptimizer,
+    getFrontier: getEfficientFrontier,
+  },
+
+  // Reports
+  reports: {
+    list: listReports,
+    getDetails: getReportDetails,
+    download: downloadReport,
+    generate: generateReport,
+  },
+
+  // Model Registry
+  models: {
+    list: listModels,
+    getDetails: getModelDetails,
+    getPerformance: getModelPerformance,
+    upload: uploadModel,
+    getHistory: getModelTrainingHistory,
+  },
 
   // Legacy endpoints (may not exist on backend, kept for compatibility)
   // These will throw errors if called but not implemented on backend
