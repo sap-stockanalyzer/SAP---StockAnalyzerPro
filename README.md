@@ -286,13 +286,78 @@ Aion_Analytics/
 - `GET /api/live-prices` - Real-time market prices
 
 #### Bots
-- `GET /api/eod-bots` - EOD bot status
+- `GET /api/bots/page` - Unified bots page bundle (swing + intraday)
+- `GET /api/bots/overview` - Alias for /api/bots/page
+- `GET /api/eod/status` - EOD (swing) bots status with positions & PnL
+- `GET /api/eod/configs` - EOD bot configurations
+- `GET /api/eod/configs/{bot_key}` - Single bot config
+- `PUT /api/eod/configs/{bot_key}` - Update bot config
+- `GET /api/eod/logs/days` - List of trading days with logs
+- `GET /api/eod/logs/last-day` - Latest day's logs
+- `GET /api/eod/logs/{day}` - Logs for specific day
 - `GET /api/bots-hub` - Bot management hub
-- `POST /api/eod-bots/{bot_id}/run` - Execute bot
+
+#### Portfolio
+- `GET /api/portfolio/holdings/top/{horizon}` - Top holdings by PnL
+  - `horizon`: `1w` (7 days) or `1m` (28 days)
+  - Query param: `limit` (default: 3)
+  - Returns: List of top holdings with current prices, entry prices, PnL, days held
+
+#### Events (Server-Sent Events / SSE)
+- `GET /api/events/bots` - Real-time bots page updates (5s interval)
+- `GET /api/events/admin/logs` - Live admin logs stream (2s interval)
+- `GET /api/events/intraday` - Intraday snapshot updates (5s interval)
 
 #### Models
 - `GET /api/models` - Model metrics
 - `GET /api/metrics` - System metrics
+
+**Example Responses:**
+
+Portfolio holdings:
+```json
+GET /api/portfolio/holdings/top/1w?limit=3
+{
+  "horizon": "1w",
+  "count": 3,
+  "holdings": [
+    {
+      "ticker": "AAPL",
+      "current_price": 185.50,
+      "avg_entry_price": 175.00,
+      "pnl_dollars": 105.00,
+      "pnl_percent": 6.0,
+      "quantity": 10,
+      "days_held": 8,
+      "entry_date": "2026-01-08"
+    }
+  ]
+}
+```
+
+EOD bot status:
+```json
+GET /api/eod/status
+{
+  "running": true,
+  "last_update": "2026-01-19T03:00:00Z",
+  "bots": {
+    "eod_1w": {
+      "enabled": true,
+      "cash": 5000.0,
+      "invested": 10000.0,
+      "allocated": 2500.0,
+      "holdings_count": 4,
+      "equity": 15000.0,
+      "equity_curve": [
+        {"t": "2026-01-01", "value": 14500.0},
+        {"t": "2026-01-19", "value": 15000.0}
+      ],
+      "positions": [...]
+    }
+  }
+}
+```
 
 ### DT Backend API (Port 8010)
 
