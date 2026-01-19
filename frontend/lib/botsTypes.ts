@@ -77,18 +77,23 @@ export type IntradaySignal = {
 // Combined Bots Page Bundle
 // ============================================
 
+// Note: Some fields use `any` type for backward compatibility with dynamic
+// backend responses. The backend may return different shapes for status,
+// configs, and log data depending on availability and version.
+// This preserves existing behavior while providing type safety for known fields.
+
 export type BotsPageBundle = {
   as_of?: string;
   swing?: {
-    status?: EodStatusResponse | any;
-    configs?: EodConfigResponse | any;
-    log_days?: any;
+    status?: EodStatusResponse | any;  // Can be error object or status
+    configs?: EodConfigResponse | any;  // Can be error object or configs
+    log_days?: any;  // Dynamic log data structure
   };
   intraday?: {
-    status?: any;
-    configs?: any;
-    log_days?: any;
-    pnl_last_day?: IntradayPnlResponse | any;
+    status?: any;  // Intraday status structure varies
+    configs?: any;  // Intraday config structure varies
+    log_days?: any;  // Dynamic log data structure
+    pnl_last_day?: IntradayPnlResponse | any;  // Can be error object or PnL
     tape?: {
       updated_at?: string | null;
       fills?: IntradayFill[];
