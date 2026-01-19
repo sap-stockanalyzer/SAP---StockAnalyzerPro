@@ -18,6 +18,11 @@ from typing import AsyncGenerator, Dict, Any
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
+try:
+    from backend.core.config import TIMEZONE
+except ImportError:
+    from backend.config import TIMEZONE  # type: ignore
+
 router = APIRouter(prefix="/events", tags=["events"])
 
 
@@ -67,7 +72,7 @@ async def stream_bots(request: Request):
                     error_data = {
                         "error": str(fetch_error),
                         "error_type": type(fetch_error).__name__,
-                        "timestamp": datetime.now().isoformat(),
+                        "timestamp": datetime.now(TIMEZONE).isoformat(),
                     }
                     yield f"data: {json.dumps(error_data)}\n\n"
                     

@@ -63,14 +63,13 @@ class UnifiedCacheService:
             # Handle async function
             result = bots_page_bundle()
             if inspect.isawaitable(result):
-                # We're in sync context, so create event loop if needed
+                # Use asyncio.run() for clean async handling
                 try:
-                    loop = asyncio.get_event_loop()
+                    cache_data["data"]["bots"] = asyncio.run(result)
                 except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                
-                cache_data["data"]["bots"] = loop.run_until_complete(result)
+                    # If event loop already running, try to get it
+                    loop = asyncio.get_event_loop()
+                    cache_data["data"]["bots"] = loop.run_until_complete(result)
             else:
                 cache_data["data"]["bots"] = result
         except Exception as e:

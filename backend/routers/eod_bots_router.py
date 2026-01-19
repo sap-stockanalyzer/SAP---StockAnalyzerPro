@@ -41,9 +41,9 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 try:
-    from backend.core.config import PATHS
+    from backend.core.config import PATHS, TIMEZONE
 except ImportError:
-    from backend.config import PATHS  # type: ignore
+    from backend.config import PATHS, TIMEZONE  # type: ignore
 
 # We import SwingBotConfig for typing only; config I/O is handled lazily
 from backend.bots.base_swing_bot import SwingBotConfig  # type: ignore
