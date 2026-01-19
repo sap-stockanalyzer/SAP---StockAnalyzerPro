@@ -1,38 +1,52 @@
-// /src/lib/api.ts
+// /frontend/lib/api.ts
 // Centralized API client for Next.js frontend
 //
-// Fixes:
-//  - Do NOT default to 0.0.0.0 (not a routable host)
-//  - Do NOT use relative fetch("/api/...") for backend calls (hits Next server)
-//  - One base URL used everywhere
-//
-// Caching Strategy:
+// Architecture:
+//  - Uses Next.js API proxy routes (/api/backend/* and /api/dt/*)
+//  - Proxy routes forward to backend servers avoiding CORS
 //  - Backend has NO cache (returns fresh data always)
 //  - Client implements localStorage cache with TTL
 //  - SSE pushes auto-invalidate cache for real-time updates
 
 import { fetchWithCache } from "./clientCache";
 
+/**
+ * Get the base URL for main backend API calls.
+ * Always uses Next.js proxy route to avoid CORS.
+ */
 export function getApiBaseUrl() {
-  // Prefer env in dev/build pipelines
-  const envUrl = (process.env.NEXT_PUBLIC_API_URL || "").trim();
-
-  // Optional runtime override (useful for your future .exe)
-  // You can set this from UI settings and persist it in localStorage.
-  const runtimeUrl =
-    (typeof window !== "undefined" && localStorage.getItem("AION_API_BASE_URL")) || "";
-
-  const raw = (runtimeUrl || envUrl || "http://127.0.0.1:8000").trim();
-
-  // Normalize: remove trailing slashes
-  return raw.replace(/\/+$/, "");
+  // In browser: always use Next.js proxy route
+  if (typeof window !== "undefined") {
+    return "/api/backend";
+  }
+  
+  // Server-side: use configured backend URL or proxy
+  return process.env.NEXT_PUBLIC_BACKEND_URL || "/api/backend";
 }
 
-async function request(path: string, init: RequestInit = {}) {
-  const base = getApiBaseUrl();
+/**
+ * Get the base URL for DT (intraday) backend API calls.
+ * Always uses Next.js proxy route to avoid CORS.
+ */
+export function getDtApiBaseUrl() {
+  // In browser: always use Next.js proxy route
+  if (typeof window !== "undefined") {
+    return "/api/dt";
+  }
+  
+  // Server-side: use configured DT backend URL or proxy
+  return process.env.NEXT_PUBLIC_DT_BACKEND_URL || "/api/dt";
+}
+
+/**
+ * Make a request to the backend API.
+ * Automatically uses the appropriate backend (main or DT).
+ */
+async function request(path: string, init: RequestInit = {}, useDt: boolean = false) {
+  const base = useDt ? getDtApiBaseUrl() : getApiBaseUrl();
   const url = path.startsWith("http")
     ? path
-    : `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+    : `${base}${path.startsWith("/") ? path : `/${path}`}`;
 
   const res = await fetch(url, {
     ...init,
@@ -56,36 +70,47 @@ async function request(path: string, init: RequestInit = {}) {
   return data;
 }
 
-async function get(path: string, options?: { cache?: boolean; ttl?: number }) {
-  const base = getApiBaseUrl();
+/**
+ * GET request with optional client-side caching.
+ */
+async function get(path: string, options?: { cache?: boolean; ttl?: number; useDt?: boolean }) {
+  const base = options?.useDt ? getDtApiBaseUrl() : getApiBaseUrl();
   const url = path.startsWith("http")
     ? path
-    : `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+    : `${base}${path.startsWith("/") ? path : `/${path}`}`;
   
   // Support client-side caching for GET requests
   if (options?.cache && typeof window !== "undefined") {
     return fetchWithCache(url, { ttl: options.ttl });
   }
   
-  return request(path, { method: "GET" });
+  return request(path, { method: "GET" }, options?.useDt);
 }
 
-async function post(path: string, body?: any) {
+/**
+ * POST request with optional body.
+ */
+async function post(path: string, body?: any, useDt: boolean = false) {
   return request(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
+  }, useDt);
 }
 
-// ---- Your exported API wrappers (examples) ----
+// ---- Exported API wrappers ----
 
+/**
+ * Get intraday snapshot data.
+ */
 export async function getIntradaySnapshot(limit: number = 120, useCache: boolean = false) {
-  // IMPORTANT: use absolute backend base, not relative /api/*
   const path = `/api/intraday/snapshot?limit=${limit}`;
   return get(path, { cache: useCache, ttl: 5000 });
 }
 
+/**
+ * Get bots page data (unified status for all bot families).
+ */
 export async function getBotsPage(useCache: boolean = false) {
   const path = "/api/bots/page";
   return get(path, { cache: useCache, ttl: 5000 });
@@ -135,8 +160,37 @@ export async function updateSettings(updates: Record<string, string>): Promise<{
   return post("/api/settings/update", { updates });
 }
 
+// ---- Health & Metrics API ----
+
+/**
+ * Get system health status.
+ */
+export async function getHealth() {
+  return get("/health");
+}
+
+/**
+ * Get model metrics.
+ * @param n - Number of metrics to return (default: 20)
+ */
+export async function getMetrics(n: number = 20) {
+  return get(`/api/metrics/overview?limit=${n}`);
+}
+
+// ---- Portfolio API ----
+
+/**
+ * Get portfolio data (holdings, equity, performance).
+ */
+export async function getPortfolio() {
+  return get("/api/portfolio/holdings/top/1w");
+}
+
+// ---- Unified API Object ----
+
 export const api = {
-  health: () => get("/health"),
+  // Health
+  health: getHealth,
 
   // Settings & Configuration
   settings: {
@@ -148,13 +202,17 @@ export const api = {
     saveDtKnobs,
   },
 
-  // NOTE: these endpoints look legacy (not in your openapi dump).
-  // Keep them only if they actually exist on the backend.
-  // Otherwise they will throw and break pages that call them.
-  metrics: (n = 20) => get(`/metrics?n=${n}`),
-  buildML: () => post("/build-ml-data"),
-  monitorDrift: () => post("/monitor_drift"),
-  featureColumns: () => get("/feature-columns"),
+  // Metrics
+  metrics: getMetrics,
+
+  // Portfolio
+  portfolio: getPortfolio,
+
+  // Legacy endpoints (may not exist on backend, kept for compatibility)
+  // These will throw errors if called but not implemented on backend
+  buildML: () => post("/api/model/train"),
+  monitorDrift: () => get("/api/metrics/drift"),
+  featureColumns: () => get("/api/model/status"),
 };
 
 export type MetricLog = Record<
