@@ -877,7 +877,7 @@ export default function BotsPage() {
             </div>
 
             <Button variant="outline" onClick={refresh} disabled={loading} className="gap-2">
-              <RefreshCw className="h-4 w-4" />
+              <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
               Refresh
             </Button>
           </div>
@@ -885,6 +885,13 @@ export default function BotsPage() {
 
         {err ? (
           <div className="mb-6 rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-200">{err}</div>
+        ) : null}
+
+        {loading && !bundle ? (
+          <div className="mb-6 rounded-xl border border-white/10 bg-white/5 p-8 text-center">
+            <RefreshCw className="mx-auto h-8 w-8 animate-spin text-white/40 mb-3" />
+            <div className="text-sm text-white/60">Loading bots data...</div>
+          </div>
         ) : null}
 
         {/* SWING BOTS */}
