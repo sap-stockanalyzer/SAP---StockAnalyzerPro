@@ -280,7 +280,7 @@ def _append_cycle_decisions(cycle_id: str, rolling: Dict[str, Any]) -> None:
 
 
 def run_daytrading_cycle(
-    execute: bool = False,
+    execute: bool = True,
     max_symbols: Optional[int] = None,
     max_positions: int = 50,
     execution_cfg: ExecutionConfig | None = None,
