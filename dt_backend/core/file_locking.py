@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generator, Optional, Union
 
-from dt_backend.core.logger_dt import log
+from dt_backend.core.logger_dt import log, debug
 
 PathLike = Union[str, Path]
 
@@ -125,7 +125,7 @@ def AcquireLock(
                 time.sleep(0.05)
         
         if acquired:
-            log(f"[file_locking] ✅ Acquired {lock.lock_type} lock: {lock.path.name}")
+            debug(f"[file_locking] ✅ Acquired {lock.lock_type} lock: {lock.path.name}")
         else:
             log(f"[file_locking] ⚠️ Timeout acquiring {lock.lock_type} lock: {lock.path.name}")
         
@@ -141,7 +141,7 @@ def AcquireLock(
             try:
                 if lock.acquired:
                     fcntl.flock(fd, fcntl.LOCK_UN)
-                    log(f"[file_locking] 🔓 Released lock: {lock.path.name}")
+                    debug(f"[file_locking] 🔓 Released lock: {lock.path.name}")
                 os.close(fd)
             except Exception as e:
                 log(f"[file_locking] ⚠️ Error releasing lock for {lock.path}: {e}")
@@ -330,7 +330,7 @@ def AcquireMultipleLocks(
         all_acquired = len(acquired_fds) == len(paths)
         
         if all_acquired:
-            log(f"[file_locking] ✅ Acquired {len(acquired_fds)} locks")
+            debug(f"[file_locking] ✅ Acquired {len(acquired_fds)} locks")
         
         yield all_acquired
         
@@ -344,6 +344,6 @@ def AcquireMultipleLocks(
             try:
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
-                log(f"[file_locking] 🔓 Released lock: {path.name}")
+                debug(f"[file_locking] 🔓 Released lock: {path.name}")
             except Exception as e:
                 log(f"[file_locking] ⚠️ Error releasing lock {path.name}: {e}")

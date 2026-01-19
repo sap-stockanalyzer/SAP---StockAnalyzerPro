@@ -10,6 +10,7 @@ Features:
 - Auto-rotate daily log files
 - Thread-safe + multiprocess-safe friendly
 - Consistent format: [component] [source] [level] message
+- Configurable log level via LOG_LEVEL environment variable
 
 Architecture:
 - Logger class with DI support for specialized features
@@ -25,6 +26,25 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Any, Dict
+
+# Log level constants (similar to logging module)
+DEBUG = 10
+INFO = 20
+WARNING = 30
+ERROR = 40
+
+# Map string log levels to numeric values
+LOG_LEVELS = {
+    "DEBUG": DEBUG,
+    "INFO": INFO,
+    "WARNING": WARNING,
+    "WARN": WARNING,
+    "ERROR": ERROR,
+}
+
+# Get log level from environment (default: WARNING)
+_LOG_LEVEL_STR = os.getenv("LOG_LEVEL", "WARNING").upper()
+_GLOBAL_LOG_LEVEL = LOG_LEVELS.get(_LOG_LEVEL_STR, WARNING)
 
 # Determine log base directory
 try:
@@ -94,6 +114,11 @@ def _fmt(level: str, text: str) -> str:
 # Public Logging Functions
 # ---------------------------------------------------------
 
+def debug(message: str) -> None:
+    """Debug log (delegates to default logger)."""
+    _default_logger.debug(message)
+
+
 def log(message: str) -> None:
     """Normal info log (delegates to default logger)."""
     _default_logger.info(message)
@@ -121,6 +146,7 @@ class Logger:
     - DT brain instance for knob logging
     - Source tracking (swing/dt/backend)
     - Component naming
+    - Log level filtering
     
     Format: [component] [source] [level] message
     """
@@ -131,6 +157,7 @@ class Logger:
         source: str = "backend",  # "swing" | "dt" | "backend"
         dt_brain: Optional[Any] = None,  # Optional: DT brain instance for knob logging
         log_dir: Optional[Path] = None,  # Optional: override log directory
+        log_level: Optional[int] = None,  # Optional: override log level (defaults to global)
     ):
         """
         Initialize logger with optional DI features.
@@ -140,11 +167,13 @@ class Logger:
             source: System source ("swing", "dt", or "backend")
             dt_brain: Optional DT brain instance for brain-specific logging
             log_dir: Optional override for log directory
+            log_level: Optional log level override (DEBUG, INFO, WARNING, ERROR)
         """
         self.name = name
         self.source = source
         self.dt_brain = dt_brain
         self.log_dir = log_dir or LOG_BASE
+        self.log_level = log_level if log_level is not None else _GLOBAL_LOG_LEVEL
         self._ensure_log_dir()
     
     def _ensure_log_dir(self) -> None:
@@ -191,8 +220,21 @@ class Logger:
         except Exception:
             pass
     
+    def _should_log(self, level: int) -> bool:
+        """Check if message at given level should be logged."""
+        return level >= self.log_level
+    
+    def debug(self, message: str, **context) -> None:
+        """Log debug level message."""
+        if not self._should_log(DEBUG):
+            return
+        msg = self._format_msg("DEBUG", message, **context)
+        self._write_log(msg)
+    
     def info(self, message: str, **context) -> None:
         """Log info level message."""
+        if not self._should_log(INFO):
+            return
         msg = self._format_msg("INFO", message, **context)
         self._write_log(msg)
     
@@ -202,6 +244,8 @@ class Logger:
     
     def warn(self, message: str, **context) -> None:
         """Log warning level message."""
+        if not self._should_log(WARNING):
+            return
         msg = self._format_msg("WARN", message, **context)
         self._write_log(msg)
     
@@ -211,6 +255,8 @@ class Logger:
     
     def error(self, message: str, exc: Optional[BaseException] = None, **context) -> None:
         """Log error level message with optional exception traceback."""
+        if not self._should_log(ERROR):
+            return
         if exc is not None:
             tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
             message = f"{message}\n{tb}".rstrip()

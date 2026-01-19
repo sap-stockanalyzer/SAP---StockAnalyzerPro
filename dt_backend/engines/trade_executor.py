@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from dt_backend.core.data_pipeline_dt import _read_rolling, save_rolling
-from dt_backend.core.logger_dt import log
+from dt_backend.core.logger_dt import log, debug
 from dt_backend.core.time_override_dt import now_utc as _now_utc_override
 from dt_backend.services.dt_truth_store import append_trade_event, bump_metric
 from dt_backend.services import execution_ledger
@@ -528,7 +528,7 @@ def execute_from_policy(
         if DecisionRecorder is not None:
             recorder = DecisionRecorder()
             cycle_id = recorder.start_cycle()
-            log(f"[dt_exec] 📝 Decision recording started for cycle {cycle_id}")
+            debug(f"[dt_exec] 📝 Decision recording started for cycle {cycle_id}")
     except Exception as e:
         log(f"[dt_exec] ⚠️ Failed to initialize decision recorder: {e}")
 
@@ -920,7 +920,7 @@ def execute_from_policy(
                 meta=_entry_meta_from_global(rolling, ts_now),
                 now_utc=ts_now,
             )
-            log(f"[dt_exec] 📝 Phase 1 (pending): {exec_id} {side} {qty} {sym}")
+            debug(f"[dt_exec] 📝 Phase 1 (pending): {exec_id} {side} {qty} {sym}")
             
             # Submit order to broker
             res = broker.submit_order(order, last_price=(last_px if last_px > 0 else None))
@@ -954,7 +954,7 @@ def execute_from_policy(
                             fill_price=fill_price,
                             now_utc=ts_now,
                         )
-                        log(f"[dt_exec] ✅ Phase 2 (confirmed): {exec_id} filled @ {fill_price}")
+                        debug(f"[dt_exec] ✅ Phase 2 (confirmed): {exec_id} filled @ {fill_price}")
                         
                         risk = _plan_risk(node, side=side, last_price=fill_price, atr=atr, cfg=cfg)
                         plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else {}
@@ -1033,7 +1033,7 @@ def execute_from_policy(
                             position_state=position_snapshot,
                             now_utc=ts_now,
                         )
-                        log(f"[dt_exec] 🎉 Phase 3 (recorded): {exec_id} complete")
+                        debug(f"[dt_exec] 🎉 Phase 3 (recorded): {exec_id} complete")
 
                         # Record entry decision for replay
                         try:
@@ -1182,9 +1182,9 @@ def execute_from_policy(
     # Save rolling cache with updated position_dt fields for next cycle
     try:
         save_rolling(rolling)
-        log("[dt_exec] 💾 saved rolling cache with position updates")
+        debug("[dt_exec] 💾 saved rolling cache with position updates")
     except Exception as e:
         log(f"[dt_exec] ⚠️ failed to save rolling cache: {e}")
 
-    log(f"[dt_exec] ✅ execute_from_policy done: {out}")
+    debug(f"[dt_exec] ✅ execute_from_policy done: {out}")
     return out

@@ -59,6 +59,11 @@ _dt_logger = UnifiedLogger(
 # Public API (backward compatible)
 # ---------------------------------------------------------------------------
 
+def debug(message: str) -> None:
+    """Log debug level message."""
+    _dt_logger.debug(message)
+
+
 def info(message: str) -> None:
     """Log info level message."""
     _dt_logger.info(message)

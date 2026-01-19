@@ -3,12 +3,96 @@
 Tests the Logger class with dependency injection and source tracking.
 """
 
+import os
 import pytest
 import tempfile
 from pathlib import Path
 from unittest.mock import Mock
 
-from utils.logger import Logger, set_default_logger, get_default_logger, log, warn, error
+from utils.logger import Logger, set_default_logger, get_default_logger, log, warn, error, debug, DEBUG, INFO, WARNING, ERROR
+
+
+class TestLogLevels:
+    """Test log level filtering functionality."""
+    
+    def test_debug_level_filtering(self, tmp_path):
+        """Test DEBUG logs are filtered out when log level is WARNING."""
+        logger = Logger(name="test", source="backend", log_dir=tmp_path, log_level=WARNING)
+        logger.debug("Debug message")
+        logger.info("Info message")
+        logger.warn("Warning message")
+        logger.error("Error message")
+        
+        # Check log file
+        log_files = list(tmp_path.glob("*.log"))
+        assert len(log_files) == 1
+        content = log_files[0].read_text()
+        
+        # DEBUG and INFO should be filtered out
+        assert "Debug message" not in content
+        assert "Info message" not in content
+        
+        # WARNING and ERROR should be present
+        assert "Warning message" in content
+        assert "Error message" in content
+    
+    def test_info_level_filtering(self, tmp_path):
+        """Test DEBUG logs are filtered when log level is INFO."""
+        logger = Logger(name="test", source="backend", log_dir=tmp_path, log_level=INFO)
+        logger.debug("Debug message")
+        logger.info("Info message")
+        logger.warn("Warning message")
+        
+        log_files = list(tmp_path.glob("*.log"))
+        content = log_files[0].read_text()
+        
+        # DEBUG should be filtered out
+        assert "Debug message" not in content
+        
+        # INFO and WARNING should be present
+        assert "Info message" in content
+        assert "Warning message" in content
+    
+    def test_debug_level_shows_all(self, tmp_path):
+        """Test all logs are shown when log level is DEBUG."""
+        logger = Logger(name="test", source="backend", log_dir=tmp_path, log_level=DEBUG)
+        logger.debug("Debug message")
+        logger.info("Info message")
+        logger.warn("Warning message")
+        logger.error("Error message")
+        
+        log_files = list(tmp_path.glob("*.log"))
+        content = log_files[0].read_text()
+        
+        # All messages should be present
+        assert "Debug message" in content
+        assert "Info message" in content
+        assert "Warning message" in content
+        assert "Error message" in content
+    
+    def test_error_level_filtering(self, tmp_path):
+        """Test only ERROR logs shown when log level is ERROR."""
+        logger = Logger(name="test", source="backend", log_dir=tmp_path, log_level=ERROR)
+        logger.debug("Debug message")
+        logger.info("Info message")
+        logger.warn("Warning message")
+        logger.error("Error message")
+        
+        log_files = list(tmp_path.glob("*.log"))
+        content = log_files[0].read_text()
+        
+        # Only ERROR should be present
+        assert "Debug message" not in content
+        assert "Info message" not in content
+        assert "Warning message" not in content
+        assert "Error message" in content
+    
+    def test_default_log_level_is_warning(self):
+        """Test default log level is WARNING (from environment)."""
+        # The global default is set from LOG_LEVEL env var
+        logger = Logger(name="test", source="backend")
+        # Default should be WARNING based on our changes
+        assert logger.log_level == WARNING
 
 
 class TestLogger:
@@ -35,7 +119,7 @@ class TestLogger:
     
     def test_info_logging(self, tmp_path):
         """Test info level logging."""
-        logger = Logger(name="test_component", source="swing", log_dir=tmp_path)
+        logger = Logger(name="test_component", source="swing", log_dir=tmp_path, log_level=INFO)
         logger.info("Test message")
         
         # Check log file was created
@@ -98,7 +182,7 @@ class TestLogger:
     
     def test_log_with_context(self, tmp_path):
         """Test logging with context parameters."""
-        logger = Logger(name="test_component", source="swing", log_dir=tmp_path)
+        logger = Logger(name="test_component", source="swing", log_dir=tmp_path, log_level=INFO)
         logger.info("Trade executed", symbol="AAPL", qty=100, price=150.50)
         
         # Check log contains context
@@ -122,7 +206,7 @@ class TestLogger:
     def test_dt_brain_update_with_brain(self, tmp_path):
         """Test dt_brain_update with dt_brain configured."""
         mock_brain = Mock()
-        logger = Logger(name="test_component", source="dt", dt_brain=mock_brain, log_dir=tmp_path)
+        logger = Logger(name="test_component", source="dt", dt_brain=mock_brain, log_dir=tmp_path, log_level=INFO)
         logger.dt_brain_update("test_knob", 0.5, 0.7, "test reason")
         
         # Should log info with brain emoji
@@ -135,7 +219,7 @@ class TestLogger:
     
     def test_log_alias(self, tmp_path):
         """Test log() is an alias for info()."""
-        logger = Logger(name="test_component", source="backend", log_dir=tmp_path)
+        logger = Logger(name="test_component", source="backend", log_dir=tmp_path, log_level=INFO)
         logger.log("Test log message")
         
         log_files = list(tmp_path.glob("*.log"))
@@ -173,6 +257,11 @@ class TestModuleLevelFunctions:
         assert retrieved.name == "custom"
         assert retrieved.source == "swing"
     
+    def test_module_level_debug(self):
+        """Test module-level debug function works."""
+        # Should not raise
+        debug("Test debug message")
+    
     def test_module_level_log(self):
         """Test module-level log function works."""
         # Should not raise
@@ -194,9 +283,10 @@ class TestDTLoggerCompatibility:
     
     def test_dt_logger_imports(self):
         """Test dt_backend logger functions can be imported."""
-        from dt_backend.core.logger_dt import log, info, warn, error
+        from dt_backend.core.logger_dt import log, info, warn, error, debug
         
         # Should not raise
+        debug("Test debug")
         info("Test info")
         warn("Test warn")
         error("Test error")
