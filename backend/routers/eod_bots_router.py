@@ -382,7 +382,7 @@ def _build_equity_curve(bot_key: str, current_equity: float) -> List[Dict[str, A
     if curve:
         today = datetime.now(TIMEZONE).strftime("%Y-%m-%d")
         # Only add if today is different from last log day
-        if not curve or curve[-1]["t"] != today:
+        if curve[-1]["t"] != today:
             curve.append({"t": today, "value": current_equity})
     else:
         # No historical data, create simple curve

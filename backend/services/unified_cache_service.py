@@ -66,10 +66,18 @@ class UnifiedCacheService:
                 # Use asyncio.run() for clean async handling
                 try:
                     cache_data["data"]["bots"] = asyncio.run(result)
-                except RuntimeError:
-                    # If event loop already running, try to get it
-                    loop = asyncio.get_event_loop()
-                    cache_data["data"]["bots"] = loop.run_until_complete(result)
+                except RuntimeError as e:
+                    # If event loop already running, need to use different approach
+                    try:
+                        loop = asyncio.get_running_loop()
+                        # We're in an async context with running loop
+                        cache_data["data"]["bots"] = loop.run_until_complete(result)
+                    except RuntimeError:
+                        # No running loop, create new one
+                        cache_data["errors"]["bots"] = {
+                            "error": "Cannot run async function in sync context with active loop",
+                            "suggestion": "Call update_all from async context or use sync data fetching"
+                        }
             else:
                 cache_data["data"]["bots"] = result
         except Exception as e:
@@ -94,9 +102,7 @@ class UnifiedCacheService:
         
         # 3. System status (lightweight)
         try:
-            from backend.routers.system_status_router import router as system_router
-            # Note: We don't call the full system status as it may be heavy.
-            # Instead, just mark that system is responding.
+            # Just mark that system is responding
             cache_data["data"]["system"] = {
                 "status": "ok",
                 "timestamp": datetime.now(TIMEZONE).isoformat(),
