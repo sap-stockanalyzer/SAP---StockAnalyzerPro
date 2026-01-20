@@ -72,18 +72,50 @@ async function apiPostJson<T>(url: string, body: any): Promise<T> {
 }
 
 /**
- * Try multiple URLs in order, return first success
+ * Try multiple URLs in parallel with timeout, return first success
+ * 
+ * Instead of sequential execution (48s timeout per URL), this:
+ * 1. Races all URLs in parallel with configurable timeout
+ * 2. Returns the first successful response
+ * 3. Fails fast if no URL responds within timeout
+ * 
+ * @param urls - Array of URLs to try
+ * @param timeoutMs - Timeout per request in milliseconds (default: 3000)
  */
-async function tryGetFirst<T>(urls: string[]): Promise<{ url: string; data: T } | null> {
-  for (const url of urls) {
+async function tryGetFirst<T>(
+  urls: string[], 
+  timeoutMs: number = 3000
+): Promise<{ url: string; data: T } | null> {
+  if (urls.length === 0) return null;
+
+  // Create a promise for each URL with timeout
+  const promises = urls.map(async (url) => {
+    // Create a timeout promise that rejects after timeoutMs
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs);
+    });
+
+    // Race the fetch against the timeout
     try {
-      const data = await apiGet<T>(url);
+      const data = await Promise.race([
+        apiGet<T>(url),
+        timeoutPromise
+      ]);
       return { url, data };
-    } catch {
-      // Continue to next URL
+    } catch (error) {
+      // Re-throw to let Promise.any handle it
+      throw error;
     }
+  });
+
+  // Promise.any returns the first fulfilled promise
+  // If all promises reject, it throws an AggregateError
+  try {
+    return await Promise.any(promises);
+  } catch (error) {
+    // All URLs failed - return null
+    return null;
   }
-  return null;
 }
 
 // ============================================
