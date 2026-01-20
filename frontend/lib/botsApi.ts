@@ -106,9 +106,11 @@ async function tryGetFirst<T>(
 
   // Create a promise for each URL with timeout
   const promises = urls.map(async (url) => {
+    let timeoutId: NodeJS.Timeout | null = null;
+    
     // Create a timeout promise that rejects after timeoutMs
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs);
+      timeoutId = setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms`)), timeoutMs);
     });
 
     // Race the fetch against the timeout
@@ -117,8 +119,12 @@ async function tryGetFirst<T>(
         apiGet<T>(url),
         timeoutPromise
       ]);
+      // Clear timeout if request completes successfully
+      if (timeoutId) clearTimeout(timeoutId);
       return { url, data };
     } catch (error) {
+      // Clear timeout on error as well
+      if (timeoutId) clearTimeout(timeoutId);
       // Re-throw to let Promise.any handle it
       throw error;
     }
