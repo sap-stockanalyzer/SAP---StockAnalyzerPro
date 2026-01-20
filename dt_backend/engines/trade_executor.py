@@ -24,6 +24,7 @@ v0.3 updates
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -112,7 +113,6 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
 
 
 def _env(name: str, default: str = "") -> str:
-    import os
     return (os.getenv(name, default) or "").strip()
 
 
@@ -877,7 +877,6 @@ def execute_from_policy(
                 pass
         
         # NEW (Phase 3): Max loss per symbol per day check
-        import os
         max_loss_per_symbol = _safe_float(os.getenv("DT_MAX_LOSS_PER_SYMBOL_DAY", "500.0"), 500.0)
         if max_loss_per_symbol > 0:
             try:
