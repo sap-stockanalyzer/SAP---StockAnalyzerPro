@@ -15,6 +15,22 @@
  * - No CORS errors
  * - Works with remote backends
  * - Centralized error handling
+ * 
+ * ===== ENDPOINT MAPPINGS =====
+ * 
+ * Frontend Call                          → Proxy Route              → Backend Endpoint
+ * ----------------------------------------------------------------------------------------------------
+ * /api/backend/bots/page                → /api/bots/page          → GET /api/bots/page
+ * /api/backend/bots/overview            → /api/bots/overview      → GET /api/bots/overview (alias)
+ * /api/backend/eod/status               → /api/eod/status         → GET /api/eod/status
+ * /api/backend/eod/configs              → /api/eod/configs        → GET /api/eod/configs
+ * /api/backend/eod/configs              → /api/eod/configs        → POST /api/eod/configs (update)
+ * /api/backend/intraday/configs         → /api/intraday/configs   → POST /api/intraday/configs
+ * /api/backend/events/bots              → /api/events/bots        → GET /api/events/bots (SSE)
+ * /api/backend/cache/unified            → /api/cache/unified      → GET /api/cache/unified
+ * 
+ * Note: The Next.js proxy automatically adds the /api prefix for routes that don't have special
+ *       handling (dashboard, admin routes are exceptions).
  */
 
 import type { 
@@ -72,18 +88,76 @@ async function apiPostJson<T>(url: string, body: any): Promise<T> {
 }
 
 /**
- * Try multiple URLs in order, return first success
+ * Try multiple URLs in parallel with timeout, return first success
+ * 
+ * Instead of sequential execution (48s timeout per URL), this:
+ * 1. Races all URLs in parallel with configurable timeout
+ * 2. Returns the first successful response
+ * 3. Fails fast if no URL responds within timeout
+ * 4. Properly cleans up all pending requests using AbortController
+ * 
+ * @param urls - Array of URLs to try
+ * @param timeoutMs - Timeout per request in milliseconds (default: 3000)
  */
-async function tryGetFirst<T>(urls: string[]): Promise<{ url: string; data: T } | null> {
-  for (const url of urls) {
+async function tryGetFirst<T>(
+  urls: string[], 
+  timeoutMs: number = 3000
+): Promise<{ url: string; data: T } | null> {
+  if (urls.length === 0) return null;
+
+  // Keep track of all abort controllers for cleanup
+  const controllers: AbortController[] = [];
+
+  // Create a promise for each URL with timeout and abort capability
+  const promises = urls.map(async (url) => {
+    const controller = new AbortController();
+    controllers.push(controller);
+    
+    // Set up timeout that will abort the request
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, timeoutMs);
+
     try {
-      const data = await apiGet<T>(url);
+      // Make request with abort signal
+      const response = await fetch(url, { 
+        method: "GET", 
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      
+      // Clear timeout on success
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        throw new Error(`GET ${url} failed: ${response.status} ${response.statusText}`);
+      }
+      
+      const data = await response.json() as T;
       return { url, data };
-    } catch {
-      // Continue to next URL
+    } catch (error) {
+      // Clear timeout on error
+      clearTimeout(timeoutId);
+      
+      // Re-throw to let Promise.any handle it
+      throw error;
     }
+  });
+
+  // Promise.any returns the first fulfilled promise
+  // If all promises reject, it throws an AggregateError
+  try {
+    const result = await Promise.any(promises);
+    
+    // Abort all other pending requests
+    controllers.forEach(c => c.abort());
+    
+    return result;
+  } catch (error) {
+    // All URLs failed - abort any still-pending requests
+    controllers.forEach(c => c.abort());
+    return null;
   }
-  return null;
 }
 
 // ============================================
