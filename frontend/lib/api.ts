@@ -7,6 +7,27 @@
 //  - Backend has NO cache (returns fresh data always)
 //  - Client implements localStorage cache with TTL
 //  - SSE pushes auto-invalidate cache for real-time updates
+//
+// ===== ENDPOINT MAPPINGS =====
+//
+// Frontend Call                          → Proxy Route              → Backend Endpoint
+// ----------------------------------------------------------------------------------------------------
+// /api/backend/bots/page                → /api/bots/page          → GET /api/bots/page
+// /api/backend/dashboard/metrics        → /dashboard/metrics      → GET /dashboard/metrics (no /api)
+// /api/backend/portfolio/holdings/top/1w → /api/portfolio/...     → GET /api/portfolio/holdings/top/1w
+// /api/backend/cache/unified            → /api/cache/unified      → GET /api/cache/unified
+// /api/backend/settings/keys            → /api/settings/keys      → GET /api/settings/keys
+// /api/backend/settings/knobs           → /api/settings/knobs     → GET /api/settings/knobs
+// /api/backend/settings/dt-knobs        → /api/settings/dt-knobs  → GET /api/settings/dt-knobs
+// /api/backend/metrics/overview         → /api/metrics/overview   → GET /api/metrics/overview
+// /api/backend/models/list              → /api/models/list        → GET /api/models/list
+// /api/backend/reports/list             → /api/reports/list       → GET /api/reports/list
+// /api/backend/admin/*                  → /admin/*                → /admin/* (no /api prefix)
+//
+// Note: The Next.js proxy in /app/api/backend/[...path]/route.ts automatically:
+//       - Adds /api prefix for most routes
+//       - Skips /api prefix for dashboard/* and admin/* routes
+//       - Preserves query strings and request bodies
 
 import { fetchWithCache } from "./clientCache";
 

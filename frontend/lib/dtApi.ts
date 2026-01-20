@@ -6,6 +6,25 @@
 //  - Proxy route forwards to DT backend (port 8010) avoiding CORS
 //  - Mirrors the structure of main API client (api.ts)
 //  - Provides type-safe functions for all DT backend endpoints
+//
+// ===== ENDPOINT MAPPINGS =====
+//
+// Frontend Call                          → Proxy Route              → DT Backend Endpoint
+// ----------------------------------------------------------------------------------------------------
+// /api/dt/health                        → /health                 → GET /health
+// /api/dt/health/ready                  → /health/ready           → GET /health/ready
+// /api/dt/health/live                   → /health/live            → GET /health/live
+// /api/dt/api/dt/learning/metrics       → /api/dt/learning/metrics → GET /api/dt/learning/metrics
+// /api/dt/api/replay/start              → /api/replay/start       → POST /api/replay/start
+// /api/dt/api/replay/status             → /api/replay/status      → GET /api/replay/status
+// /api/dt/jobs/cycle                    → /jobs/cycle             → POST /jobs/cycle
+// /api/dt/jobs/status                   → /jobs/status            → GET /jobs/status
+// /api/dt/data/rolling                  → /data/rolling           → GET /data/rolling
+// /api/dt/data/positions                → /data/positions         → GET /data/positions
+// /api/dt/data/metrics                  → /data/metrics           → GET /data/metrics
+//
+// Note: The Next.js proxy in /app/api/dt/[...path]/route.ts forwards paths as-is,
+//       without adding any prefix. DT backend uses different routing conventions.
 
 import { getDtApiBaseUrl } from "./api";
 import type {

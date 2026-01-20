@@ -15,6 +15,22 @@
  * - No CORS errors
  * - Works with remote backends
  * - Centralized error handling
+ * 
+ * ===== ENDPOINT MAPPINGS =====
+ * 
+ * Frontend Call                          → Proxy Route              → Backend Endpoint
+ * ----------------------------------------------------------------------------------------------------
+ * /api/backend/bots/page                → /api/bots/page          → GET /api/bots/page
+ * /api/backend/bots/overview            → /api/bots/overview      → GET /api/bots/overview (alias)
+ * /api/backend/eod/status               → /api/eod/status         → GET /api/eod/status
+ * /api/backend/eod/configs              → /api/eod/configs        → GET /api/eod/configs
+ * /api/backend/eod/configs              → /api/eod/configs        → POST /api/eod/configs (update)
+ * /api/backend/intraday/configs         → /api/intraday/configs   → POST /api/intraday/configs
+ * /api/backend/events/bots              → /api/events/bots        → GET /api/events/bots (SSE)
+ * /api/backend/cache/unified            → /api/cache/unified      → GET /api/cache/unified
+ * 
+ * Note: The Next.js proxy automatically adds the /api prefix for routes that don't have special
+ *       handling (dashboard, admin routes are exceptions).
  */
 
 import type { 
