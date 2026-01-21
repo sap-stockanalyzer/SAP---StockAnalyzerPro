@@ -14,9 +14,9 @@
 // /api/dt/health                        → /health                 → GET /health
 // /api/dt/health/ready                  → /health/ready           → GET /health/ready
 // /api/dt/health/live                   → /health/live            → GET /health/live
-// /api/dt/api/dt/learning/metrics       → /api/dt/learning/metrics → GET /api/dt/learning/metrics
-// /api/dt/api/replay/start              → /api/replay/start       → POST /api/replay/start
-// /api/dt/api/replay/status             → /api/replay/status      → GET /api/replay/status
+// /api/dt/dt/learning/metrics           → /dt/learning/metrics    → GET /dt/learning/metrics
+// /api/dt/replay/start                  → /replay/start           → POST /replay/start
+// /api/dt/replay/status                 → /replay/status          → GET /replay/status
 // /api/dt/jobs/cycle                    → /jobs/cycle             → POST /jobs/cycle
 // /api/dt/jobs/status                   → /jobs/status            → GET /jobs/status
 // /api/dt/data/rolling                  → /data/rolling           → GET /data/rolling
@@ -121,7 +121,7 @@ export async function getDtHealthLive(): Promise<LiveResponse> {
  * Used by the DT Learning dashboard page.
  */
 export async function getDtLearningMetrics(): Promise<LearningMetrics> {
-  return get("/api/dt/learning/metrics");
+  return get("/dt/learning/metrics");
 }
 
 // ---- Replay API ----
@@ -131,14 +131,14 @@ export async function getDtLearningMetrics(): Promise<LearningMetrics> {
  * @param weeks - Number of weeks to replay (default: 4)
  */
 export async function startDtReplay(weeks: number = 4): Promise<ReplayResponse> {
-  return post("/api/replay/start", { weeks });
+  return post("/replay/start", { weeks });
 }
 
 /**
  * Get DT replay status and progress.
  */
 export async function getDtReplayStatus(): Promise<ReplayStatusResponse> {
-  return get("/api/replay/status");
+  return get("/replay/status");
 }
 
 // ---- Job Management API ----
