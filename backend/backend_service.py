@@ -43,37 +43,44 @@ except ImportError:
         scheduler_main = None  # type: ignore
 
 # ----------------------------------------------
-# Routers (centralized from backend/routers/)
+# Routers (NEW CONSOLIDATED — v2.2.0)
 # ----------------------------------------------
+# NEW: 3 consolidated routers (replaces 25+ old routers)
+from backend.routers.page_data_router import router as page_data_router
+from backend.routers.admin_consolidated_router import router as admin_consolidated_router
+from backend.routers.settings_consolidated_router import router as settings_consolidated_router
+
+# KEEP: Essential routers still needed
 from backend.routers.health_router import router as health_router
 from backend.routers.testing_router import router as testing_router
-from backend.routers.system_status_router import router as system_router
-from backend.routers.diagnostics_router import router as diagnostics_router
-from backend.routers.insights_router import router as insights_router
-from backend.routers.live_prices_router import router as live_prices_router
-from backend.routers.intraday_router import router as intraday_router
-from backend.routers.model_router import router as model_router
-from backend.routers.metrics_router import router as metrics_router
-from backend.routers.settings_router import router as settings_router
-from backend.routers.nightly_logs_router import router as nightly_logs_router
-from backend.routers.bots_page_router import router as bots_page_router
-from backend.routers.bots_hub_router import router as bots_hub_router
-from backend.routers.replay_router import router as replay_router
-from backend.routers.swing_replay_router import router as swing_replay_router
-from backend.routers.intraday_logs_router import router as intraday_logs_router
-from backend.routers.dashboard_router import router as dashboard_router
-from backend.routers.intraday_stream_router import router as stream_router
-from backend.routers.system_run_router import router as system_run_router
-from backend.routers.eod_bots_router import router as eod_bots_router
-from backend.routers.intraday_tape_router import router as intraday_tape_router
-from backend.routers.portfolio_router import router as portfolio_router
-from backend.routers.unified_cache_router import router as unified_cache_router
+from backend.routers.events_router import router as events_router  # SSE endpoints
+from backend.routers.unified_cache_router import router as unified_cache_router  # Existing cache
 
+# KEEP: Legacy admin routers (for backward compat)
 from backend.admin.routes import router as admin_router
 from backend.admin.admin_tools_router import router as admin_tools_router
 
-# Events router for SSE
-from backend.routers.events_router import router as events_router
+# OLD ROUTERS (commented out - replaced by consolidated routers)
+# from backend.routers.system_status_router import router as system_router
+# from backend.routers.diagnostics_router import router as diagnostics_router
+# from backend.routers.insights_router import router as insights_router
+# from backend.routers.live_prices_router import router as live_prices_router
+# from backend.routers.intraday_router import router as intraday_router
+# from backend.routers.model_router import router as model_router
+# from backend.routers.metrics_router import router as metrics_router
+# from backend.routers.settings_router import router as settings_router
+# from backend.routers.nightly_logs_router import router as nightly_logs_router
+# from backend.routers.bots_page_router import router as bots_page_router
+# from backend.routers.bots_hub_router import router as bots_hub_router
+# from backend.routers.replay_router import router as replay_router
+# from backend.routers.swing_replay_router import router as swing_replay_router
+# from backend.routers.intraday_logs_router import router as intraday_logs_router
+# from backend.routers.dashboard_router import router as dashboard_router
+# from backend.routers.intraday_stream_router import router as stream_router
+# from backend.routers.system_run_router import router as system_run_router
+# from backend.routers.eod_bots_router import router as eod_bots_router
+# from backend.routers.intraday_tape_router import router as intraday_tape_router
+# from backend.routers.portfolio_router import router as portfolio_router
 
 # Optional cloud sync
 try:
@@ -127,32 +134,20 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # -------------------------------------------------
 
 ROUTERS = [
-    health_router,
-    testing_router,
-    system_router,
-    diagnostics_router,
-    insights_router,
-    live_prices_router,
-    intraday_router,
-    model_router,
-    metrics_router,
-    settings_router,
-    nightly_logs_router,
-    bots_page_router,
-    bots_hub_router,
-    replay_router,
-    swing_replay_router,
-    dashboard_router,
-    portfolio_router,
-    intraday_logs_router,
-    stream_router,
-    system_run_router,
+    # NEW: 3 consolidated routers (v2.2.0)
+    page_data_router,           # Replaces: bots_page, dashboard, portfolio, insights, etc.
+    admin_consolidated_router,  # Replaces: system_status, diagnostics, metrics, replay, etc.
+    settings_consolidated_router,  # Replaces: settings_router
+    
+    # KEEP: Essential routers
+    health_router,              # Health checks
+    testing_router,             # Testing endpoints
+    events_router,              # SSE endpoints
+    unified_cache_router,       # Existing unified cache
+    
+    # KEEP: Legacy admin (backward compat)
     admin_router,
     admin_tools_router,
-    eod_bots_router,
-    intraday_tape_router,
-    events_router,  # SSE endpoints
-    unified_cache_router,  # Unified frontend cache
 ]
 
 # Mount all routers with logging
@@ -246,6 +241,31 @@ def _cache_updater_thread():
         print(f"[CacheUpdater] ❌ Cache updater crashed: {e}", flush=True)
 
 
+def _rolling_optimizer_thread():
+    """Run rolling optimizer every 30 seconds."""
+    try:
+        from backend.services.rolling_optimizer import optimize_rolling_data
+        print("[RollingOptimizer] 🔄 Starting rolling optimizer...", flush=True)
+        
+        # Initial run
+        time.sleep(5)  # Wait for system to stabilize
+        
+        while True:
+            try:
+                result = optimize_rolling_data()
+                if result.get("status") == "success":
+                    stats = result.get("stats", {})
+                    print(f"[RollingOptimizer] ✅ Optimized: {stats}", flush=True)
+                else:
+                    print(f"[RollingOptimizer] ⚠️ Optimization failed: {result.get('errors')}", flush=True)
+            except Exception as e:
+                print(f"[RollingOptimizer] ⚠️ Optimization error: {e}", flush=True)
+            time.sleep(30)  # Run every 30 seconds
+            
+    except Exception as e:
+        print(f"[RollingOptimizer] ❌ Optimizer crashed: {e}", flush=True)
+
+
 def _scheduler_thread():
     """Run scheduler if available."""
     if scheduler_main is None:
@@ -308,6 +328,11 @@ async def on_startup():
     if not QUIET_STARTUP:
         threading.Thread(target=_cache_updater_thread, daemon=True).start()
         print("[Backend] 🔄 Cache updater thread enabled.", flush=True)
+    
+    # Rolling optimizer: run in primary only (new in v2.2.0)
+    if not QUIET_STARTUP:
+        threading.Thread(target=_rolling_optimizer_thread, daemon=True).start()
+        print("[Backend] 🔄 Rolling optimizer thread enabled.", flush=True)
 
     # Scheduler: MUST be gated (primary only)
     if ENABLE_SCHEDULER and not QUIET_STARTUP:

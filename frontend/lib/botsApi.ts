@@ -175,8 +175,9 @@ async function tryGetFirst<T>(
  */
 export async function getBotsPageBundle(): Promise<BotsPageBundle> {
   const result = await tryGetFirst<BotsPageBundle>([
-    "/api/backend/bots/page",
-    "/api/bots/page",
+    "/api/backend/page/bots",      // NEW: Consolidated endpoint (v2.2.0)
+    "/api/backend/bots/page",       // OLD: Legacy endpoint
+    "/api/bots/page",               // FALLBACK: Direct endpoint
   ]);
   
   if (!result) {
