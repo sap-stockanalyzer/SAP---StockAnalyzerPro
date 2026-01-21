@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 function prettyStatus(s?: string) {
   const v = String(s || "").toLowerCase();
@@ -22,23 +22,13 @@ export default function SystemBar() {
     debug: "", // 👈 show errors / URL
   });
 
-  // Build an API base that works even if env var is missing.
-  const apiBase = useMemo(() => {
-    const envBase = (process.env.NEXT_PUBLIC_API_BASE || "").trim().replace(/\/$/, "");
-    if (envBase) return envBase;
-
-    // Infer: same host as frontend, backend on :8000
-    if (typeof window !== "undefined") {
-      const host = window.location.hostname;
-      const proto = window.location.protocol; // usually "http:"
-      return `${proto}//${host}:8000`;
-    }
-
-    return ""; // SSR fallback (won't be used in client effect)
-  }, []);
-
+  /**
+   * Fetch system status from backend via Next.js proxy route.
+   * Uses /api/backend/system/status which proxies to backend /api/system/status.
+   * This avoids hardcoded URLs and works with remote backends.
+   */
   async function fetchStatus() {
-    const url = `${apiBase}/api/system/status`;
+    const url = "/api/backend/system/status";
 
     try {
       const res = await fetch(url, { cache: "no-store" });
@@ -81,7 +71,7 @@ export default function SystemBar() {
     fetchStatus();
     const id = setInterval(fetchStatus, 15000);
     return () => clearInterval(id);
-  }, [apiBase]);
+  }, []);
 
   const items = [
     `Drift: ${status.drift}`,
