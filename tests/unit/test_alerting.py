@@ -256,6 +256,22 @@ class TestDTAlertRouting:
     This ensures DT-related alerts go to #day_trading channel, NOT #daily-pnl.
     """
     
+    def _assert_routed_to_channel(self, mock_requests, expected_channel: str, not_channel: str = None):
+        """Helper method to assert alert was routed to the correct channel.
+        
+        Args:
+            mock_requests: Mock requests fixture
+            expected_channel: Channel that should be used (e.g., 'test_dt')
+            not_channel: Channel that should NOT be used (e.g., 'test_pnl')
+        """
+        assert mock_requests.called, "Alert was not sent"
+        call_args = mock_requests.call_args
+        assert expected_channel in call_args[0][0], \
+            f"Alert should route to channel containing '{expected_channel}'"
+        if not_channel:
+            assert not_channel not in call_args[0][0], \
+                f"Alert should NOT route to channel containing '{not_channel}'"
+    
     def test_dt_position_exit_routes_to_day_trading(self, mock_env, mock_requests):
         """Verify position exits from DT use alert_dt() → #day_trading."""
         from backend.monitoring.alerting import alert_dt
@@ -273,10 +289,8 @@ class TestDTAlertRouting:
             }
         )
         
-        # Verify routed to DT channel
-        call_args = mock_requests.call_args
-        assert "test_dt" in call_args[0][0], "Position exit should go to #day_trading, NOT #daily-pnl"
-        assert "test_pnl" not in call_args[0][0], "Position exit should NOT go to #daily-pnl"
+        # Verify routed to DT channel, NOT PnL channel
+        self._assert_routed_to_channel(mock_requests, "test_dt", "test_pnl")
     
     def test_dt_cycle_completion_routes_to_day_trading(self, mock_env, mock_requests):
         """Verify DT cycle completion alerts use alert_dt() → #day_trading."""
@@ -295,10 +309,8 @@ class TestDTAlertRouting:
             }
         )
         
-        # Verify routed to DT channel
-        call_args = mock_requests.call_args
-        assert "test_dt" in call_args[0][0], "Cycle completion should go to #day_trading, NOT #daily-pnl"
-        assert "test_pnl" not in call_args[0][0], "Cycle completion should NOT go to #daily-pnl"
+        # Verify routed to DT channel, NOT PnL channel
+        self._assert_routed_to_channel(mock_requests, "test_dt", "test_pnl")
     
     def test_dt_trade_entry_routes_to_day_trading(self, mock_env, mock_requests):
         """Verify DT trade entries use alert_dt() → #day_trading."""
@@ -316,10 +328,8 @@ class TestDTAlertRouting:
             }
         )
         
-        # Verify routed to DT channel
-        call_args = mock_requests.call_args
-        assert "test_dt" in call_args[0][0], "Trade entry should go to #day_trading, NOT #daily-pnl"
-        assert "test_pnl" not in call_args[0][0], "Trade entry should NOT go to #daily-pnl"
+        # Verify routed to DT channel, NOT PnL channel
+        self._assert_routed_to_channel(mock_requests, "test_dt", "test_pnl")
     
     def test_pnl_reports_route_to_daily_pnl(self, mock_env, mock_requests):
         """Verify PnL summary reports use alert_pnl() → #daily-pnl (NOT #day_trading)."""
@@ -337,10 +347,8 @@ class TestDTAlertRouting:
             }
         )
         
-        # Verify routed to PnL channel
-        call_args = mock_requests.call_args
-        assert "test_pnl" in call_args[0][0], "PnL reports should go to #daily-pnl"
-        assert "test_dt" not in call_args[0][0], "PnL reports should NOT go to #day_trading"
+        # Verify routed to PnL channel, NOT DT channel
+        self._assert_routed_to_channel(mock_requests, "test_pnl", "test_dt")
     
     def test_all_dt_alert_functions_route_correctly(self, mock_env, mock_requests):
         """Comprehensive test that all alert functions route to correct channels."""

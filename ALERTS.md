@@ -67,7 +67,7 @@ alert_dt("DT Cycle Complete", "Lane: FAST | Orders: 3")
 alert_pnl(f"Daily PnL: ${pnl:+.2f}", f"MTD: ${mtd:+.2f}")
 
 # ❌ WRONG: DT activity should NOT go to #daily-pnl
-# alert_pnl("Trade Executed", f"BUY {symbol}")  # DON'T DO THIS!
+# alert_pnl("Trade Executed", "BUY AAPL")  # DON'T DO THIS!
 
 # ✅ CORRECT: Nightly job status → #nightly-logs-summary  
 alert_nightly("Nightly Job Complete", "All phases succeeded")

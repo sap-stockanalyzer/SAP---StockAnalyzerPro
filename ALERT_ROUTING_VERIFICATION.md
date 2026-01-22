@@ -64,14 +64,15 @@ Created `TestDTAlertRouting` class with 5 comprehensive tests:
 
 ### Test Results
 
-```
+```bash
+# TestDTAlertRouting (5 new tests) + TestAlertingSystem (14 existing tests) = 19 total
 tests/unit/test_alerting.py::TestDTAlertRouting::test_dt_position_exit_routes_to_day_trading PASSED
 tests/unit/test_alerting.py::TestDTAlertRouting::test_dt_cycle_completion_routes_to_day_trading PASSED
 tests/unit/test_alerting.py::TestDTAlertRouting::test_dt_trade_entry_routes_to_day_trading PASSED
 tests/unit/test_alerting.py::TestDTAlertRouting::test_pnl_reports_route_to_daily_pnl PASSED
 tests/unit/test_alerting.py::TestDTAlertRouting::test_all_dt_alert_functions_route_correctly PASSED
 
-19 passed in 0.11s
+19 passed in 0.11s (includes 14 existing TestAlertingSystem tests)
 ```
 
 ## Documentation Updates
