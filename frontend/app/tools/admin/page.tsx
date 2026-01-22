@@ -320,18 +320,40 @@ export default function AdminPage() {
     setError(null);
     setLastActionResult(null);
     setStatus("Restarting services...");
-    const res = await fetch(`${getBackendBaseUrl()}/admin/system/restart`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-    });
-
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      setError(`Restart failed ❌ ${data?.detail ?? "unknown_error"}`);
+    
+    // Try consolidated endpoint first, then fallback to legacy
+    const urls = [
+      `${getBackendBaseUrl()}/admin/action/restart`,  // NEW consolidated endpoint
+      `${getBackendBaseUrl()}/admin/system/restart`,  // OLD legacy endpoint (fallback)
+    ];
+    
+    let res: Response | null = null;
+    
+    for (const url of urls) {
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          cache: "no-store",
+        });
+        
+        if (res.ok) {
+          console.log(`[Admin] Restart endpoint used: ${url}`);
+          break;
+        }
+      } catch (e) {
+        // Log failed attempt and try next URL
+        console.warn(`[Admin] Restart endpoint failed: ${url}`, e);
+        continue;
+      }
+    }
+    
+    if (!res || !res.ok) {
+      setError(`Restart failed ❌ All endpoints unreachable: ${urls.join(', ')}`);
       return;
     }
 
+    const data = await res.json().catch(() => ({}));
     setLastActionResult(data);
 
     setStatus("Restart triggered ✅ (backend will drop for a moment)");

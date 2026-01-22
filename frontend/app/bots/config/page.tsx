@@ -259,7 +259,6 @@ export default function ConfigEditorPage() {
                   </div>
                   <div className="flex gap-2">
                     <Button
-                      variant="outline"
                       onClick={reloadFile}
                       disabled={saving || loading}
                       className="gap-2"

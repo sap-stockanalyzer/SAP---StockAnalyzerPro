@@ -48,6 +48,21 @@ export function CardTitle({
   );
 }
 
+export function CardDescription({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLParagraphElement>) {
+  return (
+    <p
+      className={clsx(
+        "text-sm text-slate-400",
+        className
+      )}
+      {...props}
+    />
+  );
+}
+
 export function CardContent({
   className,
   ...props

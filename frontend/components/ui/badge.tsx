@@ -4,7 +4,7 @@ import React from "react";
 import clsx from "clsx";
 
 type BadgeProps = React.HTMLAttributes<HTMLSpanElement> & {
-  variant?: "default" | "outline" | "success" | "danger" | "muted";
+  variant?: "default" | "outline" | "success" | "danger" | "muted" | "secondary";
 };
 
 export function Badge({
@@ -21,6 +21,7 @@ export function Badge({
     success: "border-emerald-500/60 bg-emerald-500/10 text-emerald-300",
     danger: "border-rose-500/60 bg-rose-500/10 text-rose-300",
     muted: "border-slate-700 bg-slate-800 text-slate-300",
+    secondary: "border-indigo-500/60 bg-indigo-500/10 text-indigo-300",
   };
 
   return (

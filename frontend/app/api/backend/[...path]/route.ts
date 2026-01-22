@@ -20,8 +20,8 @@ function buildTargetUrl(req: NextRequest, pathParts: string[]) {
   return target;
 }
 
-async function proxy(req: NextRequest, ctx: { params: unknown }) {
-  const { path = [] } = await Promise.resolve(ctx.params as any);
+async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
+  const { path = [] } = await ctx.params;
   const target = buildTargetUrl(req, Array.isArray(path) ? path : []);
 
   const headers = new Headers(req.headers);
@@ -30,7 +30,7 @@ async function proxy(req: NextRequest, ctx: { params: unknown }) {
 
   const hasBody = req.method !== "GET" && req.method !== "HEAD";
 
-  const init: RequestInit = {
+  const init: RequestInit & { duplex?: "half" } = {
     method: req.method,
     headers,
     body: hasBody ? req.body : undefined,
@@ -51,23 +51,23 @@ async function proxy(req: NextRequest, ctx: { params: unknown }) {
   });
 }
 
-export async function GET(req: NextRequest, ctx: { params: unknown }) {
+export async function GET(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   return proxy(req, ctx);
 }
 
-export async function POST(req: NextRequest, ctx: { params: unknown }) {
+export async function POST(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   return proxy(req, ctx);
 }
 
-export async function PUT(req: NextRequest, ctx: { params: unknown }) {
+export async function PUT(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   return proxy(req, ctx);
 }
 
-export async function PATCH(req: NextRequest, ctx: { params: unknown }) {
+export async function PATCH(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   return proxy(req, ctx);
 }
 
-export async function DELETE(req: NextRequest, ctx: { params: unknown }) {
+export async function DELETE(req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) {
   return proxy(req, ctx);
 }
 

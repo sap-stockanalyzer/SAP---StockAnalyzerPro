@@ -63,6 +63,7 @@ export default function SystemBar() {
         newsCount: prettyStatus(newsStatus),
         tickersTracked: typeof tickers === "number" ? String(tickers) : "—",
         version: "AION v1.1.2",
+        debug: "",
       });
     } catch (e: any) {
       setStatus((prev) => ({
