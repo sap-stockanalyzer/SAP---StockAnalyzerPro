@@ -66,32 +66,9 @@ except ImportError as e:
 from backend.admin.routes import router as admin_router
 from backend.admin.admin_tools_router import router as admin_tools_router
 
-# KEEP: Legacy routers for backward compatibility (frontend still uses these)
-# These will be gradually phased out as frontend migrates to consolidated endpoints
-from backend.routers.bots_page_router import router as bots_page_router
-from backend.routers.dashboard_router import router as dashboard_router
-
-# OLD ROUTERS (commented out - replaced by consolidated routers)
-# from backend.routers.system_status_router import router as system_router
-# from backend.routers.diagnostics_router import router as diagnostics_router
-# from backend.routers.insights_router import router as insights_router
-# from backend.routers.live_prices_router import router as live_prices_router
-# from backend.routers.intraday_router import router as intraday_router
-# from backend.routers.model_router import router as model_router
-# from backend.routers.metrics_router import router as metrics_router
-# from backend.routers.settings_router import router as settings_router
-# from backend.routers.nightly_logs_router import router as nightly_logs_router
-# from backend.routers.bots_page_router import router as bots_page_router
-# from backend.routers.bots_hub_router import router as bots_hub_router
-# from backend.routers.replay_router import router as replay_router
-# from backend.routers.swing_replay_router import router as swing_replay_router
-# from backend.routers.intraday_logs_router import router as intraday_logs_router
-# from backend.routers.dashboard_router import router as dashboard_router
-# from backend.routers.intraday_stream_router import router as stream_router
-# from backend.routers.system_run_router import router as system_run_router
-# from backend.routers.eod_bots_router import router as eod_bots_router
-# from backend.routers.intraday_tape_router import router as intraday_tape_router
-# from backend.routers.portfolio_router import router as portfolio_router
+# KEEP: system_run_router for backward compatibility with /app/tools/overrides and /app/system/overrides
+# Frontend still uses /api/system/run/{task} endpoint
+from backend.routers.system_run_router import router as system_run_router
 
 # Optional cloud sync
 try:
@@ -156,13 +133,10 @@ ROUTERS = [
     events_router,              # SSE endpoints
     unified_cache_router,       # Existing unified cache
     
-    # KEEP: Legacy admin (backward compat)
-    admin_router,
-    admin_tools_router,
-    
-    # KEEP: Legacy data routers (backward compat - will be phased out)
-    bots_page_router,           # /api/bots/page
-    dashboard_router,           # /dashboard/metrics, /dashboard/top/{horizon}
+    # KEEP: Legacy routers (backward compat)
+    admin_router,               # Legacy admin routes
+    admin_tools_router,         # Admin tools
+    system_run_router,          # /api/system/run/{task} - still used by frontend overrides pages
 ]
 
 # Filter out None routers (e.g., testing_router if import failed)

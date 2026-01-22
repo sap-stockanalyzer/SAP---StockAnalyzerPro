@@ -220,3 +220,98 @@ from backend.routers.portfolio_router import router as portfolio_router
 ```
 
 Add back to ROUTERS list and restart backend.
+
+---
+
+## Phase 3: Legacy Router Cleanup (Completed)
+
+### Summary
+Phase 3 completed the router consolidation by removing unused legacy routers from `backend_service.py`.
+
+### Changes Made
+
+**Backend Service Updates:**
+- ✅ Removed all commented-out legacy router imports (25+ routers)
+- ✅ Removed unused legacy routers from active imports:
+  - `bots_page_router` (replaced by `/api/page/bots`)
+  - `dashboard_router` (replaced by `/api/page/dashboard`)
+- ✅ Kept `system_run_router` for backward compatibility (frontend still uses `/api/system/run/{task}`)
+
+**Final Router Configuration:**
+```python
+ROUTERS = [
+    # NEW: 3 consolidated routers (v2.2.0)
+    page_data_router,           # /api/page
+    admin_consolidated_router,  # /api/admin
+    settings_consolidated_router,  # /api/settings
+    
+    # KEEP: Essential routers
+    health_router,              # Health checks
+    testing_router,             # Testing endpoints
+    events_router,              # SSE endpoints
+    unified_cache_router,       # Unified cache
+    
+    # KEEP: Legacy routers (backward compat)
+    admin_router,               # Legacy admin routes
+    admin_tools_router,         # Admin tools
+    system_run_router,          # /api/system/run/{task}
+]
+```
+
+**Router Count:** 10 routers (down from 11)
+
+### Frontend Migration Status
+
+| Page | Status | Endpoint | Notes |
+|------|--------|----------|-------|
+| Bots | ✅ Migrated | `/api/page/bots` | Uses `tryGetFirst()` pattern with fallback |
+| Profile | ✅ Complete | Mock data | No API calls yet |
+| Tools/Admin | ✅ Complete | `/api/admin/*` | Direct admin endpoints |
+| Tools/Overrides | ⚠️ Legacy | `/api/system/run/{task}` | Still uses system_run_router |
+
+### Legacy Router Files (Can Be Deleted Later)
+
+The following router files are no longer imported and can be deleted in a future cleanup:
+- `backend/routers/bots_page_router.py` ✅ Removed from imports
+- `backend/routers/bots_hub_router.py`
+- `backend/routers/dashboard_router.py` ✅ Removed from imports
+- `backend/routers/portfolio_router.py`
+- `backend/routers/system_status_router.py`
+- `backend/routers/diagnostics_router.py`
+- `backend/routers/insights_router.py`
+- `backend/routers/live_prices_router.py`
+- `backend/routers/intraday_router.py`
+- `backend/routers/intraday_logs_router.py`
+- `backend/routers/intraday_stream_router.py`
+- `backend/routers/intraday_tape_router.py`
+- `backend/routers/model_router.py`
+- `backend/routers/metrics_router.py`
+- `backend/routers/settings_router.py`
+- `backend/routers/nightly_logs_router.py`
+- `backend/routers/replay_router.py`
+- `backend/routers/swing_replay_router.py`
+- `backend/routers/eod_bots_router.py`
+
+**Note:** These files are not deleted yet to allow for easy rollback if needed. They can be safely deleted once Phase 3 is verified stable in production.
+
+### What Was NOT Changed
+
+- ✅ Kept `system_run_router` - Frontend pages `/app/tools/overrides` and `/app/system/overrides` still use `/api/system/run/{task}`
+- ✅ Kept all essential routers (health, events, cache, admin, testing)
+- ✅ All consolidated routers remain active
+
+### Success Criteria
+
+- ✅ Reduced active router imports from 13 to 10
+- ✅ Removed all commented-out legacy router imports
+- ✅ Final backend has only essential routers mounted
+- ✅ Bots page migrated to consolidated endpoints
+- ✅ Documentation updated with Phase 3 completion
+- ✅ Backward compatibility maintained where needed
+
+### Next Steps (Future Phase 4)
+
+To further reduce to 9 routers:
+1. Migrate frontend overrides pages from `/api/system/run/{task}` to `/api/admin/action/{action}`
+2. Remove `system_run_router` import
+3. Delete legacy router files from filesystem
