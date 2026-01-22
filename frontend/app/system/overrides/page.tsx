@@ -4,11 +4,10 @@ import { useState } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button"; // ✅ FIX: Button import added
 import clsx from "clsx";
-import { getApiBaseUrl } from "@/lib/api";
 
 export default function OverridesPage() {
   const [loading, setLoading] = useState<string | null>(null);
-  const API_BASE = getApiBaseUrl();
+  const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
   const runScript = async (task: string) => {
     try {

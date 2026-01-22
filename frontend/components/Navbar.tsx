@@ -21,7 +21,6 @@ function ToolsMenu({ onClose }: { onClose?: () => void }) {
     { href: "/tools/drift", label: "Drift Reports" },
     { href: "/tools/models", label: "Model Registry" },
     { href: "/tools/health", label: "System Health" },
-    { href: "/tools/logs", label: "Logs" },
     { href: "/tools/eod-bots", label: "EOD Bots" },
     { href: "/tools/api-keys", label: "API Keys" },
     { href: "/tools/admin", label: "ADMIN" },

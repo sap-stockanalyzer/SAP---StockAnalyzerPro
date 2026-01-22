@@ -19,20 +19,35 @@ export default function TopPredictions({
         // Map 4w -> 1m to match backend horizon
         const backendHorizon = horizon === "4w" ? "1m" : horizon;
 
-        // Use portfolio holdings endpoint instead of predictions
-        const res = await fetch(`/api/backend/portfolio/holdings/top/${backendHorizon}`, {
+        // Use Next.js proxy route (server decides real backend via env)
+        const res = await fetch(`/api/backend/dashboard/top/${backendHorizon}`, {
           cache: "no-store",
         });
 
         const data = await res.json();
 
-        // Handle new portfolio holdings response format
-        if (data && Array.isArray(data.holdings)) {
-          const topRows = data.holdings.slice(0, 3).map((h: any) => ({
-            ticker: h.ticker,
-            gain_pct: h.pnl_percent,  // Use pnl_percent from holdings
+        if (data && Array.isArray(data.tickers)) {
+          const topRows = data.tickers.slice(0, 3).map((t: any) => ({
+            ticker: t.ticker,
+            gain_pct: t.gain_pct,
           }));
           setRows(topRows);
+        } else if (Array.isArray(data)) {
+          // fallback if backend returns array directly
+          setRows(
+            data.slice(0, 3).map((t: any) => ({
+              ticker: t.ticker || t.symbol,
+              gain_pct: t.gain_pct ?? (typeof t.expected === "number" ? t.expected * 100 : 0),
+            }))
+          );
+        } else if (data && Array.isArray(data.items)) {
+          // another common shape: { items: [...] }
+          setRows(
+            data.items.slice(0, 3).map((t: any) => ({
+              ticker: t.ticker || t.symbol,
+              gain_pct: t.gain_pct ?? (typeof t.expected_return === "number" ? t.expected_return * 100 : 0),
+            }))
+          );
         }
       } catch (err) {
         console.error("Failed to fetch top performers:", err);

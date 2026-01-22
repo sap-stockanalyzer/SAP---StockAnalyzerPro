@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState } from "react";
 import {
   LineChart,
   Line,
@@ -21,7 +21,7 @@ import {
  *  - Allocation donut + sector filters
  *  - Current holdings table
  *
- * Fetches real data from backend /api/cache/unified endpoint.
+ * Uses mock data for now so you can polish UI while the server migrates.
  */
 
 type RangeKey = "1D" | "1W" | "1M" | "3M" | "6M" | "1Y";
@@ -70,126 +70,97 @@ function fmtPct(x: number) {
   return `${sign}${v.toFixed(2)}%`;
 }
 
-/**
- * Calculate total equity from all enabled bots.
- */
-function calculateTotalBotEquity(backendData: any): number {
-  let totalEquity = 0;
-  
-  try {
-    const swingBots = backendData?.data?.bots?.swing?.status?.bots || {};
-    const intradayBots = backendData?.data?.bots?.intraday?.status?.bots || {};
-    
-    for (const [botName, botData] of Object.entries(swingBots)) {
-      const bot = botData as any;
-      if (bot?.enabled && typeof bot?.equity === 'number') {
-        totalEquity += bot.equity;
-      }
-    }
-    
-    for (const [botName, botData] of Object.entries(intradayBots)) {
-      const bot = botData as any;
-      if (bot?.enabled && typeof bot?.equity === 'number') {
-        totalEquity += bot.equity;
-      }
-    }
-  } catch (err) {
-    console.error("Error calculating bot equity:", err);
-  }
-  
-  return totalEquity;
+// Deterministic-ish PRNG so UI doesn't "dance" on refresh
+function makeRng(seed = 1337) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 0xffffffff;
+  };
 }
 
-/**
- * Extract equity curve data from backend unified cache.
- */
-function extractEquityCurve(data: any, range: RangeKey): EquityPoint[] {
-  const points: EquityPoint[] = [];
-  
-  try {
-    // Get swing bots equity data
-    const swingBots = data?.data?.bots?.swing?.status?.bots || {};
-    
-    // Collect all equity curves from enabled swing bots
-    const equityCurves: Array<{ t: string; value: number }[]> = [];
-    
-    for (const [botName, botData] of Object.entries(swingBots)) {
-      const bot = botData as any;
-      if (bot?.enabled && bot?.equity_curve && Array.isArray(bot.equity_curve) && bot.equity_curve.length > 0) {
-        equityCurves.push(bot.equity_curve);
-      }
-    }
-    
-    // If we have equity curves, combine them
-    if (equityCurves.length > 0) {
-      // Use the longest curve as base
-      const longestCurve = equityCurves.reduce((a, b) => a.length > b.length ? a : b, equityCurves[0]);
-      
-      // Convert to our format
-      for (const point of longestCurve) {
-        points.push({
-          t: point.t,
-          equity: point.value
-        });
-      }
-    } else {
-      // If no equity curves, use current equity values
-      const totalEquity = calculateTotalBotEquity(data);
-      
-      // Create a simple point
-      if (totalEquity > 0) {
-        points.push({
-          t: new Date().toISOString().split('T')[0],
-          equity: totalEquity
-        });
-      }
-    }
-  } catch (err) {
-    console.error("Error extracting equity curve:", err);
+function buildMockEquity(range: RangeKey): EquityPoint[] {
+  const meta = RANGES.find((r) => r.key === range) ?? RANGES[2];
+  const n = meta.points;
+
+  const rng = makeRng(
+    range === "1D"
+      ? 11
+      : range === "1W"
+      ? 22
+      : range === "1M"
+      ? 33
+      : range === "3M"
+      ? 44
+      : range === "6M"
+      ? 55
+      : 66
+  );
+
+  // Base equity near your sketch number
+  let equity = 67028.64;
+
+  // Volatility per range
+  const vol =
+    range === "1D"
+      ? 0.0015
+      : range === "1W"
+      ? 0.003
+      : range === "1M"
+      ? 0.004
+      : range === "3M"
+      ? 0.006
+      : range === "6M"
+      ? 0.008
+      : 0.01;
+
+  // Drift upward (your sketch trends up)
+  const drift =
+    range === "1D"
+      ? 0.0002
+      : range === "1W"
+      ? 0.00035
+      : range === "1M"
+      ? 0.00045
+      : range === "3M"
+      ? 0.00055
+      : range === "6M"
+      ? 0.00065
+      : 0.00075;
+
+  const out: EquityPoint[] = [];
+  for (let i = 0; i < n; i++) {
+    const shock = (rng() - 0.5) * 2;
+    const ret = drift + shock * vol;
+    equity = equity * (1 + ret);
+
+    const label =
+      range === "1D"
+        ? `${i}`
+        : range === "1W"
+        ? `D${i + 1}`
+        : range === "1M"
+        ? `D${i + 1}`
+        : `W${i + 1}`;
+
+    out.push({ t: label, equity: Math.round(equity * 100) / 100 });
   }
-  
-  // If no data, return empty array
-  return points;
+
+  return out;
 }
 
-/**
- * Extract holdings from backend unified cache.
- */
-function extractHoldings(data: any): Holding[] {
-  const holdings: Holding[] = [];
-  
-  try {
-    // Try top_1w first, then top_1m
-    const portfolio = data?.data?.portfolio;
-    const holdingsData = portfolio?.top_1w?.holdings || portfolio?.top_1m?.holdings || [];
-    
-    for (const h of holdingsData) {
-      if (h && h.symbol) {
-        holdings.push({
-          symbol: h.symbol,
-          sector: h.sector || "Unknown",
-          qty: h.qty || h.quantity || 0,
-          avg: h.avg || h.avg_price || 0,
-          last: h.last || h.current_price || h.avg || h.avg_price || 0,
-        });
-      }
-    }
-  } catch (err) {
-    console.error("Error extracting holdings:", err);
-  }
-  
-  return holdings;
+function buildMockHoldings(): Holding[] {
+  return [
+    { symbol: "AAPL", sector: "Tech", qty: 18, avg: 171.25, last: 198.1 },
+    { symbol: "MSFT", sector: "Tech", qty: 9, avg: 332.4, last: 417.2 },
+    { symbol: "JPM", sector: "Financials", qty: 14, avg: 152.1, last: 168.55 },
+    { symbol: "XOM", sector: "Energy", qty: 20, avg: 99.35, last: 108.7 },
+    { symbol: "O", sector: "Real Estate", qty: 40, avg: 55.1, last: 53.8 },
+    { symbol: "UNH", sector: "Healthcare", qty: 3, avg: 476.2, last: 522.35 },
+  ];
 }
 
-/**
- * Calculate allocation from holdings.
- */
-function calculateAllocation(holdings: Holding[]): AllocationSlice[] {
-  if (holdings.length === 0) {
-    // Return all sectors with 0 value
-    return SECTORS.map(s => ({ name: s, value: 0 }));
-  }
-  
+function buildMockAllocation(holdings: Holding[]): AllocationSlice[] {
   const bySector = new Map<string, number>();
   for (const h of holdings) {
     const mv = h.qty * h.last;
@@ -201,7 +172,7 @@ function calculateAllocation(holdings: Holding[]): AllocationSlice[] {
     .map(([name, mv]) => ({ name, value: (mv / total) * 100 }))
     .sort((a, b) => b.value - a.value);
 
-  // Ensure all sectors appear for checkbox list
+  // Ensure all appear for checkbox list
   const existing = new Set(slices.map((s) => s.name));
   for (const s of SECTORS) {
     if (!existing.has(s)) slices.push({ name: s, value: 0 });
@@ -248,68 +219,15 @@ function Card({
 export default function ProfilePage() {
   const [range, setRange] = useState<RangeKey>("1M");
   const [selectedSectors, setSelectedSectors] = useState<string[]>([...SECTORS]);
-  
-  // Backend data state
-  const [backendData, setBackendData] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
 
-  // Fetch data from backend
-  const fetchData = async () => {
-    try {
-      setError(null);
-      const response = await fetch("/api/backend/cache/unified");
-      
-      if (!response.ok) {
-        throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`);
-      }
-      
-      const data = await response.json();
-      setBackendData(data);
-    } catch (err) {
-      console.error("Error fetching backend data:", err);
-      setError(err instanceof Error ? err.message : "Failed to load portfolio data");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
-  
-  // Fetch on mount
-  useEffect(() => {
-    fetchData();
-  }, []);
-  
-  // Manual refresh
-  const handleRefresh = () => {
-    setRefreshing(true);
-    fetchData();
-  };
-
-  const holdings = useMemo(() => 
-    backendData ? extractHoldings(backendData) : [], 
-    [backendData]
-  );
-  
-  const allocation = useMemo(() => 
-    calculateAllocation(holdings), 
-    [holdings]
-  );
-  
-  const equitySeries = useMemo(() => 
-    backendData ? extractEquityCurve(backendData, range) : [], 
-    [backendData, range]
-  );
+  const holdings = useMemo(() => buildMockHoldings(), []);
+  const allocation = useMemo(() => buildMockAllocation(holdings), [holdings]);
+  const equitySeries = useMemo(() => buildMockEquity(range), [range]);
 
   const summary = useMemo(() => {
-    const cash = 0; // TODO: Get from backend when available
+    const cash = 27028.0;
     const invested = holdings.reduce((acc, h) => acc + h.qty * h.last, 0);
-    
-    // Calculate total equity from bots using helper
-    const totalBotEquity = calculateTotalBotEquity(backendData);
-    
-    const total = totalBotEquity > 0 ? totalBotEquity : cash + invested;
+    const total = cash + invested;
 
     const costBasis = holdings.reduce((acc, h) => acc + h.qty * h.avg, 0);
     const totalProfit = invested - costBasis;
@@ -324,10 +242,10 @@ export default function ProfilePage() {
       total,
       totalProfit,
       rangeProfit,
-      allocated: totalBotEquity, // Show bot equity as allocated
+      allocated: 0, // placeholder until bots reserve cash
       holdingsCount: holdings.length,
     };
-  }, [holdings, equitySeries, backendData]);
+  }, [holdings, equitySeries]);
 
   const filteredHoldings = useMemo(() => {
     return holdings
@@ -352,63 +270,11 @@ export default function ProfilePage() {
   const clearSectors = () => setSelectedSectors([]);
 
   const chartMinMax = useMemo(() => {
-    if (equitySeries.length === 0) {
-      return { min: 0, max: 100 };
-    }
     const vals = equitySeries.map((p) => p.equity);
     const min = Math.min(...vals);
     const max = Math.max(...vals);
     return { min: min * 0.995, max: max * 1.005 };
   }, [equitySeries]);
-
-  // Show loading state
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-950 to-black text-white">
-        <div className="mx-auto w-full max-w-[1400px] px-6 py-8">
-          <div className="text-3xl font-bold tracking-tight">Profile</div>
-          <div className="mt-1 text-sm text-slate-400">
-            Portfolio overview, allocations, and current holdings.
-          </div>
-          <div className="mt-8 flex items-center justify-center">
-            <div className="text-center">
-              <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-sky-500 border-r-transparent"></div>
-              <div className="mt-4 text-slate-300">Loading portfolio data...</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Show error state
-  if (error) {
-    return (
-      <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-950 to-black text-white">
-        <div className="mx-auto w-full max-w-[1400px] px-6 py-8">
-          <div className="text-3xl font-bold tracking-tight">Profile</div>
-          <div className="mt-1 text-sm text-slate-400">
-            Portfolio overview, allocations, and current holdings.
-          </div>
-          <div className="mt-8 flex items-center justify-center">
-            <div className="max-w-md rounded-2xl border border-rose-800/50 bg-rose-950/20 p-6 text-center">
-              <div className="text-lg font-semibold text-rose-300">Unable to load portfolio</div>
-              <div className="mt-2 text-sm text-slate-300">{error}</div>
-              <div className="mt-4 text-xs text-slate-400">
-                Make sure the backend is running and accessible.
-              </div>
-              <button
-                onClick={handleRefresh}
-                className="mt-4 rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white hover:bg-sky-700"
-              >
-                Retry
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-950 to-black text-white">
@@ -422,44 +288,25 @@ export default function ProfilePage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
-            {/* Refresh button */}
-            <button
-              onClick={handleRefresh}
-              disabled={refreshing}
-              className="rounded-xl border border-slate-800/70 bg-slate-950/40 px-4 py-2 text-sm font-medium text-slate-300 hover:bg-slate-900/70 disabled:opacity-50"
-            >
-              {refreshing ? (
-                <span className="inline-flex items-center gap-2">
-                  <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-solid border-sky-500 border-r-transparent"></span>
-                  Refreshing...
-                </span>
-              ) : (
-                "Refresh"
-              )}
-            </button>
-
-            {/* Range tabs */}
-            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-slate-800/70 bg-slate-950/40 p-2">
-              {RANGES.map((r) => {
-                const active = r.key === range;
-                return (
-                  <button
-                    key={r.key}
-                    onClick={() => setRange(r.key)}
-                    disabled={loading || refreshing}
-                    className={[
-                      "rounded-xl px-3 py-1.5 text-sm font-medium transition disabled:opacity-50",
-                      active
-                        ? "bg-sky-600/90 text-white shadow"
-                        : "bg-slate-900/40 text-slate-300 hover:bg-slate-900/70",
-                    ].join(" ")}
-                  >
-                    {r.label}
-                  </button>
-                );
-              })}
-            </div>
+          {/* Range tabs */}
+          <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-slate-800/70 bg-slate-950/40 p-2">
+            {RANGES.map((r) => {
+              const active = r.key === range;
+              return (
+                <button
+                  key={r.key}
+                  onClick={() => setRange(r.key)}
+                  className={[
+                    "rounded-xl px-3 py-1.5 text-sm font-medium transition",
+                    active
+                      ? "bg-sky-600/90 text-white shadow"
+                      : "bg-slate-900/40 text-slate-300 hover:bg-slate-900/70",
+                  ].join(" ")}
+                >
+                  {r.label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -550,10 +397,10 @@ export default function ProfilePage() {
                 <div className="col-span-2 rounded-xl border border-slate-800/70 bg-slate-950/40 p-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <div className="text-xs text-slate-400">Bot Equity</div>
+                      <div className="text-xs text-slate-400">Allocated (Bots)</div>
                       <div className="mt-1 text-lg font-semibold">{fmtMoney(summary.allocated)}</div>
                     </div>
-                    <div className="text-xs text-slate-500">Combined equity from all active bots</div>
+                    <div className="text-xs text-slate-500">Placeholder until bots are wired.</div>
                   </div>
                 </div>
               </div>
@@ -671,9 +518,7 @@ export default function ProfilePage() {
                     {filteredHoldings.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="py-6 text-center text-sm text-slate-500">
-                          {holdings.length === 0 
-                            ? "No active positions yet. Portfolio will populate as bots start trading."
-                            : "No holdings match the selected sectors."}
+                          No holdings match the selected sectors.
                         </td>
                       </tr>
                     ) : (
@@ -711,9 +556,7 @@ export default function ProfilePage() {
         </div>
 
         <div className="mt-6 text-center text-xs text-slate-600">
-          {backendData?.timestamp && (
-            <span>Last updated: {new Date(backendData.timestamp).toLocaleString()}</span>
-          )}
+          Mock data mode — swap in real backend calls once your server migration completes.
         </div>
       </div>
     </div>

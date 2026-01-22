@@ -1,12 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { useEffect, useMemo, useRef, useState, memo } from "react";
-import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { Activity, Clock, DollarSign, Shield, SlidersHorizontal, RefreshCw, Settings } from "lucide-react";
+import { Activity, Clock, DollarSign, Shield, SlidersHorizontal, RefreshCw } from "lucide-react";
 
-import { cn } from "@/lib/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,32 +13,134 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 
-import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
-import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
-
-// Import centralized bots API client and types
-import {
-  getBotsPageBundle,
-  detectApiPrefix,
-  updateEodBotConfig,
-  updateIntradayBotConfig,
-} from "@/lib/botsApi";
-
-import type {
-  BotsPageBundle,
-  EodStatusResponse,
-  EodConfigResponse,
-  IntradayPnlResponse,
-  IntradayFill,
-  IntradaySignal,
-  BotDraft,
-} from "@/lib/botsTypes";
+import { LineChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 
 // -----------------------------
-// Constants
+// Types
 // -----------------------------
 
+type EodBotConfig = {
+  max_alloc: number;
+  max_positions: number;
+  stop_loss: number;
+  take_profit: number;
+  aggression: number;
+  enabled?: boolean;
+};
 
+type EodConfigResponse = { configs: Record<string, EodBotConfig> };
+
+type EodStatusResponse = {
+  running?: boolean;
+  last_update?: string;
+  bots?: Record<
+    string,
+    {
+      cash?: number;
+      invested?: number;
+      allocated?: number;
+      holdings_count?: number;
+      equity?: number;
+      last_update?: string;
+      type?: string;
+      equity_curve?: Array<{ t?: string; value?: number } | number>;
+      pnl_curve?: Array<{ t?: string; value?: number } | number>;
+      positions?: any[];
+      enabled?: boolean;
+    }
+  >;
+};
+
+type IntradayPnlResponse = {
+  total?: { realized?: number; unrealized?: number; total?: number; updated_at?: string };
+  bots?: Record<string, { realized?: number; unrealized?: number; total?: number }>;
+  // sometimes your intraday summary is shaped differently; keep loose
+  date?: string;
+};
+
+type IntradayFill = {
+  ts?: string;
+  time?: string;
+  symbol?: string;
+  side?: string;
+  action?: string;
+  qty?: number;
+  price?: number;
+  pnl?: number;
+};
+
+type IntradaySignal = {
+  ts?: string;
+  time?: string;
+  symbol?: string;
+  action?: string;
+  side?: string;
+  confidence?: number;
+};
+
+type BotsPageBundle = {
+  as_of?: string;
+  swing?: {
+    status?: EodStatusResponse | any;
+    configs?: EodConfigResponse | any;
+    log_days?: any;
+  };
+  intraday?: {
+    status?: any;
+    configs?: any;
+    log_days?: any;
+    pnl_last_day?: IntradayPnlResponse | any;
+    tape?: {
+      updated_at?: string | null;
+      fills?: IntradayFill[];
+      signals?: IntradaySignal[];
+    };
+  };
+};
+
+// Draft config
+type BotDraft = EodBotConfig & {
+  penny_only?: boolean;
+  allow_etfs?: boolean;
+  max_daily_trades?: number;
+};
+
+// -----------------------------
+// Small helpers
+// -----------------------------
+
+function withBust(url: string) {
+  const bust = `_ts=${Date.now()}`;
+  return url.includes("?") ? `${url}&${bust}` : `${url}?${bust}`;
+}
+
+async function apiGet<T>(url: string): Promise<T> {
+  const r = await fetch(withBust(url), { method: "GET", cache: "no-store" });
+  if (!r.ok) throw new Error(`GET ${url} failed: ${r.status}`);
+  return (await r.json()) as T;
+}
+
+async function apiPostJson<T>(url: string, body: any): Promise<T> {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`POST ${url} failed: ${r.status}`);
+  return (await r.json()) as T;
+}
+
+async function tryGetFirst<T>(urls: string[]): Promise<{ url: string; data: T } | null> {
+  for (const u of urls) {
+    try {
+      const data = await apiGet<T>(u);
+      return { url: u, data };
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
 
 function fmtMoney(n: any): string {
   const x = Number(n);
@@ -122,37 +222,19 @@ function OnOffDot({
 }
 
 function MiniPerfChart({ data }: { data: Array<{ t: string; value: number }> }) {
-  const chartConfig = {
-    value: {
-      label: "Equity",
-      color: "hsl(210, 100%, 60%)",
-    },
-  } satisfies ChartConfig;
-
-  // Increased height from 120px to 140px to better accommodate chart with grid lines
   return (
-    <div className="h-[140px] w-full">
-      <ChartContainer config={chartConfig} className="h-full w-full">
-        <LineChart
-          data={data}
-          margin={{ left: 0, right: 0, top: 5, bottom: 5 }}
-        >
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" vertical={false} />
+    <div className="h-[120px] w-full">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data}>
           <XAxis dataKey="t" hide />
           <YAxis hide domain={["auto", "auto"]} />
-          <ChartTooltip
-            content={<ChartTooltipContent hideLabel />}
-            cursor={{ stroke: "rgba(255,255,255,0.2)" }}
+          <Tooltip
+            contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))" }}
+            labelStyle={{ color: "hsl(var(--muted-foreground))" }}
           />
-          <Line
-            dataKey="value"
-            type="monotone"
-            stroke="var(--color-value)"
-            strokeWidth={2}
-            dot={false}
-          />
+          <Line type="monotone" dataKey="value" stroke="hsl(var(--primary))" strokeWidth={2} dot={false} isAnimationActive={false} />
         </LineChart>
-      </ChartContainer>
+      </ResponsiveContainer>
     </div>
   );
 }
@@ -287,7 +369,7 @@ function BotRulesPanel({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          {dirty ? <Badge variant="muted">Unsaved</Badge> : <Badge variant="outline">Saved</Badge>}
+          {dirty ? <Badge variant="secondary">Unsaved</Badge> : <Badge variant="outline">Saved</Badge>}
         </div>
       </div>
 
@@ -444,7 +526,7 @@ function LiveIntradayTape({
                   return (
                     <div key={i} className="flex items-center justify-between rounded-lg border bg-background/40 px-3 py-2 text-xs">
                       <div className="flex items-center gap-2">
-                        <Badge variant={side === "BUY" ? "muted" : "outline"}>{side}</Badge>
+                        <Badge variant={side === "BUY" ? "secondary" : "outline"}>{side}</Badge>
                         <span className="font-semibold">{(f.symbol ?? "—").toString()}</span>
                         <span className="text-white/60">{(f.ts ?? f.time ?? "—").toString()}</span>
                       </div>
@@ -470,7 +552,7 @@ function LiveIntradayTape({
                   return (
                     <div key={i} className="flex items-center justify-between rounded-lg border bg-background/40 px-3 py-2 text-xs">
                       <div className="flex items-center gap-2">
-                        <Badge variant={act === "BUY" ? "muted" : "outline"}>{act}</Badge>
+                        <Badge variant={act === "BUY" ? "secondary" : "outline"}>{act}</Badge>
                         <span className="font-semibold">{(s.symbol ?? "—").toString()}</span>
                         <span className="text-white/60">{(s.ts ?? s.time ?? "—").toString()}</span>
                       </div>
@@ -534,11 +616,11 @@ function BotRow({
   async function save() {
     setSaving(true);
     try {
-      // Use centralized API client
+      // try the mounted prefix first
       if (botType === "swing") {
-        await updateEodBotConfig(botKey, draft, apiPrefix);
+        await apiPostJson(`${apiPrefix}/eod/configs`, { bot_key: botKey, config: draft });
       } else {
-        await updateIntradayBotConfig(botKey, draft, apiPrefix);
+        await apiPostJson(`${apiPrefix}/intraday/configs`, { bot_key: botKey, config: draft });
       }
       setDirty(false);
     } catch {
@@ -579,11 +661,11 @@ function BotRow({
       </CardHeader>
 
       <CardContent className="pt-0">
-        <div className="grid gap-4 lg:grid-cols-[360px_240px_minmax(0,1fr)_56px] items-stretch">
-          <div className="rounded-xl border bg-card/30 p-4 min-w-0">
+        <div className="grid gap-4 lg:grid-cols-[360px_240px_1fr_56px] items-stretch">
+          <div className="rounded-xl border bg-card/30 p-4">
             <div className="mb-2 flex items-center justify-between">
               <div className="text-sm font-semibold">Performance</div>
-              <Badge variant="muted" className="text-xs">
+              <Badge variant="secondary" className="text-xs">
                 {h.toUpperCase()}
               </Badge>
             </div>
@@ -631,8 +713,8 @@ function BotRow({
                   <div className="flex flex-wrap gap-2 text-xs">
                     <Badge variant="outline">SL {fmtPct(draft.stop_loss)}</Badge>
                     <Badge variant="outline">TP {fmtPct(draft.take_profit)}</Badge>
-                    <Badge variant="muted">{riskLabel}</Badge>
-                    <Badge variant="muted">Agg {fmtPct(draft.aggression)}</Badge>
+                    <Badge variant="secondary">{riskLabel}</Badge>
+                    <Badge variant="secondary">Agg {fmtPct(draft.aggression)}</Badge>
                   </div>
                 </div>
               </div>
@@ -668,8 +750,8 @@ function BotRow({
                   <div className="flex flex-wrap gap-2 text-xs">
                     <Badge variant="outline">SL {fmtPct(draft.stop_loss)}</Badge>
                     <Badge variant="outline">TP {fmtPct(draft.take_profit)}</Badge>
-                    <Badge variant="muted">{riskLabel}</Badge>
-                    <Badge variant="muted">Agg {fmtPct(draft.aggression)}</Badge>
+                    <Badge variant="secondary">{riskLabel}</Badge>
+                    <Badge variant="secondary">Agg {fmtPct(draft.aggression)}</Badge>
                   </div>
                 </div>
               </div>
@@ -712,7 +794,7 @@ export default function BotsPage() {
   const [pollMs, setPollMs] = useState(5000);
 
   const inFlightRef = useRef(false);
-  const apiPrefixRef = useRef<string>("/api/backend"); // we'll auto-detect
+  const apiPrefixRef = useRef<string>("/api/backend"); // we’ll auto-detect
 
   async function refresh() {
     if (inFlightRef.current) return;
@@ -720,12 +802,17 @@ export default function BotsPage() {
 
     setErr(null);
     try {
-      const data = await getBotsPageBundle();
-      setBundle(data);
-      
-      // Detect which API prefix is working for save operations
-      const prefix = await detectApiPrefix();
-      apiPrefixRef.current = prefix;
+      const hit = await tryGetFirst<BotsPageBundle>([
+        "/api/backend/bots/page",
+        "/api/bots/page",
+      ]);
+
+      if (!hit) throw new Error("Bots bundle endpoint not found (check backend router mount).");
+
+      // remember which prefix worked for saves
+      apiPrefixRef.current = hit.url.startsWith("/api/backend") ? "/api/backend" : "/api";
+
+      setBundle(hit.data);
     } catch (e: any) {
       setErr(e?.message ?? "Failed to load");
     } finally {
@@ -734,7 +821,6 @@ export default function BotsPage() {
     }
   }
 
-  // Initial load
   useEffect(() => {
     refresh();
 
@@ -746,7 +832,6 @@ export default function BotsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Auto-refresh polling when live mode enabled
   useEffect(() => {
     if (!live) return;
     const t = setInterval(refresh, pollMs);
@@ -767,22 +852,14 @@ export default function BotsPage() {
     : null;
 
   const fillsArr = useMemo(() => {
-    const fillsData = bundle?.intraday?.fills_recent;
-    if (fillsData && !fillsData?.error && Array.isArray(fillsData?.fills)) {
-      return fillsData.fills as IntradayFill[];
-    }
-    return [];
+    return (bundle?.intraday?.tape?.fills ?? []) as IntradayFill[];
   }, [bundle]);
 
   const signalsArr = useMemo(() => {
-    const signalsData = bundle?.intraday?.signals_latest;
-    if (signalsData && !signalsData?.error && Array.isArray(signalsData?.signals)) {
-      return signalsData.signals as IntradaySignal[];
-    }
-    return [];
+    return (bundle?.intraday?.tape?.signals ?? []) as IntradaySignal[];
   }, [bundle]);
 
-  const dtUpdatedAt = bundle?.intraday?.fills_recent?.updated_at ?? bundle?.intraday?.signals_latest?.updated_at ?? null;
+  const dtUpdatedAt = bundle?.intraday?.tape?.updated_at ?? null;
 
   const swingBots = useMemo(() => {
     const bots = eodStatus?.bots ?? {};
@@ -853,18 +930,9 @@ export default function BotsPage() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <Link
-              href="/bots/config"
-              className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10 transition-colors"
-            >
-              <Settings className="h-4 w-4" />
-              <span>Configure Knobs</span>
-            </Link>
-            
             <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
               <Switch checked={live} onCheckedChange={setLive} />
               <div className="text-xs text-white/70">Live</div>
-              <Badge variant="outline" className="text-xs">Polling</Badge>
               <Separator orientation="vertical" className="mx-2 h-5 bg-white/10" />
               <Button size="sm" variant={pollMs === 2000 ? "default" : "outline"} onClick={() => setPollMs(2000)}>
                 2s
@@ -878,7 +946,7 @@ export default function BotsPage() {
             </div>
 
             <Button variant="outline" onClick={refresh} disabled={loading} className="gap-2">
-              <RefreshCw className={cn("h-4 w-4", loading && "animate-spin")} />
+              <RefreshCw className="h-4 w-4" />
               Refresh
             </Button>
           </div>
@@ -886,13 +954,6 @@ export default function BotsPage() {
 
         {err ? (
           <div className="mb-6 rounded-xl border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-200">{err}</div>
-        ) : null}
-
-        {loading && !bundle ? (
-          <div className="mb-6 rounded-xl border border-white/10 bg-white/5 p-8 text-center">
-            <RefreshCw className="mx-auto h-8 w-8 animate-spin text-white/40 mb-3" />
-            <div className="text-sm text-white/60">Loading bots data...</div>
-          </div>
         ) : null}
 
         {/* SWING BOTS */}

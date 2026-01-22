@@ -17,21 +17,8 @@ export default function AccuracyCard() {
 
         const data = await res.json();
         if (data && typeof data.accuracy_30d === "number") {
-          setAcc(data.accuracy_30d * 100);  // Use combined accuracy
-          
-          // Show breakdown in summary if execution accuracy is available
-          if (typeof data.model_accuracy === "number" && typeof data.execution_accuracy === "number") {
-            const modelAcc = (data.model_accuracy * 100).toFixed(1);
-            const execAcc = (data.execution_accuracy * 100).toFixed(1);
-            setSummary(`Model: ${modelAcc}% • Trades: ${execAcc}%`);
-          } else if (typeof data.model_accuracy === "number") {
-            // If only model accuracy, show that
-            const modelAcc = (data.model_accuracy * 100).toFixed(1);
-            setSummary(`Model: ${modelAcc}%`);
-          } else {
-            setSummary(data.summary || "");
-          }
-          
+          setAcc(data.accuracy_30d * 100);
+          setSummary(data.summary || "");
           // You could later calculate WoW here if you start tracking weekly snapshots
           setWow(null);
         }

@@ -17,9 +17,7 @@ import {
   Zap,
 } from "lucide-react";
 
-import { getApiBaseUrl } from "@/lib/api";
-
-const API_BASE = getApiBaseUrl();
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 // -----------------------------
 // Types

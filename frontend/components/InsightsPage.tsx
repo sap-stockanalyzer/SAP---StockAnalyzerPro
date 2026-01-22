@@ -85,7 +85,7 @@ export default function InsightsPage() {
         setError(null);
 
         const res = await fetch(
-          `${API_BASE}/api/backend/insights/predictions/latest`,
+          `${API_BASE}/api/backend/api/insights/predictions/latest`,
           { cache: "no-store" }
         );
 
