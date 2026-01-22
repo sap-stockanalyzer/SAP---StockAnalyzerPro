@@ -131,10 +131,89 @@ export async function getIntradaySnapshot(limit: number = 120, useCache: boolean
 
 /**
  * Get bots page data (unified status for all bot families).
+ * NEW CONSOLIDATED ENDPOINT: /api/page/bots
  */
 export async function getBotsPage(useCache: boolean = false) {
-  const path = "/api/bots/page";
+  const path = "/api/page/bots";
   return get(path, { cache: useCache, ttl: 5000 });
+}
+
+/**
+ * Get profile/portfolio page data.
+ * NEW CONSOLIDATED ENDPOINT: /api/page/profile
+ */
+export async function getProfilePage(useCache: boolean = false) {
+  const path = "/api/page/profile";
+  return get(path, { cache: useCache, ttl: 5000 });
+}
+
+/**
+ * Get dashboard page data.
+ * NEW CONSOLIDATED ENDPOINT: /api/page/dashboard
+ */
+export async function getDashboardPage(useCache: boolean = false) {
+  const path = "/api/page/dashboard";
+  return get(path, { cache: useCache, ttl: 5000 });
+}
+
+/**
+ * Get predict page data.
+ * NEW CONSOLIDATED ENDPOINT: /api/page/predict
+ */
+export async function getPredictPage(useCache: boolean = false) {
+  const path = "/api/page/predict";
+  return get(path, { cache: useCache, ttl: 5000 });
+}
+
+/**
+ * Get tools/admin page data.
+ * NEW CONSOLIDATED ENDPOINT: /api/page/tools
+ */
+export async function getToolsPage(useCache: boolean = false) {
+  const path = "/api/page/tools";
+  return get(path, { cache: useCache, ttl: 5000 });
+}
+
+// ========== Admin Consolidated API ==========
+
+/**
+ * Get admin system status.
+ * NEW CONSOLIDATED ENDPOINT: /api/admin/status
+ */
+export async function getAdminStatus() {
+  return get("/api/admin/status");
+}
+
+/**
+ * Get admin logs.
+ * NEW CONSOLIDATED ENDPOINT: /api/admin/logs
+ */
+export async function getAdminLogs(logType: string = "backend", lines: number = 100) {
+  return get(`/api/admin/logs?log_type=${logType}&lines=${lines}`);
+}
+
+/**
+ * Execute admin action.
+ * NEW CONSOLIDATED ENDPOINT: /api/admin/action/{action}
+ */
+export async function executeAdminAction(action: string) {
+  return post(`/api/admin/action/${action}`);
+}
+
+/**
+ * Get replay status for a backend.
+ * NEW CONSOLIDATED ENDPOINT: /api/admin/replay/{backend}/status
+ */
+export async function getReplayStatus(backendType: string) {
+  return get(`/api/admin/replay/${backendType}/status`);
+}
+
+/**
+ * Get admin metrics.
+ * NEW CONSOLIDATED ENDPOINT: /api/admin/metrics
+ */
+export async function getAdminMetrics() {
+  return get("/api/admin/metrics");
 }
 
 // ========== Optimizer API ==========
@@ -326,6 +405,24 @@ export async function getPortfolio() {
 export const api = {
   // Health
   health: getHealth,
+
+  // Page Data (NEW CONSOLIDATED)
+  pages: {
+    bots: getBotsPage,
+    profile: getProfilePage,
+    dashboard: getDashboardPage,
+    predict: getPredictPage,
+    tools: getToolsPage,
+  },
+
+  // Admin (NEW CONSOLIDATED)
+  admin: {
+    status: getAdminStatus,
+    logs: getAdminLogs,
+    action: executeAdminAction,
+    replayStatus: getReplayStatus,
+    metrics: getAdminMetrics,
+  },
 
   // Settings & Configuration
   settings: {
