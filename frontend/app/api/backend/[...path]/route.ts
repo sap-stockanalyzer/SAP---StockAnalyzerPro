@@ -15,6 +15,8 @@ function getBackendBaseUrl() {
   }
   
   // Server-side fallback to BACKEND_URL or default localhost
+  // NOTE: localhost default is for development only. 
+  // Production should set BACKEND_URL or NEXT_PUBLIC_BACKEND_URL explicitly.
   return process.env.BACKEND_URL || 'http://localhost:8000';
 }
 

@@ -1,56 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Activity } from "lucide-react";
-
-/**
- * Try multiple URLs in parallel, return first success
- */
-async function tryGetFirst<T>(
-  urls: string[], 
-  timeoutMs: number = 3000
-): Promise<{ url: string; data: T } | null> {
-  if (urls.length === 0) return null;
-
-  const controllers: AbortController[] = [];
-
-  const promises = urls.map(async (url) => {
-    const controller = new AbortController();
-    controllers.push(controller);
-    
-    const timeoutId = setTimeout(() => {
-      controller.abort();
-    }, timeoutMs);
-
-    try {
-      const response = await fetch(url, { 
-        method: "GET", 
-        cache: "no-store",
-        signal: controller.signal,
-      });
-      
-      clearTimeout(timeoutId);
-      
-      if (!response.ok) {
-        throw new Error(`GET ${url} failed: ${response.status}`);
-      }
-      
-      const data = await response.json() as T;
-      return { url, data };
-    } catch (error) {
-      clearTimeout(timeoutId);
-      throw error;
-    }
-  });
-
-  try {
-    const result = await Promise.any(promises);
-    controllers.forEach(c => c.abort());
-    return result;
-  } catch (error) {
-    controllers.forEach(c => c.abort());
-    return null;
-  }
-}
+import { tryGetFirst } from "@/lib/apiUtils";
 
 export default function AccuracyCard() {
   const [acc, setAcc] = useState<number | null>(null);

@@ -12,7 +12,7 @@ function getDtBackendBaseUrl(): string {
   const url =
     process.env.DT_BACKEND_URL ||
     process.env.NEXT_PUBLIC_DT_BACKEND_URL ||
-    'http://localhost:8010'; // Default to local DT backend
+    'http://localhost:8010'; // NOTE: localhost default is for development only. Production should set DT_BACKEND_URL or NEXT_PUBLIC_DT_BACKEND_URL explicitly.
 
   return url.replace(/\/+$/, "");
 }
