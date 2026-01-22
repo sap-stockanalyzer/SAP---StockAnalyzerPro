@@ -235,9 +235,12 @@ def _cache_updater_thread():
 
 def _rolling_optimizer_thread():
     """Run rolling optimizer every 30 seconds."""
+    quiet = os.getenv("QUIET_ROLLING_OPTIMIZER", "0").lower() in {"1", "true", "yes", "on"}
+    
     try:
         from backend.services.rolling_optimizer import optimize_rolling_data
-        print("[RollingOptimizer] 🔄 Starting rolling optimizer...", flush=True)
+        if not quiet:
+            print("[RollingOptimizer] 🔄 Starting rolling optimizer...", flush=True)
         
         # Initial run
         time.sleep(5)  # Wait for system to stabilize
@@ -247,15 +250,19 @@ def _rolling_optimizer_thread():
                 result = optimize_rolling_data()
                 if result.get("status") == "success":
                     stats = result.get("stats", {})
-                    print(f"[RollingOptimizer] ✅ Optimized: {stats}", flush=True)
+                    if not quiet:
+                        print(f"[RollingOptimizer] ✅ Optimized: {stats}", flush=True)
                 else:
-                    print(f"[RollingOptimizer] ⚠️ Optimization failed: {result.get('errors')}", flush=True)
+                    if not quiet:
+                        print(f"[RollingOptimizer] ⚠️ Optimization failed: {result.get('errors')}", flush=True)
             except Exception as e:
-                print(f"[RollingOptimizer] ⚠️ Optimization error: {e}", flush=True)
+                if not quiet:
+                    print(f"[RollingOptimizer] ⚠️ Optimization error: {e}", flush=True)
             time.sleep(30)  # Run every 30 seconds
             
     except Exception as e:
-        print(f"[RollingOptimizer] ❌ Optimizer crashed: {e}", flush=True)
+        if not quiet:
+            print(f"[RollingOptimizer] ❌ Optimizer crashed: {e}", flush=True)
 
 
 def _scheduler_thread():

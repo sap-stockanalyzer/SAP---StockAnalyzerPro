@@ -324,6 +324,18 @@ def run_nightly_job(
             "phases": {},
         }
         _write_summary(summary)
+        
+        # Send skip notification to nightly channel
+        try:
+            from backend.monitoring.alerting import alert_nightly
+            alert_nightly(
+                "⏭️ Nightly Job Skipped",
+                f"Last run finished within {MIN_HOURS_BETWEEN_RUNS}h. Skipping to prevent duplication.",
+                context={"Reason": "Recent run guard"},
+            )
+        except Exception:
+            pass
+        
         return summary
 
     if not _acquire_lock():
@@ -905,6 +917,7 @@ def run_nightly_job(
             phases_completed = sum(1 for v in phases.values() if isinstance(v, dict) and v.get("status") in ["ok", "skipped"])
             total_phases = len(phases)
             
+            # EXISTING: Send completion summary
             if summary["status"] in ["ok", "ok_with_errors"]:
                 status_emoji = "✅" if summary["status"] == "ok" else "⚠️"
                 alert_nightly(
@@ -916,6 +929,30 @@ def run_nightly_job(
                         "Phases": f"{phases_completed}/{total_phases}",
                     },
                 )
+            
+            # NEW: If there were errors, also send detailed error report to #errors-tracebacks
+            if summary["status"] == "ok_with_errors":
+                failed_phases = [k for k, v in phases.items() if isinstance(v, dict) and v.get("status") == "error"]
+                if failed_phases:
+                    error_details = []
+                    for phase_key in failed_phases:
+                        phase_info = phases.get(phase_key, {})
+                        error_msg = phase_info.get("error", "Unknown error")
+                        secs = phase_info.get("secs", 0)
+                        error_details.append(f"• **{phase_key}** ({secs}s): {error_msg}")
+                    
+                    error_message = "\n".join(error_details)
+                    alert_error(
+                        "⚠️ Nightly Job Completed With Errors",
+                        f"**Failed Phases ({len(failed_phases)}/{total_phases}):**\n{error_message}\n\n**Duration:** {duration_mins} minutes",
+                        context={
+                            "Status": "ok_with_errors",
+                            "Failed Phases": len(failed_phases),
+                            "Total Phases": total_phases,
+                            "Duration": f"{duration_mins} min",
+                        }
+                    )
+
         except Exception:
             pass  # Don't let alert failure affect nightly job status
         
