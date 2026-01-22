@@ -244,7 +244,8 @@ def _days_held(pos: "Position", now: datetime | None = None) -> int:
     """Return integer number of full days held (best-effort)."""
     now = now or datetime.now(timezone.utc)
     try:
-        ts = (getattr(pos, "entry_ts", "") or "").strip()
+        # Try entry_ts first (if it exists), fallback to last_add_ts
+        ts = (getattr(pos, "entry_ts", "") or getattr(pos, "last_add_ts", "") or "").strip()
         if not ts:
             return 0
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -1074,6 +1075,14 @@ Entry Time: {_now_iso()}"""
             pnl_dollars = (price - entry_price) * qty
             pnl_pct = ((price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
             
+            # Format PnL with proper sign
+            if pnl_dollars >= 0:
+                pnl_str = f"+${pnl_dollars:.2f}"
+                pct_str = f"+{pnl_pct:.2f}%"
+            else:
+                pnl_str = f"-${abs(pnl_dollars):.2f}"
+                pct_str = f"{pnl_pct:.2f}%"  # pnl_pct is already negative
+            
             # Calculate hold duration
             hold_duration = "unknown"
             if entry_ts:
@@ -1096,7 +1105,7 @@ Entry Time: {_now_iso()}"""
             title = f"📉 Swing Bot {self.cfg.horizon} - SELL"
             message = f"""Symbol: {symbol}
 Qty: {qty:.2f} shares @ ${price:.2f}
-PnL: ${pnl_dollars:+.2f} ({pnl_pct:+.2f}% return)
+PnL: {pnl_str} ({pct_str} return)
 Reason: {reason_display}
 Hold Duration: {hold_duration}
 Exit Time: {_now_iso()}"""
@@ -1278,7 +1287,7 @@ Portfolio:
                         price=px,
                         entry_price=pos.entry,
                         reason="REMOVE_FROM_UNIVERSE",
-                        entry_ts=getattr(pos, "entry_ts", None),
+                        entry_ts=getattr(pos, "last_add_ts", None),
                     )
                 del state.positions[sym]
 
@@ -1311,8 +1320,11 @@ Portfolio:
             if qty_delta > 0:
                 # BUY / increase (Phase 4: starter entry + adds)
                 desired_qty = float(target_value / max(px, 1e-9))
-                signal = _extract_policy_signal(rolling.get(sym) if isinstance(rolling, dict) else None) or {}
-                sig_conf = float(signal.get("confidence") or 0.0)
+                node = rolling.get(sym) if isinstance(rolling, dict) else None
+                if node:
+                    intent, sig_conf, _ = self._extract_policy_signal(node)
+                else:
+                    sig_conf = 0.0
 
                 buy_qty = float(qty_delta)
 
@@ -1328,7 +1340,6 @@ Portfolio:
                             goal_qty=float(desired_qty),
                             build_stage=1,
                             last_add_ts=_now_iso(),
-                            entry_ts=_now_iso(),
                         )
                         pos = state.positions[sym]
 
@@ -1419,7 +1430,7 @@ Portfolio:
                     price=px,
                     entry_price=pos.entry,
                     reason="TARGET_REBALANCE",
-                    entry_ts=getattr(pos, "entry_ts", None),
+                    entry_ts=getattr(pos, "last_add_ts", None),
                 )
                 pos.qty -= sell_qty
                 if pos.qty <= 0:
@@ -1477,7 +1488,7 @@ Portfolio:
                     price=px,
                     entry_price=pos.entry,
                     reason="STOP_LOSS",
-                    entry_ts=getattr(pos, "entry_ts", None),
+                    entry_ts=getattr(pos, "last_add_ts", None),
                 )
                 del state.positions[sym]
                 continue
@@ -1508,7 +1519,7 @@ Portfolio:
                     price=px,
                     entry_price=pos.entry,
                     reason="TAKE_PROFIT",
-                    entry_ts=getattr(pos, "entry_ts", None),
+                    entry_ts=getattr(pos, "last_add_ts", None),
                 )
                 del state.positions[sym]
                 continue            # Phase 5: time stop (let time work, but not forever)
@@ -1537,7 +1548,7 @@ Portfolio:
                         price=px,
                         entry_price=pos.entry,
                         reason=f"time_stop(days={held_days})",
-                        entry_ts=getattr(pos, "entry_ts", None),
+                        entry_ts=getattr(pos, "last_add_ts", None),
                     )
                     del state.positions[sym]
                     continue            # Phase 5: less twitchy exits — require hold time + confirmation
@@ -1575,7 +1586,7 @@ Portfolio:
                             price=px,
                             entry_price=pos.entry,
                             reason=f"ai_sell_confirmed({pos.pending_exit}/{self.cfg.exit_confirmations})",
-                            entry_ts=getattr(pos, "entry_ts", None),
+                            entry_ts=getattr(pos, "last_add_ts", None),
                         )
                         del state.positions[sym]
                         continue
