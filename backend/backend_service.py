@@ -66,6 +66,11 @@ except ImportError as e:
 from backend.admin.routes import router as admin_router
 from backend.admin.admin_tools_router import router as admin_tools_router
 
+# KEEP: Legacy routers for backward compatibility (frontend still uses these)
+# These will be gradually phased out as frontend migrates to consolidated endpoints
+from backend.routers.bots_page_router import router as bots_page_router
+from backend.routers.dashboard_router import router as dashboard_router
+
 # OLD ROUTERS (commented out - replaced by consolidated routers)
 # from backend.routers.system_status_router import router as system_router
 # from backend.routers.diagnostics_router import router as diagnostics_router
@@ -154,6 +159,10 @@ ROUTERS = [
     # KEEP: Legacy admin (backward compat)
     admin_router,
     admin_tools_router,
+    
+    # KEEP: Legacy data routers (backward compat - will be phased out)
+    bots_page_router,           # /api/bots/page
+    dashboard_router,           # /dashboard/metrics, /dashboard/top/{horizon}
 ]
 
 # Filter out None routers (e.g., testing_router if import failed)

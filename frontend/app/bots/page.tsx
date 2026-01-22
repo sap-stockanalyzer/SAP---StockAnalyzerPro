@@ -802,9 +802,12 @@ export default function BotsPage() {
 
     setErr(null);
     try {
+      // NEW: Try consolidated endpoint first, then fallback to old endpoints
       const hit = await tryGetFirst<BotsPageBundle>([
-        "/api/backend/bots/page",
-        "/api/bots/page",
+        "/api/backend/page/bots",     // NEW consolidated endpoint through proxy
+        "/api/page/bots",              // NEW consolidated endpoint direct
+        "/api/backend/bots/page",      // OLD endpoint through proxy (fallback)
+        "/api/bots/page",              // OLD endpoint direct (fallback)
       ]);
 
       if (!hit) throw new Error("Bots bundle endpoint not found (check backend router mount).");

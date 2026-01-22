@@ -11,6 +11,7 @@ export default function AccuracyCard() {
     async function fetchAccuracy() {
       try {
         // Use Next.js proxy route (server decides real backend via env)
+        // NOTE: Will migrate to /api/backend/page/dashboard in future
         const res = await fetch("/api/backend/dashboard/metrics", {
           cache: "no-store",
         });
