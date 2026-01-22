@@ -765,6 +765,11 @@ def run_all_bots(exec_mode: str = "sim", run_minutes: Optional[int] = None) -> N
 
     # No simulator bots - using only advanced ML DT bots via dt_scheduler.py
     bots: List[BaseSimBot] = []
+    
+    # Early exit if no bots configured
+    if not bots:
+        log("ℹ️ No simulator bots configured. Using advanced ML DT bots via dt_scheduler.py instead.")
+        return
 
     # Apply per-bot UI knobs (if present)
     for b in bots:
