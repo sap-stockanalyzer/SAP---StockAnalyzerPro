@@ -46,10 +46,11 @@ def create_app() -> FastAPI:
     )
 
     # CORS middleware - permissive for development
+    # TODO: In production, restrict allow_origins to specific domains
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
+        allow_credentials=False,  # Set to False when using wildcard origins for security
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -59,9 +60,9 @@ def create_app() -> FastAPI:
 
     # Include all working routers
     ROUTERS = [
-        # page_data_router,  # COMMENTED OUT - doesn't exist yet
+        # page_data_router,  # COMMENTED OUT - not production-ready yet
         admin_consolidated_router,  # KEEP - works
-        # settings_consolidated_router,  # COMMENTED OUT - doesn't exist yet
+        # settings_consolidated_router,  # COMMENTED OUT - not production-ready yet
         health_router,
         events_router,
         unified_cache_router,
