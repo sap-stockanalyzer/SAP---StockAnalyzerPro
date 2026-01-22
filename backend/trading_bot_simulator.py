@@ -3,7 +3,7 @@
 #
 # - Reads 1-min bars from: data_dt/rolling_intraday.json.gz
 # - Reads AI signals (best-effort) from: ml_data_dt/signals/
-# - Simulates 5 bots: momentum, mean-revert, signal-follow, breakout, hybrid
+# - Framework supports multiple trading bots (currently running 0 simulator bots)
 # - Enforces stop-loss / take-profit per position
 # - Logs daily trades and updates ml_data_dt/sim_summary.json
 # - Can:
@@ -679,169 +679,6 @@ class BaseSimBot:
 # ----------------------------------------------------------------------
 
 
-class MomentumBot(BaseSimBot):
-    def __init__(self):
-        super().__init__("momentum_bot")
-
-    def maybe_enter(self, sym, bar, signals):
-        closes = bar.get("closes") or []
-        if len(closes) < 20:
-            return
-        ema5 = _ema(closes, 5)
-        ema20 = _ema(closes, 20)
-        price = float(closes[-1])
-        if ema5 is None or ema20 is None:
-            return
-        # bullish momentum + above ema20
-        if ema5 > ema20 and price > ema20:
-            self._enter(sym, price, "EMA5>EMA20", bar)
-
-    def maybe_exit(self, sym, bar, signals):
-        closes = bar.get("closes") or []
-        if len(closes) < 20 or sym not in self.positions:
-            return
-        ema5 = _ema(closes, 5)
-        ema20 = _ema(closes, 20)
-        price = float(closes[-1])
-        if ema5 is None or ema20 is None:
-            return
-        # momentum fade
-        if ema5 < ema20:
-            self._exit(sym, price, "MOMENTUM_FADE", bar)
-
-
-class MeanRevertBot(BaseSimBot):
-    def __init__(self):
-        super().__init__("mean_revert_bot")
-
-    def maybe_enter(self, sym, bar, signals):
-        closes = bar.get("closes") or []
-        if len(closes) < 30:
-            return
-        ma20 = _sma(closes, 20)
-        price = float(closes[-1])
-        if ma20 is None or ma20 == 0:
-            return
-        drop = _pct_chg(price, ma20)
-        # buy ~1–2% below mean
-        if isinstance(drop, float) and drop <= -0.012:
-            self._enter(sym, price, "MEAN_REVERT_BUY", bar)
-
-    def maybe_exit(self, sym, bar, signals):
-        closes = bar.get("closes") or []
-        if len(closes) < 20 or sym not in self.positions:
-            return
-        ma20 = _sma(closes, 20)
-        price = float(closes[-1])
-        if ma20 is None or ma20 == 0:
-            return
-        # exit when back near/above mean
-        diff = _pct_chg(price, ma20)
-        if isinstance(diff, float) and diff >= 0.0:
-            self._exit(sym, price, "MEAN_REVERT_EXIT", bar)
-
-
-class SignalFollowBot(BaseSimBot):
-    def __init__(self):
-        super().__init__("signal_follow_bot")
-
-    def maybe_enter(self, sym, bar, signals):
-        info = signals.get(sym) or {}
-        sig = str(info.get("signal", "")).upper()
-        conf = float(info.get("confidence") or 0.0)
-        price = float(bar.get("price") or 0.0)
-        if sig == "BUY" and conf >= float(self.min_confidence or 0.0) and price > 0:
-            self._enter(sym, price, f"AI_BUY_{conf:.2f}", bar)
-
-    def maybe_exit(self, sym, bar, signals):
-        if sym not in self.positions:
-            return
-        info = signals.get(sym) or {}
-        sig = str(info.get("signal", "")).upper()
-        price = float(bar.get("price") or 0.0)
-        if sig == "SELL" and price > 0:
-            self._exit(sym, price, "AI_SELL", bar)
-
-
-class BreakoutBot(BaseSimBot):
-    def __init__(self):
-        super().__init__("breakout_bot")
-
-    def maybe_enter(self, sym, bar, signals):
-        highs = bar.get("highs") or []
-        closes = bar.get("closes") or []
-        if len(highs) < 20 or not closes:
-            return
-        price = float(closes[-1])
-        hi20 = max(highs[-20:])
-        # breakout above recent range
-        if price > hi20:
-            self._enter(sym, price, "BREAKOUT_UP", bar)
-
-    def maybe_exit(self, sym, bar, signals):
-        lows = bar.get("lows") or []
-        closes = bar.get("closes") or []
-        if len(lows) < 20 or not closes or sym not in self.positions:
-            return
-        price = float(closes[-1])
-        lo20 = min(lows[-20:])
-        # break below recent floor
-        if price < lo20:
-            self._exit(sym, price, "BREAKDOWN_EXIT", bar)
-
-
-class HybridBot(BaseSimBot):
-    """
-    Fusion of the 4 strategies:
-      - Requires AI BUY OR strong momentum filter
-      - Bias long only when price above MA50
-      - Avoids entries during high micro drawdown vs MA20
-      - Discretionary exit on momentum fade OR AI SELL
-    """
-
-    def __init__(self):
-        super().__init__("hybrid_bot")
-
-    def maybe_enter(self, sym, bar, signals):
-        closes = bar.get("closes") or []
-        if len(closes) < 50:
-            return
-        price = float(closes[-1])
-        ema5 = _ema(closes, 5)
-        ema20 = _ema(closes, 20)
-        ma50 = _sma(closes, 50)
-        ai = (signals.get(sym) or {}).get("signal")
-        ai_buy = isinstance(ai, str) and ai.upper() == "BUY"
-        if None in (ema5, ema20, ma50):
-            return
-
-        mom_ok = (ema5 > ema20) and (price > ema20)
-        trend_ok = price > ma50
-        dd = _pct_chg(price, ema20)
-        safe = True if dd is None else (dd > -0.03)
-
-        if trend_ok and safe and (ai_buy or mom_ok):
-            self._enter(sym, price, "HYBRID_BUY", bar)
-
-    def maybe_exit(self, sym, bar, signals):
-        if sym not in self.positions:
-            return
-        closes = bar.get("closes") or []
-        if len(closes) < 20:
-            return
-        price = float(closes[-1])
-        ema5 = _ema(closes, 5)
-        ema20 = _ema(closes, 20)
-        ai = (signals.get(sym) or {}).get("signal")
-        ai_sell = isinstance(ai, str) and ai.upper() == "SELL"
-        if None in (ema5, ema20):
-            return
-
-        fade = ema5 < ema20
-        if fade or ai_sell:
-            self._exit(sym, price, "HYBRID_EXIT", bar)
-
-
 # ----------------------------------------------------------------------
 # Loop helpers
 # ----------------------------------------------------------------------
@@ -926,13 +763,13 @@ def run_all_bots(exec_mode: str = "sim", run_minutes: Optional[int] = None) -> N
     _init_alpaca_if_needed(exec_mode)
     date_tag = _today_tag()
 
-    bots: List[BaseSimBot] = [
-        MomentumBot(),
-        MeanRevertBot(),
-        SignalFollowBot(),
-        BreakoutBot(),
-        HybridBot(),
-    ]
+    # No simulator bots - using only advanced ML DT bots via dt_scheduler.py
+    bots: List[BaseSimBot] = []
+    
+    # Early exit if no bots configured
+    if not bots:
+        log("ℹ️ No simulator bots configured. Using advanced ML DT bots via dt_scheduler.py instead.")
+        return
 
     # Apply per-bot UI knobs (if present)
     for b in bots:

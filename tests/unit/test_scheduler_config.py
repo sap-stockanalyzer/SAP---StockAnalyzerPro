@@ -7,8 +7,8 @@ from backend.scheduler_config import SCHEDULE
 
 
 def test_scheduler_total_job_count():
-    """Test that scheduler has the expected total number of jobs (27)."""
-    assert len(SCHEDULE) == 27, f"Expected 27 jobs, got {len(SCHEDULE)}"
+    """Test that scheduler has the expected total number of jobs (25)."""
+    assert len(SCHEDULE) == 25, f"Expected 25 jobs, got {len(SCHEDULE)}"
 
 
 def test_afternoon_loop_jobs_exist():

@@ -124,20 +124,4 @@ SCHEDULE = [
         }
         for w in ["1w", "2w", "4w"]
     ],
-    {
-        "name": "dt_daytrader_start",
-        "time": "07:28",
-        "module": "backend.trading_bot_simulator",
-        "args": ["--mode", "paper"],
-        "cwd": PROJECT_ROOT,
-        "description": "Start day trading bot (paper).",
-    },
-    {
-        "name": "dt_daytrader_stop",
-        "time": "14:00",
-        "module": "backend.trading_bot_simulator",
-        "args": ["--mode", "stop"],
-        "cwd": PROJECT_ROOT,
-        "description": "Stop day trading bot.",
-    },
 ]
