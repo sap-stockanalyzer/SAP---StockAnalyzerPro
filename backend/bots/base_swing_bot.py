@@ -42,6 +42,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
+# Import alerting module for Slack notifications
+try:
+    from backend.monitoring.alerting import alert_swing
+except Exception:
+    # Fallback if alerting module not available
+    def alert_swing(title: str, message: str, **kwargs) -> None:  # type: ignore
+        pass
+
 # ---------------------------------------------------------------------------
 # Env helpers (swing knobs live in env; see knobs.env)
 # ---------------------------------------------------------------------------
@@ -236,7 +244,8 @@ def _days_held(pos: "Position", now: datetime | None = None) -> int:
     """Return integer number of full days held (best-effort)."""
     now = now or datetime.now(timezone.utc)
     try:
-        ts = (getattr(pos, "entry_ts", "") or "").strip()
+        # Try entry_ts first (if it exists), fallback to last_add_ts
+        ts = (getattr(pos, "entry_ts", "") or getattr(pos, "last_add_ts", "") or "").strip()
         if not ts:
             return 0
         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -422,6 +431,11 @@ class SwingBot:
         )
         self.bot_log_dir = ML_DATA / "bot_logs" / config.horizon
         self.insights_file = INSIGHTS_DIR / f"top50_{config.horizon}.json"
+
+        # Initialize rejection tracking for alerts
+        self._last_rejection_counts: Dict[str, int] = {}
+        self._last_universe_analyzed: int = 0
+        self._last_universe_qualified: int = 0
 
         # Apply runtime overrides from configs.json (if present)
         self._apply_runtime_overrides()
@@ -750,7 +764,11 @@ class SwingBot:
         # Phase S0: optional rejection logging for "missed opportunities" analytics.
         log_reject = str(os.getenv("SWING_LOG_REJECTIONS", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
         max_reject_events = int(os.getenv("SWING_LOG_REJECTIONS_MAX", "250"))
+        # Slack rejection alerts (separate from logging)
+        send_reject_alerts = str(os.getenv("SWING_SEND_REJECTIONS", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+        max_reject_alerts = int(os.getenv("SWING_SEND_REJECTIONS_MAX", "20"))
         reject_events = 0
+        reject_alerts_sent = 0
         reject_counts: Dict[str, int] = {}
 
         for sym, node in rolling.items():
@@ -784,7 +802,7 @@ class SwingBot:
                         "expected_return": float(exp_ret),
                     })
                     reject_events += 1
-                    reject_counts["intent_not_buy"] = reject_counts.get("intent_not_buy", 0) + 1
+                reject_counts["intent_not_buy"] = reject_counts.get("intent_not_buy", 0) + 1
                 continue
             if pol_conf < self.cfg.conf_threshold:
                 if log_reject and reject_events < max_reject_events:
@@ -799,7 +817,20 @@ class SwingBot:
                         "expected_return": float(exp_ret),
                     })
                     reject_events += 1
-                    reject_counts["conf_below_threshold"] = reject_counts.get("conf_below_threshold", 0) + 1
+                reject_counts["conf_below_threshold"] = reject_counts.get("conf_below_threshold", 0) + 1
+                # Send Slack rejection alert if enabled
+                if send_reject_alerts and reject_alerts_sent < max_reject_alerts:
+                    self._send_rejection_alert(
+                        symbol=sym,
+                        price=price,
+                        reason="conf_below_threshold",
+                        details={
+                            "confidence": pol_conf,
+                            "conf_threshold": self.cfg.conf_threshold,
+                            "expected_return": exp_ret,
+                        },
+                    )
+                    reject_alerts_sent += 1
                 continue
             # Phase 7: calibrated probability-of-hit + EV (expected value) gating.
             p_hit = float(pol_conf)
@@ -830,7 +861,21 @@ class SwingBot:
                         "price": float(price),
                     })
                     reject_events += 1
-                    reject_counts["phit_below_threshold"] = reject_counts.get("phit_below_threshold", 0) + 1
+                reject_counts["phit_below_threshold"] = reject_counts.get("phit_below_threshold", 0) + 1
+                # Send Slack rejection alert if enabled
+                if send_reject_alerts and reject_alerts_sent < max_reject_alerts:
+                    self._send_rejection_alert(
+                        symbol=sym,
+                        price=price,
+                        reason="phit_below_threshold",
+                        details={
+                            "confidence": pol_conf,
+                            "p_hit": p_hit,
+                            "min_phit": self.cfg.min_phit,
+                            "expected_return": exp_ret,
+                        },
+                    )
+                    reject_alerts_sent += 1
                 continue
 
             # EV model: hit → +expected_return, miss → -loss_est_pct
@@ -853,7 +898,22 @@ class SwingBot:
                         "price": float(price),
                     })
                     reject_events += 1
-                    reject_counts["non_positive_ev"] = reject_counts.get("non_positive_ev", 0) + 1
+                reject_counts["non_positive_ev"] = reject_counts.get("non_positive_ev", 0) + 1
+                # Send Slack rejection alert if enabled
+                if send_reject_alerts and reject_alerts_sent < max_reject_alerts:
+                    self._send_rejection_alert(
+                        symbol=sym,
+                        price=price,
+                        reason="non_positive_ev",
+                        details={
+                            "confidence": pol_conf,
+                            "p_hit": p_hit,
+                            "expected_return": exp_ret,
+                            "loss_est_pct": loss_est,
+                            "ev": ev,
+                        },
+                    )
+                    reject_alerts_sent += 1
                 continue
 
             # Base AI score (Phase 7): EV * confidence
@@ -889,6 +949,12 @@ class SwingBot:
             except Exception:
                 pass
         log(f"[{self.cfg.bot_key}] AI-ranked universe size={len(ranked)}")
+        
+        # Store rejection counts for summary alert
+        self._last_rejection_counts = reject_counts
+        self._last_universe_analyzed = len(rolling) - 1 if "_GLOBAL" in rolling else len(rolling)  # Exclude _GLOBAL
+        self._last_universe_qualified = len(ranked)
+        
         return ranked
 
     def construct_target_weights(self, ranked: List[Tuple]) -> Dict[str, float]:
@@ -947,6 +1013,209 @@ class SwingBot:
 
         log(f"[{self.cfg.bot_key}] Constructed {len(weights)} target weights.")
         return weights
+
+    # ---------------------- Alert Methods ----------------------- #
+
+    def _send_buy_alert(
+        self,
+        symbol: str,
+        qty: float,
+        price: float,
+        rolling: Dict[str, dict],
+    ) -> None:
+        """Send Slack alert for BUY trade."""
+        try:
+            # Extract signal data
+            node = rolling.get(symbol, {})
+            intent, pol_conf, _ = self._extract_policy_signal(node)
+            exp_ret = self._extract_horizon_pred(node)
+            
+            # Calculate P(Hit) if calibration available
+            p_hit = pol_conf
+            if self.cfg.use_phit and callable(_get_phit):
+                try:
+                    g = rolling.get("_GLOBAL", {})
+                    reg = g.get("regime", {}) if isinstance(g, dict) else {}
+                    regime = str((reg or {}).get("label") or "unknown")
+                    p_hit = float(_get_phit(
+                        base_conf=float(pol_conf),
+                        expected_return=float(exp_ret),
+                        regime_label=regime,
+                    ))
+                except Exception:
+                    pass
+            
+            # Format alert message
+            title = f"📈 Swing Bot {self.cfg.horizon} - BUY"
+            message = f"""Symbol: {symbol}
+Qty: {qty:.2f} shares @ ${price:.2f}
+Confidence: {pol_conf*100:.1f}% (> threshold: {self.cfg.conf_threshold*100:.1f}%)
+Expected Return: {exp_ret*100:+.2f}%
+P(Hit): {p_hit*100:.1f}%
+Why Selected: Top rank in AI universe, strong signal + positive EV
+Entry Time: {_now_iso()}"""
+            
+            alert_swing(title, message, level="info", skip_rate_limit=True)
+            log(f"[{self.cfg.bot_key}] 📤 Sent BUY alert for {symbol}")
+        except Exception as e:
+            log(f"[{self.cfg.bot_key}] ⚠️ Failed to send BUY alert: {e}")
+
+    def _send_sell_alert(
+        self,
+        symbol: str,
+        qty: float,
+        price: float,
+        entry_price: float,
+        reason: str,
+        entry_ts: Optional[str] = None,
+    ) -> None:
+        """Send Slack alert for SELL trade."""
+        try:
+            # Calculate PnL
+            pnl_dollars = (price - entry_price) * qty
+            pnl_pct = ((price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
+            
+            # Format PnL with proper sign
+            if pnl_dollars >= 0:
+                pnl_str = f"+${pnl_dollars:.2f}"
+                pct_str = f"+{pnl_pct:.2f}%"
+            else:
+                pnl_str = f"-${abs(pnl_dollars):.2f}"
+                pct_str = f"{pnl_pct:.2f}%"  # pnl_pct is already negative
+            
+            # Calculate hold duration
+            hold_duration = "unknown"
+            if entry_ts:
+                try:
+                    entry_dt = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
+                    if entry_dt.tzinfo is None:
+                        entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                    now_dt = datetime.now(timezone.utc)
+                    delta = now_dt - entry_dt
+                    days = delta.days
+                    hours = delta.seconds // 3600
+                    hold_duration = f"{days} days, {hours} hours"
+                except Exception:
+                    pass
+            
+            # Format reason
+            reason_display = reason.replace("_", " ").title()
+            
+            # Format alert message
+            title = f"📉 Swing Bot {self.cfg.horizon} - SELL"
+            message = f"""Symbol: {symbol}
+Qty: {qty:.2f} shares @ ${price:.2f}
+PnL: {pnl_str} ({pct_str} return)
+Reason: {reason_display}
+Hold Duration: {hold_duration}
+Exit Time: {_now_iso()}"""
+            
+            alert_swing(title, message, level="info", skip_rate_limit=True)
+            log(f"[{self.cfg.bot_key}] 📤 Sent SELL alert for {symbol}")
+        except Exception as e:
+            log(f"[{self.cfg.bot_key}] ⚠️ Failed to send SELL alert: {e}")
+
+    def _send_rejection_alert(
+        self,
+        symbol: str,
+        price: float,
+        reason: str,
+        details: Dict[str, Any],
+    ) -> None:
+        """Send Slack alert for rejected symbol (optional, controlled by env var)."""
+        try:
+            # Format reason
+            reason_display = reason.replace("_", " ").title()
+            
+            # Format details
+            details_lines = []
+            if "confidence" in details:
+                details_lines.append(f"  • Confidence: {details['confidence']*100:.1f}%")
+            if "conf_threshold" in details:
+                details_lines.append(f"  • Required: {details['conf_threshold']*100:.1f}%")
+                if "confidence" in details:
+                    gap = (details["confidence"] - details["conf_threshold"]) * 100
+                    details_lines.append(f"  • Gap: {gap:+.1f}%")
+            if "p_hit" in details:
+                details_lines.append(f"  • P(Hit): {details['p_hit']*100:.1f}%")
+            if "min_phit" in details:
+                details_lines.append(f"  • Min P(Hit): {details['min_phit']*100:.1f}%")
+            if "expected_return" in details:
+                details_lines.append(f"  • Expected Return: {details['expected_return']*100:+.2f}%")
+            if "ev" in details:
+                details_lines.append(f"  • EV: {details['ev']:.3f}")
+            if "loss_est_pct" in details:
+                details_lines.append(f"  • Loss Estimate: {details['loss_est_pct']*100:.1f}%")
+            
+            details_text = "\n".join(details_lines) if details_lines else "  • No additional details"
+            
+            # Format alert message
+            title = f"⛔ Swing Bot {self.cfg.horizon} - REJECTED: {symbol}"
+            message = f"""Price: ${price:.2f}
+Reason: {reason_display}
+Details:
+{details_text}"""
+            
+            alert_swing(title, message, level="warning", skip_rate_limit=True)
+            log(f"[{self.cfg.bot_key}] 📤 Sent REJECTION alert for {symbol}")
+        except Exception as e:
+            log(f"[{self.cfg.bot_key}] ⚠️ Failed to send REJECTION alert: {e}")
+
+    def _send_rebalance_summary(
+        self,
+        trades: List[Trade],
+        universe_analyzed: int,
+        universe_qualified: int,
+        rejection_counts: Dict[str, int],
+        state: BotState,
+    ) -> None:
+        """Send Slack alert with rebalance summary."""
+        try:
+            # Count trades by type
+            buys = sum(1 for t in trades if t.side == "BUY")
+            sells = sum(1 for t in trades if t.side == "SELL")
+            total_trades = len(trades)
+            
+            # Calculate rejection stats
+            total_rejected = universe_analyzed - universe_qualified
+            
+            # Format top rejections
+            rejection_lines = []
+            if rejection_counts:
+                sorted_rejections = sorted(rejection_counts.items(), key=lambda x: x[1], reverse=True)
+                for reason, count in sorted_rejections[:5]:  # Top 5
+                    pct = (count / total_rejected * 100) if total_rejected > 0 else 0
+                    reason_display = reason.replace("_", " ").title()
+                    rejection_lines.append(f"  • {reason_display}: {count} ({pct:.0f}%)")
+            
+            rejection_text = "\n".join(rejection_lines) if rejection_lines else "  • None"
+            
+            # Format portfolio state
+            positions_count = len(state.positions)
+            equity = state.last_equity if state.last_equity > 0 else state.cash
+            
+            # Format alert message
+            title = f"📊 Swing Bot {self.cfg.horizon} - Rebalance Complete"
+            message = f"""Trades Executed: {total_trades} total
+  ✅ Buys: {buys} positions entered
+  ✅ Sells: {sells} positions closed
+  
+Universe Analyzed: {universe_analyzed} symbols
+  ✅ Qualified: {universe_qualified} symbols
+  ❌ Rejected: {total_rejected} symbols
+
+Top Rejections:
+{rejection_text}
+
+Portfolio:
+  • Positions: {positions_count} open
+  • Cash: ${state.cash:,.2f}
+  • Equity: ${equity:,.2f}"""
+            
+            alert_swing(title, message, level="info", skip_rate_limit=True)
+            log(f"[{self.cfg.bot_key}] 📤 Sent REBALANCE SUMMARY alert")
+        except Exception as e:
+            log(f"[{self.cfg.bot_key}] ⚠️ Failed to send REBALANCE SUMMARY alert: {e}")
 
     # ---------------------- Portfolio Logic ----------------------- #
 
@@ -1011,6 +1280,15 @@ class SwingBot:
                         f"[{self.cfg.bot_key}] SELL {pos.qty:.4f} {sym} @ {px:.4f} "
                         f"(universe exit) PnL={pnl:.2f}"
                     )
+                    # Send SELL alert
+                    self._send_sell_alert(
+                        symbol=sym,
+                        qty=pos.qty,
+                        price=px,
+                        entry_price=pos.entry,
+                        reason="REMOVE_FROM_UNIVERSE",
+                        entry_ts=getattr(pos, "last_add_ts", None),
+                    )
                 del state.positions[sym]
 
         # 2) Recompute equity from target universe only
@@ -1042,8 +1320,11 @@ class SwingBot:
             if qty_delta > 0:
                 # BUY / increase (Phase 4: starter entry + adds)
                 desired_qty = float(target_value / max(px, 1e-9))
-                signal = _extract_policy_signal(rolling.get(sym) if isinstance(rolling, dict) else None) or {}
-                sig_conf = float(signal.get("confidence") or 0.0)
+                node = rolling.get(sym) if isinstance(rolling, dict) else None
+                if node:
+                    intent, sig_conf, _ = self._extract_policy_signal(node)
+                else:
+                    sig_conf = 0.0
 
                 buy_qty = float(qty_delta)
 
@@ -1059,7 +1340,6 @@ class SwingBot:
                             goal_qty=float(desired_qty),
                             build_stage=1,
                             last_add_ts=_now_iso(),
-                            entry_ts=_now_iso(),
                         )
                         pos = state.positions[sym]
 
@@ -1113,6 +1393,13 @@ class SwingBot:
                         "ts": _now_iso(),
                     })
                     log(f"[{self.cfg.bot_key}] BUY {sym} qty={buy_qty:.4f} px={px:.2f} cash={state.cash:.2f}")
+                    # Send BUY alert
+                    self._send_buy_alert(
+                        symbol=sym,
+                        qty=buy_qty,
+                        price=px,
+                        rolling=rolling,
+                    )
             else:
                 # SELL / decrease
                 qty = abs(qty_delta)
@@ -1135,6 +1422,15 @@ class SwingBot:
                 log(
                     f"[{self.cfg.bot_key}] SELL {sell_qty:.4f} {sym} @ {px:.4f} "
                     f"(target_w={target_w:.3f}) PnL={pnl:.2f}"
+                )
+                # Send SELL alert
+                self._send_sell_alert(
+                    symbol=sym,
+                    qty=sell_qty,
+                    price=px,
+                    entry_price=pos.entry,
+                    reason="TARGET_REBALANCE",
+                    entry_ts=getattr(pos, "last_add_ts", None),
                 )
                 pos.qty -= sell_qty
                 if pos.qty <= 0:
@@ -1185,6 +1481,15 @@ class SwingBot:
                     f"[{self.cfg.bot_key}] STOP_LOSS SELL {pos.qty:.4f} {sym} @ {px:.4f} "
                     f"PnL={pnl:.2f}"
                 )
+                # Send SELL alert
+                self._send_sell_alert(
+                    symbol=sym,
+                    qty=pos.qty,
+                    price=px,
+                    entry_price=pos.entry,
+                    reason="STOP_LOSS",
+                    entry_ts=getattr(pos, "last_add_ts", None),
+                )
                 del state.positions[sym]
                 continue
 
@@ -1207,6 +1512,15 @@ class SwingBot:
                     f"[{self.cfg.bot_key}] TAKE_PROFIT SELL {pos.qty:.4f} {sym} @ {px:.4f} "
                     f"PnL={pnl:.2f}"
                 )
+                # Send SELL alert
+                self._send_sell_alert(
+                    symbol=sym,
+                    qty=pos.qty,
+                    price=px,
+                    entry_price=pos.entry,
+                    reason="TAKE_PROFIT",
+                    entry_ts=getattr(pos, "last_add_ts", None),
+                )
                 del state.positions[sym]
                 continue            # Phase 5: time stop (let time work, but not forever)
             held_days = _days_held(pos)
@@ -1227,6 +1541,15 @@ class SwingBot:
                         )
                     )
                     log(f"[{self.cfg.bot_key}] TIME_STOP SELL {pos.qty:.4f} {sym} @ {px:.4f} PnL={pnl:.2f}")
+                    # Send SELL alert
+                    self._send_sell_alert(
+                        symbol=sym,
+                        qty=pos.qty,
+                        price=px,
+                        entry_price=pos.entry,
+                        reason=f"time_stop(days={held_days})",
+                        entry_ts=getattr(pos, "last_add_ts", None),
+                    )
                     del state.positions[sym]
                     continue            # Phase 5: less twitchy exits — require hold time + confirmation
             node = rolling.get(sym) or {}
@@ -1256,6 +1579,15 @@ class SwingBot:
                             )
                         )
                         log(f"[{self.cfg.bot_key}] AI_CONFIRM SELL {pos.qty:.4f} {sym} @ {px:.4f} PnL={pnl:.2f}")
+                        # Send SELL alert
+                        self._send_sell_alert(
+                            symbol=sym,
+                            qty=pos.qty,
+                            price=px,
+                            entry_price=pos.entry,
+                            reason=f"ai_sell_confirmed({pos.pending_exit}/{self.cfg.exit_confirmations})",
+                            entry_ts=getattr(pos, "last_add_ts", None),
+                        )
                         del state.positions[sym]
                         continue
             else:
@@ -1372,12 +1704,29 @@ class SwingBot:
             conf_threshold=self.cfg.conf_threshold,
             tier_params=tier_params if isinstance(tier_params, dict) and tier_params else None,
         )
+        
+        # Track universe stats for summary (approximate since rank_universe_v2 doesn't return rejection details)
+        self._last_universe_analyzed = len(rolling) - 1 if "_GLOBAL" in rolling else len(rolling)  # Exclude _GLOBAL
+        self._last_universe_qualified = len(ranked)
+        # Note: Detailed rejection counts come from build_ai_ranked_universe if used,
+        # otherwise we'll show simplified stats in the summary
+        
         target_weights = self.construct_target_weights(ranked)
 
         state = self.load_bot_state()
         trades = self.rebalance_full(state, rolling, target_weights)
         self.save_bot_state(state)
         self.append_trades_to_daily_log(trades)
+        
+        # Send rebalance summary alert to Slack
+        self._send_rebalance_summary(
+            trades=trades,
+            universe_analyzed=self._last_universe_analyzed,
+            universe_qualified=self._last_universe_qualified,
+            rejection_counts=getattr(self, "_last_rejection_counts", {}),
+            state=state,
+        )
+        
         log(
             f"[{self.cfg.bot_key}] ✅ FULL rebalance complete. "
             f"Trades={len(trades)}"
