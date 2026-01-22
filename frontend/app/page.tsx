@@ -33,11 +33,11 @@ export default function HomePage() {
             </Link>
             
             <Link
-              href="/profile"
+              href="/portfolio"
               className="p-6 rounded-2xl border border-gray-800 bg-gray-900/70 hover:bg-gray-800/70 transition-colors"
             >
-              <h2 className="text-xl font-semibold mb-2">Profile</h2>
-              <p className="text-gray-400">Track your portfolio and investments</p>
+              <h2 className="text-xl font-semibold mb-2">Portfolio</h2>
+              <p className="text-gray-400">Track your investments</p>
             </Link>
           </div>
         </div>

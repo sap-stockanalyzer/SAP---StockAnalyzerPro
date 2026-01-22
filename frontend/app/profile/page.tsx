@@ -259,7 +259,7 @@ export default function ProfilePage() {
   const fetchData = async () => {
     try {
       setError(null);
-      const response = await fetch("/api/backend/page/profile");
+      const response = await fetch("/api/backend/cache/unified");
       
       if (!response.ok) {
         throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`);

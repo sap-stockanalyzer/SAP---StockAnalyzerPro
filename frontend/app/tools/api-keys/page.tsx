@@ -122,7 +122,7 @@ export default function ApiKeysSettingsPage() {
 
       const [keysRes, statusRes] = await Promise.all([
         fetch(`${API_BASE}/api/settings/keys`, { cache: "no-store" }),
-        fetch(`${API_BASE}/api/settings/keys/status`, { cache: "no-store" }),
+        fetch(`${API_BASE}/api/settings/status`, { cache: "no-store" }),
       ]);
 
       if (!keysRes.ok) throw new Error(`Failed to load keys: HTTP ${keysRes.status}`);
@@ -166,10 +166,10 @@ export default function ApiKeysSettingsPage() {
       setTestResult(null);
 
       // Send exactly what we have; backend will preserve unknown keys anyway.
-      const res = await fetch(`${API_BASE}/api/settings/keys`, {
+      const res = await fetch(`${API_BASE}/api/settings/update`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(values),
+        body: JSON.stringify({ updates: values }),
       });
 
       if (!res.ok) {
@@ -193,10 +193,10 @@ export default function ApiKeysSettingsPage() {
       setError(null);
       setSuccess(null);
 
-      const res = await fetch(`${API_BASE}/api/settings/keys/test`, {
+      const res = await fetch(`${API_BASE}/api/settings/test`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key_name: "alpaca" }),  // Testing alpaca keys
+        body: JSON.stringify({ updates: values }),
       });
 
       if (!res.ok) {
