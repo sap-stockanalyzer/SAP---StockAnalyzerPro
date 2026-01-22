@@ -11,13 +11,8 @@ import { NextRequest, NextResponse } from "next/server";
 function getDtBackendBaseUrl(): string {
   const url =
     process.env.DT_BACKEND_URL ||
-    process.env.NEXT_PUBLIC_DT_BACKEND_URL;
-
-  if (!url) {
-    throw new Error(
-      "DT backend URL not configured. Set DT_BACKEND_URL (server) or NEXT_PUBLIC_DT_BACKEND_URL."
-    );
-  }
+    process.env.NEXT_PUBLIC_DT_BACKEND_URL ||
+    'http://localhost:8010'; // NOTE: localhost default is for development only. Production should set DT_BACKEND_URL or NEXT_PUBLIC_DT_BACKEND_URL explicitly.
 
   return url.replace(/\/+$/, "");
 }
@@ -25,8 +20,11 @@ function getDtBackendBaseUrl(): string {
 function buildTargetUrl(req: NextRequest, pathParts: string[]) {
   const base = getDtBackendBaseUrl();
   const incoming = new URL(req.url);
+  
+  // pathParts are the URL segments after /api/dt/ (e.g., ['replay', 'status'])
+  // We need to build: http://localhost:8010/api/replay/status
   const path = pathParts.map(encodeURIComponent).join("/");
-  const target = new URL(`${base}/${path}`);
+  const target = new URL(`${base}/api/${path}`);
 
   // Preserve query string
   target.search = incoming.search;

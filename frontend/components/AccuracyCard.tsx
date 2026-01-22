@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { Activity } from "lucide-react";
+import { tryGetFirst } from "@/lib/apiUtils";
 
 export default function AccuracyCard() {
   const [acc, setAcc] = useState<number | null>(null);
@@ -10,16 +11,17 @@ export default function AccuracyCard() {
   useEffect(() => {
     async function fetchAccuracy() {
       try {
-        // Use Next.js proxy route (server decides real backend via env)
-        // NOTE: Will migrate to /api/backend/page/dashboard in future
-        const res = await fetch("/api/backend/dashboard/metrics", {
-          cache: "no-store",
-        });
+        // Try consolidated endpoint first, then fallback to legacy endpoints
+        const result = await tryGetFirst<any>([
+          "/api/backend/page/dashboard",    // NEW consolidated endpoint through proxy
+          "/api/page/dashboard",             // NEW consolidated endpoint direct
+          "/api/backend/dashboard/metrics",  // OLD endpoint through proxy (fallback)
+          "/api/dashboard/metrics",          // OLD endpoint direct (fallback)
+        ]);
 
-        const data = await res.json();
-        if (data && typeof data.accuracy_30d === "number") {
-          setAcc(data.accuracy_30d * 100);
-          setSummary(data.summary || "");
+        if (result?.data && typeof result.data.accuracy_30d === "number") {
+          setAcc(result.data.accuracy_30d * 100);
+          setSummary(result.data.summary || "");
           // You could later calculate WoW here if you start tracking weekly snapshots
           setWow(null);
         }

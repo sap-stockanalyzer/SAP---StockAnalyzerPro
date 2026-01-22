@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { TrendingUp } from "lucide-react";
+import { tryGetFirst } from "@/lib/apiUtils";
 
 type Row = { ticker: string; gain_pct?: number };
 
@@ -19,12 +20,20 @@ export default function TopPredictions({
         // Map 4w -> 1m to match backend horizon
         const backendHorizon = horizon === "4w" ? "1m" : horizon;
 
-        // Use Next.js proxy route (server decides real backend via env)
-        const res = await fetch(`/api/backend/dashboard/top/${backendHorizon}`, {
-          cache: "no-store",
-        });
+        // Try consolidated endpoint first, then fallback to legacy endpoints
+        const result = await tryGetFirst<any>([
+          "/api/backend/page/dashboard",           // NEW consolidated endpoint through proxy
+          "/api/page/dashboard",                    // NEW consolidated endpoint direct
+          `/api/backend/dashboard/top/${backendHorizon}`,  // OLD endpoint through proxy (fallback)
+          `/api/dashboard/top/${backendHorizon}`,          // OLD endpoint direct (fallback)
+        ]);
 
-        const data = await res.json();
+        if (!result) {
+          console.error("Failed to fetch top performers from any endpoint");
+          return;
+        }
+
+        const data = result.data;
 
         if (data && Array.isArray(data.tickers)) {
           const topRows = data.tickers.slice(0, 3).map((t: any) => ({

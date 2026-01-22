@@ -5,6 +5,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Select } from "@/components/ui/select";
+import { tryGetFirst } from "@/lib/apiUtils";
 
 // Use Next.js route handler proxy so we never hardcode ports in the UI.
 const API_BASE = "";
@@ -84,16 +85,21 @@ export default function InsightsPage() {
         setLoading(true);
         setError(null);
 
-        const res = await fetch(
-          `${API_BASE}/api/backend/api/insights/predictions/latest`,
-          { cache: "no-store" }
-        );
+        // Try consolidated endpoint first, then fallback to legacy endpoints
+        // Fix: Remove double /api/api/ prefix and use consistent tryGetFirst pattern
+        const result = await tryGetFirst<PredictionFeed>([
+          `${API_BASE}/api/backend/page/predict`,             // NEW consolidated endpoint through proxy
+          `${API_BASE}/api/page/predict`,                      // NEW consolidated endpoint direct
+          `${API_BASE}/api/backend/insights/predictions/latest`, // OLD endpoint through proxy (fallback)
+          `${API_BASE}/api/insights/predictions/latest`,         // OLD endpoint direct (fallback)
+        ]);
 
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const json = (await res.json()) as PredictionFeed;
+        if (!result) {
+          throw new Error("Failed to load predictions from any endpoint");
+        }
 
         if (!mounted) return;
-        setFeed(json);
+        setFeed(result.data);
       } catch (e: any) {
         if (!mounted) return;
         setError(e?.message ?? "Failed to load predictions");
