@@ -443,6 +443,90 @@ def test_pnl_attribution_handles_empty_positions():
 
 
 # ============================================================
+# ADDITIONAL TESTS FOR 23+ TOTAL (3 more tests)
+# ============================================================
+
+def test_pnl_attribution_with_short_positions():
+    """Test P&L attribution with short (SELL) positions."""
+    from dt_backend.services.position_manager_dt import calculate_pnl_attribution
+    
+    positions_state = {
+        "AAPL": {
+            "status": "OPEN",
+            "side": "SELL",  # Short position
+            "qty": 100.0,
+            "entry_price": 150.00,
+            "bot": "MEAN_REVERSION",
+        },
+    }
+    
+    current_prices = {
+        "AAPL": 145.00,  # Price went down, short makes money: (150-145)*100 = +500
+    }
+    
+    attribution = calculate_pnl_attribution(positions_state, current_prices)
+    
+    assert attribution["MEAN_REVERSION"]["pnl"] == pytest.approx(500.0, rel=0.01)
+    assert attribution["_total"]["pnl"] == pytest.approx(500.0, rel=0.01)
+
+
+def test_hysteresis_preserves_state_across_calls():
+    """Test that hysteresis state is preserved correctly."""
+    cfg = PolicyConfig()
+    cfg.confirmations_to_flip = 2
+    cfg.min_edge_to_flip = 0.06
+    
+    node = {
+        "policy_dt": {
+            "action": "BUY",
+            "_state": {
+                "prev_action": "BUY",
+                "pending_action": "",
+                "pending_count": 0,
+            },
+        },
+    }
+    
+    # First SELL signal
+    proposed = "SELL"
+    edge = -0.10
+    conf = 0.60
+    
+    final_action_1, state_1, note_1 = _stabilize_with_hysteresis(
+        node, proposed, edge, conf, cfg
+    )
+    
+    # State should be updated
+    assert state_1["pending_action"] == "SELL"
+    assert state_1["pending_count"] == 1
+    assert state_1["prev_action"] == "BUY"
+    assert state_1["last_edge"] == pytest.approx(-0.10, rel=0.01)
+    assert state_1["last_conf"] == pytest.approx(0.60, rel=0.01)
+
+
+def test_confidence_clamped_to_max(default_policy_config):
+    """Test that confidence is clamped to max_confidence."""
+    cfg = default_policy_config
+    cfg.max_confidence = 0.99
+    cfg.trend_boost_strong = 1.25
+    
+    # Very high base confidence
+    base_conf = 0.90
+    intent = "BUY"
+    trend = "strong_bull"
+    vol_bkt = "low"
+    regime_label = "bull"
+    
+    adjusted_conf, detail = _adjust_conf(
+        base_conf, intent, trend, vol_bkt, regime_label, cfg
+    )
+    
+    # Should be clamped to max_confidence even though 0.90 * 1.25 = 1.125
+    assert adjusted_conf <= cfg.max_confidence
+    assert adjusted_conf == pytest.approx(cfg.max_confidence, rel=0.01)
+
+
+# ============================================================
 # EDGE CALCULATION TESTS (bonus tests for completeness)
 # ============================================================
 
