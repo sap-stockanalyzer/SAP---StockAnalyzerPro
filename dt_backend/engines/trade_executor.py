@@ -97,6 +97,9 @@ class ExecutionConfig:
     
     # Minimum hold time before any exit is considered (prevents fast BUY->SELL flips)
     min_hold_time_minutes: int = 10
+    
+    # Hard stop loss threshold (percentage) - exits allowed before min_hold_time if loss exceeds this
+    hard_stop_loss_pct: float = 2.0
 
     # Fallback risk if a plan doesn't specify stop/tp
     fallback_stop_atr: float = 1.25
@@ -137,6 +140,9 @@ def _cfg_from_env() -> ExecutionConfig:
     # minimum hold time before exit
     mht = _env("DT_MIN_HOLD_TIME_MINUTES", str(cfg.min_hold_time_minutes))
     cfg.min_hold_time_minutes = int(_safe_float(mht, cfg.min_hold_time_minutes))
+    # hard stop loss percentage
+    hsl = _env("DT_HARD_STOP_LOSS_PCT", str(cfg.hard_stop_loss_pct))
+    cfg.hard_stop_loss_pct = float(_safe_float(hsl, cfg.hard_stop_loss_pct))
     return cfg
 
 
@@ -705,9 +711,9 @@ def execute_from_policy(
                                 if entry_price > 0 and last_price > 0:
                                     pnl_pct = ((last_price - entry_price) / entry_price) * 100.0
                                 
-                                # Only allow exit if hard stop hit (> 2% loss)
+                                # Only allow exit if hard stop hit (loss exceeds configured threshold)
                                 # Otherwise enforce minimum hold time
-                                if pnl_pct > -2.0:
+                                if pnl_pct > -cfg.hard_stop_loss_pct:
                                     blocked += 1
                                     
                                     # Update position hold tracking
@@ -719,8 +725,8 @@ def execute_from_policy(
                                             current_pnl_pct=pnl_pct,
                                             now_utc=ts_now,
                                         )
-                                    except Exception:
-                                        pass
+                                    except Exception as e:
+                                        log(f"[dt_exec] ⚠️ Error updating position hold info for {sym}: {e}")
                                     
                                     append_trade_event({
                                         "type": "position_hold",

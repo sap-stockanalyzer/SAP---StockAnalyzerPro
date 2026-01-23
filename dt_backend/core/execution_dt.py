@@ -185,13 +185,13 @@ def _size_from_phit_expected_r(
     # confidence ranges from min_conf (0.45) to 1.0
     # Map to scaling factor 0.5 to 1.5 for conviction-aware sizing
     confidence = _safe_float(confidence, 0.0)
-    if confidence > 0.0:
+    if confidence > 0.0 and cfg.min_conf < 1.0:  # Guard against division by zero
         # Normalize confidence to 0..1 range based on min threshold
         conf_normalized = max(0.0, min(1.0, (confidence - cfg.min_conf) / (1.0 - cfg.min_conf)))
         # Scale from 0.5x to 1.5x based on conviction
         conviction_factor = 0.5 + conf_normalized
     else:
-        conviction_factor = 1.0  # fallback if confidence not provided
+        conviction_factor = 1.0  # fallback if confidence not provided or min_conf >= 1.0
 
     if vol_bkt == "high":
         vol_scale = 0.4

@@ -176,6 +176,12 @@ class TestMinHoldTimeConfig:
         assert hasattr(cfg, 'min_hold_time_minutes'), "Should have min_hold_time_minutes attribute"
         assert cfg.min_hold_time_minutes == 10, "Default min_hold_time_minutes should be 10"
     
+    def test_default_hard_stop_loss_pct(self):
+        """ExecutionConfig should have hard_stop_loss_pct."""
+        cfg = ExecutionConfig()
+        assert hasattr(cfg, 'hard_stop_loss_pct'), "Should have hard_stop_loss_pct attribute"
+        assert cfg.hard_stop_loss_pct == 2.0, "Default hard_stop_loss_pct should be 2.0"
+    
     def test_min_flip_minutes_unchanged(self):
         """min_flip_minutes should remain at 12."""
         cfg = ExecutionConfig()
