@@ -176,7 +176,7 @@ def _resolve_dataset_path(dataset_name: str) -> Path:
 def train_model(
     dataset_name: str = "training_data_daily.parquet",
     use_optuna: bool = True,
-    n_trials: int = 20,
+    n_trials: int = 100,  # Increased from 20 to 100 for proper hyperparameter tuning
     batch_size: int = 150_000,
     symbol_whitelist: Optional[set[str]] = None,
     model_root: Path | None = None,
@@ -523,7 +523,7 @@ def train_model(
 def train_all_models(
     dataset_name: str = "training_data_daily.parquet",
     use_optuna: bool = True,
-    n_trials: int = 20,
+    n_trials: int = 100,  # Increased from 20 to 100 for proper hyperparameter tuning
     batch_size: int = 150_000,
     symbol_whitelist: Optional[set[str]] = None,
     model_root: Path | None = None,

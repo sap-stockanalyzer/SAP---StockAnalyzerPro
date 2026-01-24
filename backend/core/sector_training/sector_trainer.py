@@ -97,7 +97,7 @@ def _resolve_workers(max_workers: Optional[int]) -> int:
 def train_sector_models(
     dataset_name: str = "training_data_daily.parquet",
     use_optuna: bool = True,
-    n_trials: int = 10,
+    n_trials: int = 100,  # Increased from 10 to 100 for proper hyperparameter tuning
     batch_size: int = 150_000,
     max_workers: Optional[int] = None,   # ✅ accept without crashing
     **kwargs: Any,                       # ✅ swallow any future args safely

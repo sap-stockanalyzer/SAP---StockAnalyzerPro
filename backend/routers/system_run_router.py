@@ -133,7 +133,9 @@ def _task_nightly():
 
 def _task_train():
     from backend.core.ai_model.core_training import train_all_models
-    return train_all_models()
+    # Use n_trials=100 for proper Optuna hyperparameter optimization
+    # This ensures meaningful tuning (3-5 min per horizon vs 30s with default)
+    return train_all_models(n_trials=100)
 
 
 def _task_insights():

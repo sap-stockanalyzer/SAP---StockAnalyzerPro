@@ -36,7 +36,7 @@ def _tune_lightgbm_regressor(
     X: np.ndarray,
     y: np.ndarray,
     horizon: str,
-    n_trials: int = 20,
+    n_trials: int = 100,  # Increased from 20 to 100 for proper hyperparameter tuning
 ) -> Dict[str, Any]:
     if not (HAS_OPTUNA and HAS_LGBM):
         return {}

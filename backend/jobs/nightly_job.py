@@ -519,7 +519,10 @@ def run_nightly_job(
             use_optuna = (today.weekday() == 0)  # Monday tuning
             if mode == "replay":
                 use_optuna = False
-            n_trials = 20 if use_optuna else 0
+            # Use n_trials=100 for proper Optuna hyperparameter optimization
+            # This ensures models train with meaningful tuning (3-5 min per horizon)
+            # enabling feature importance extraction and better model quality
+            n_trials = 100 if use_optuna else 0
 
             sector_res = {}
             try:
