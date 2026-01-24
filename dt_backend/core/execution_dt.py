@@ -38,6 +38,17 @@ from dt_backend.tuning.dt_profile_loader import load_dt_profile
 
 from .data_pipeline_dt import _read_rolling, save_rolling, ensure_symbol_node, log
 from dt_backend.utils.trading_utils_dt import sort_by_ranking_metric
+from dt_backend.core.constants_dt import (
+    POSITION_MAX_FRACTION,
+    POSITION_PROBE_FRACTION,
+    POSITION_PRESS_MULT,
+    PHIT_MIN,
+    PHIT_PRESS_MIN,
+    CONFIDENCE_MIN_PROBE,
+    CONFIDENCE_MIN_EXEC,
+    CONFIDENCE_MAX,
+    COOLDOWN_AFTER_BUY_MINUTES,
+)
 
 # Import broker API for position sync (late import to avoid circular deps)
 try:
@@ -50,19 +61,19 @@ class ExecConfig:
     """Tunable knobs for execution behavior."""
 
     # Maximum notional fraction allocated per symbol for a *full* conviction signal.
-    max_symbol_fraction: float = 0.15
+    max_symbol_fraction: float = POSITION_MAX_FRACTION
 
     # Minimum confidence required to allocate anything.
-    min_conf: float = 0.25
+    min_conf: float = CONFIDENCE_MIN_EXEC
 
     # Phase 7: minimum calibrated P(hit) required to size above zero.
-    min_phit: float = 0.52
+    min_phit: float = PHIT_MIN
 
     # Hard cap on adjusted confidence (after volatility / regime).
-    max_conf_cap: float = 0.95
+    max_conf_cap: float = CONFIDENCE_MAX
 
     # Cooldown window to avoid rapid flips between BUY and SELL.
-    cooldown_minutes: int = 10
+    cooldown_minutes: int = COOLDOWN_AFTER_BUY_MINUTES
 
     # Base validity window for an execution intent.
     valid_minutes: int = 15
@@ -71,12 +82,12 @@ class ExecConfig:
     # Phase 4: action tiers
     # -----------------------------
     # PROBE: allow lower-confidence, micro-sized entries.
-    probe_min_conf: float = 0.18
-    probe_size_fraction: float = 0.25
+    probe_min_conf: float = CONFIDENCE_MIN_PROBE
+    probe_size_fraction: float = POSITION_PROBE_FRACTION
 
     # PRESS: modest scale-up when P(hit) is strong.
-    press_min_phit: float = 0.62
-    press_size_mult: float = 1.35
+    press_min_phit: float = PHIT_PRESS_MIN
+    press_size_mult: float = POSITION_PRESS_MULT
 
 
 def _env_float(name: str, default: float) -> float:

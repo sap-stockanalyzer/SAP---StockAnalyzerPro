@@ -426,6 +426,84 @@ DT_MAX_LOSS_PER_SYMBOL_DAY=500  # Max loss per symbol per day
 DT_ALLOW_LUNCH_TRADES=1         # Trade during lunch hour
 ```
 
+### Configuration Constants
+
+All trading constants are centralized in `dt_backend/core/constants_dt.py` for maintainability and consistency:
+
+**Confidence Thresholds:**
+- `CONFIDENCE_MIN` (0.45) - Minimum confidence for trade execution (raised from 0.25)
+- `CONFIDENCE_MIN_PROBE` (0.18) - Micro-entry tier for low-confidence probes
+- `CONFIDENCE_MAX` (0.99) - Hard cap after adjustments
+- `CONFIDENCE_EXIT_BUFFER` (0.05) - Margin above HOLD for SELL signals
+
+**Position Sizing:**
+- `POSITION_MAX_FRACTION` (0.15) - Maximum 15% of account per symbol
+- `POSITION_PROBE_FRACTION` (0.25) - 25% of full conviction for probes
+- `POSITION_PRESS_MULT` (1.35) - Scale-up multiplier for high P(Hit)
+- `POSITIONS_MAX_OPEN` (3) - Maximum concurrent positions
+
+**Signal Stability & Hysteresis:**
+- `EDGE_MIN_TO_FLIP` (0.06) - Minimum edge to flip direction
+- `EDGE_HOLD_BIAS` (0.03) - Extra margin to flip from HOLD
+- `CONFIRMATIONS_TO_FLIP` (2) - Consecutive confirmations needed
+- `HOLD_MIN_TIME_MINUTES` (10) - Minimum hold before exit allowed
+- `COOLDOWN_AFTER_BUY_MINUTES` (10) - Flip cooldown after entry
+
+**Risk Management:**
+- `DAILY_LOSS_LIMIT` (300.0) - Daily stop loss in USD
+- `WEEKLY_DRAWDOWN_MAX_PCT` (8.0) - Weekly drawdown cap
+- `MONTHLY_DRAWDOWN_MAX_PCT` (15.0) - Monthly drawdown cap
+- `VIX_SPIKE_THRESHOLD` (35.0) - VIX panic threshold
+- `EXPOSURE_MAX` (0.55) - Maximum portfolio exposure
+
+**Regime Exposure Mapping:**
+- `bull`: 1.00 (Full exposure)
+- `chop`: 0.70 (70% of normal)
+- `bear`: 0.45 (45% of normal)
+- `panic`: 0.20 (20% - defensive mode)
+- `stress`: 0.10 (10% - near shutdown)
+
+To modify a threshold, edit `dt_backend/core/constants_dt.py` and restart the platform.
+
+### Auto-Retraining Triggers
+
+The platform automatically triggers model retraining when performance degrades or sufficient time has passed. See `dt_backend/ml/auto_retrain_trigger.py` for implementation.
+
+**Automatic Retraining Conditions:**
+
+Models automatically retrain when ANY of these conditions are met:
+
+1. **Win Rate Degradation**: Win rate < 45% (`WIN_RATE_RETRAINING_THRESHOLD`)
+2. **Sharpe Ratio Decline**: Sharpe ratio < 0.5 (`SHARPE_RETRAINING_THRESHOLD`)
+3. **Feature Drift Detection**: Feature drift > 15% (`FEATURE_DRIFT_RETRAINING_THRESHOLD`)
+4. **Scheduled Refresh**: 7+ days since last retrain (`MAX_DAYS_WITHOUT_RETRAIN`)
+
+**Usage Example:**
+
+```python
+from dt_backend.ml.auto_retrain_trigger import AutoRetrainTrigger
+
+trigger = AutoRetrainTrigger()
+
+# Check metrics
+should_retrain, reason = trigger.check_and_trigger({
+    "win_rate": 0.42,           # Below 0.45 threshold
+    "sharpe_ratio": 0.45,       # Below 0.5 threshold
+    "feature_drift": 0.12,      # Within acceptable range
+})
+
+if should_retrain:
+    print(f"🔄 Triggering retrain: {reason}")
+    # Schedule retraining
+    trigger.record_retrain()
+```
+
+**Integration:**
+
+The auto-retrain trigger is integrated into `dt_backend/ml/continuous_learning_intraday.py` and runs automatically during the continuous learning cycle.
+
+
+
 ---
 
 ## Production Deployment

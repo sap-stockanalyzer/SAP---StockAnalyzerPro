@@ -42,6 +42,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
+from dt_backend.core.constants_dt import (
+    CONFIDENCE_MIN,
+    POSITIONS_MAX_OPEN,
+    REGIME_EXPOSURE,
+)
+
 # Import alerting module for Slack notifications
 try:
     from backend.monitoring.alerting import alert_swing
