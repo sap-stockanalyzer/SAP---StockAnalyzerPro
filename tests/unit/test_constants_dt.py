@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 from dt_backend.core.constants_dt import (
     # Confidence thresholds
     CONFIDENCE_MIN,
+    CONFIDENCE_MIN_EXEC,
     CONFIDENCE_MIN_PROBE,
     CONFIDENCE_MAX,
     CONFIDENCE_EXIT_BUFFER,
@@ -80,6 +81,10 @@ class TestConstants:
         """CONFIDENCE_MIN should be between 0.15 and 0.60."""
         assert 0.15 <= CONFIDENCE_MIN <= 0.60
 
+    def test_confidence_min_exec_within_bounds(self):
+        """CONFIDENCE_MIN_EXEC should be between 0.15 and 0.60."""
+        assert 0.15 <= CONFIDENCE_MIN_EXEC <= 0.60
+
     def test_confidence_max_reasonable(self):
         """CONFIDENCE_MAX should be close to 1.0 but not exceed it."""
         assert 0.95 <= CONFIDENCE_MAX <= 1.0
@@ -87,6 +92,7 @@ class TestConstants:
     def test_confidence_probe_is_lower_than_min(self):
         """CONFIDENCE_MIN_PROBE should be lower than CONFIDENCE_MIN."""
         assert CONFIDENCE_MIN_PROBE < CONFIDENCE_MIN
+        assert CONFIDENCE_MIN_PROBE < CONFIDENCE_MIN_EXEC
 
     def test_position_max_fraction_reasonable(self):
         """POSITION_MAX_FRACTION should be between 0.05 and 0.30."""

@@ -39,7 +39,7 @@ from dt_backend.core.constants_dt import (
     TRADE_GAP_MIN_MINUTES,
     ORDER_TIMEOUT_SEC,
     HOLD_MIN_TIME_MINUTES,
-    CONFIDENCE_MIN,
+    CONFIDENCE_MIN_EXEC,
     POSITION_DEFAULT_QTY,
 )
 
@@ -92,7 +92,7 @@ class ExecutionConfig:
     dry_run: bool = True
     max_orders_per_cycle: int = ORDERS_MAX_PER_CYCLE
     allow_shorts: bool = False
-    min_confidence: float = CONFIDENCE_MIN
+    min_confidence: float = CONFIDENCE_MIN_EXEC
     default_qty: float = POSITION_DEFAULT_QTY
 
     # Phase 5: synthetic brackets + state machine

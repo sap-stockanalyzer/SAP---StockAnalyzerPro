@@ -45,6 +45,7 @@ from dt_backend.core.constants_dt import (
     PHIT_MIN,
     PHIT_PRESS_MIN,
     CONFIDENCE_MIN_PROBE,
+    CONFIDENCE_MIN_EXEC,
     CONFIDENCE_MAX,
     COOLDOWN_AFTER_BUY_MINUTES,
 )
@@ -63,7 +64,7 @@ class ExecConfig:
     max_symbol_fraction: float = POSITION_MAX_FRACTION
 
     # Minimum confidence required to allocate anything.
-    min_conf: float = CONFIDENCE_MIN
+    min_conf: float = CONFIDENCE_MIN_EXEC
 
     # Phase 7: minimum calibrated P(hit) required to size above zero.
     min_phit: float = PHIT_MIN

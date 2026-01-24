@@ -14,7 +14,8 @@ from typing import Dict, Tuple
 # CONFIDENCE THRESHOLDS
 # ============================================================
 
-CONFIDENCE_MIN = 0.45                    # Raised from 0.25 (bug fix)
+CONFIDENCE_MIN = 0.45                    # Raised from 0.25 (bug fix) - for policy decisions
+CONFIDENCE_MIN_EXEC = 0.25               # Minimum confidence for execution layer
 CONFIDENCE_MIN_PROBE = 0.18              # Micro-entry tier
 CONFIDENCE_MAX = 0.99                    # Hard cap after adjustments
 CONFIDENCE_EXIT_BUFFER = 0.05            # SELL margin above HOLD
