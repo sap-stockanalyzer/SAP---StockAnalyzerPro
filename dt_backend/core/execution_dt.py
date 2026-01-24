@@ -165,8 +165,13 @@ def _size_from_phit_expected_r(
     expected_r: float,
     vol_bkt: str,
     cfg: ExecConfig,
+    confidence: float = 0.0,
 ) -> float:
-    """Phase 7 sizing: size ~ f(P(hit), expected_R) with vol scaling."""
+    """Phase 7 sizing: size ~ f(P(hit), expected_R, confidence) with vol scaling.
+    
+    Enhanced to incorporate confidence directly for conviction-aware sizing.
+    Higher confidence -> larger position size.
+    """
     phit = _safe_float(phit, 0.0)
     if phit < cfg.min_phit:
         return 0.0
@@ -175,6 +180,18 @@ def _size_from_phit_expected_r(
 
     er = max(0.5, min(2.0, _safe_float(expected_r, 1.0)))
     r_factor = 0.5 + 0.5 * (er / 2.0)  # 0.5..1.0
+    
+    # Conviction factor: scale size by confidence
+    # confidence ranges from min_conf (0.45) to 1.0
+    # Map to scaling factor 0.5 to 1.5 for conviction-aware sizing
+    confidence = _safe_float(confidence, 0.0)
+    if confidence > 0.0 and cfg.min_conf < 1.0:  # Guard against division by zero
+        # Normalize confidence to 0..1 range based on min threshold
+        conf_normalized = max(0.0, min(1.0, (confidence - cfg.min_conf) / (1.0 - cfg.min_conf)))
+        # Scale from 0.5x to 1.5x based on conviction
+        conviction_factor = 0.5 + conf_normalized
+    else:
+        conviction_factor = 1.0  # fallback if confidence not provided or min_conf >= 1.0
 
     if vol_bkt == "high":
         vol_scale = 0.4
@@ -183,7 +200,7 @@ def _size_from_phit_expected_r(
     else:
         vol_scale = 1.0
 
-    raw_size = cfg.max_symbol_fraction * edge * r_factor * vol_scale
+    raw_size = cfg.max_symbol_fraction * edge * r_factor * vol_scale * conviction_factor
     return max(0.0, min(cfg.max_symbol_fraction, raw_size))
 
 
@@ -510,7 +527,7 @@ def run_execution_intraday(
                     size = max(0.0, min(cfg.max_symbol_fraction, float(size)))
             else:
                 if conf >= float(cfg.min_conf):
-                    size = _size_from_phit_expected_r(phit, expected_r, vol_bkt, cfg)
+                    size = _size_from_phit_expected_r(phit, expected_r, vol_bkt, cfg, confidence=conf)
                     if tier == "PRESS" and float(phit) >= float(cfg.press_min_phit):
                         size = max(0.0, min(cfg.max_symbol_fraction, float(size) * float(cfg.press_size_mult)))
 

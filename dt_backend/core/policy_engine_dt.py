@@ -122,7 +122,7 @@ class PolicyConfig:
 
     # Stability / anti-flip
     hysteresis_hold_bias: float = 0.03     # make HOLD "sticky" by requiring extra edge to flip
-    min_edge_to_flip: float = 0.06         # require at least this edge magnitude to flip direction
+    min_edge_to_flip: float = 0.12         # require at least this edge magnitude to flip direction (raised from 0.06)
     confirmations_to_flip: int = 2         # require N consecutive signals before switching BUY<->SELL
     max_confidence: float = 0.99
 
