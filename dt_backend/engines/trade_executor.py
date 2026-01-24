@@ -67,6 +67,12 @@ except ImportError:
     alert_dt = None  # type: ignore
     alert_error = None  # type: ignore
 
+# Slack-aware logger for error forwarding
+try:
+    from backend.monitoring.log_aggregator import get_aggregator
+except ImportError:
+    get_aggregator = None  # type: ignore
+
 # Decision recorder for replay/analysis
 try:
     from dt_backend.services.decision_recorder import DecisionRecorder
@@ -262,6 +268,8 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
     dedup = bool(s.get("dedup"))
     ttl_sec = int(s.get("ttl_sec") or 180)
 
+    log(f"[dt_exec] 🚨 Liquidation mode enabled: scope={scope} target={target} max={max_orders}")
+
     inflight = _load_inflight() if dedup else {}
     inflight = _prune_inflight(inflight, now_utc=now_utc, ttl_sec=ttl_sec) if dedup else {}
 
@@ -299,6 +307,7 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
         side = "SELL" if qty > 0 else "BUY"  # cover shorts if any
         order = Order(symbol=sym_u, side=side, qty=abs(qty), limit_price=None)
 
+        log(f"[dt_exec] 🚨 Liquidating position: {sym_u} {side} {abs(qty)}")
         append_trade_event(
             {
                 "type": "liquidate_intent",
@@ -359,6 +368,9 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
             sent += 1
         except Exception as e:
             errors += 1
+            log(f"[dt_exec] ⚠️ Liquidation error for {sym_u}: {e}", level="error")
+            if get_aggregator:
+                get_aggregator().forward_log("ERROR", f"Liquidation error for {sym_u}: {e}", "dt_exec")
             append_trade_event(
                 {
                     "type": "liquidate_error",
@@ -379,7 +391,7 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
         inflight = _prune_inflight(inflight, now_utc=now_utc, ttl_sec=ttl_sec)
         _save_inflight(inflight)
 
-    return {
+    summary = {
         "status": "ok",
         "enabled": True,
         "scope": scope,
@@ -395,6 +407,11 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
         "rejected": rejected,
         "errors": errors,
     }
+    
+    if sent > 0:
+        log(f"[dt_exec] 🚨 Liquidation complete: sent={sent} accepted={accepted} rejected={rejected} errors={errors}")
+    
+    return summary
 
 
 def _extract_intent(node: Dict[str, Any]) -> Tuple[str, float, float]:
@@ -482,7 +499,9 @@ def _can_exit_position(node: Dict, entry_ts: str, cfg: ExecutionConfig) -> Tuple
         
         return True, None
     except Exception as e:
-        log(f"[exec] ⚠️ Error checking hold time: {e}")
+        log(f"[dt_exec] ⚠️ Error checking hold time: {e}", level="error")
+        if get_aggregator:
+            get_aggregator().forward_log("ERROR", f"Hold time check error: {e}", "dt_exec")
         return True, None
 
 
@@ -648,19 +667,29 @@ def execute_from_policy(
     """
     cfg = _cfg_from_env() if cfg is None else cfg
     rolling = _read_rolling() or {}
+    
+    # Build initial symbol list for cycle start logging
     if not isinstance(rolling, dict) or not rolling:
         log("[dt_exec] ⚠️ rolling empty; nothing to execute")
         return {"status": "empty", "orders": 0, "dry_run": cfg.dry_run}
+    
+    initial_symbols = [s for s in rolling.keys() if isinstance(s, str) and not s.startswith("_")]
+    log(f"[dt_exec] 🚀 Starting execution cycle: symbols={len(initial_symbols)}")
     
     # Validate rolling structure before execution (PR #4)
     try:
         from dt_backend.core.schema_validator_dt import validate_rolling, ValidationError
         validate_rolling(rolling)
+        log("[dt_exec] ✅ Rolling validation passed")
     except ValidationError as e:
-        log(f"[dt_exec] ❌ Validation error: {e}")
+        log(f"[dt_exec] ❌ Validation error: {e}", level="error")
+        if get_aggregator:
+            get_aggregator().forward_log("ERROR", f"Validation error: {e}", "dt_exec")
         return {"error": str(e), "trades": [], "orders": 0}
     except Exception as e:
-        log(f"[dt_exec] ⚠️ Validation exception: {e}")
+        log(f"[dt_exec] ⚠️ Validation exception: {e}", level="error")
+        if get_aggregator:
+            get_aggregator().forward_log("ERROR", f"Validation exception: {e}", "dt_exec")
         # Continue execution despite validation errors
 
     # Initialize decision recorder for this cycle
@@ -751,6 +780,10 @@ def execute_from_policy(
         side, size, conf = _extract_intent(node)
         considered += 1
         
+        # Log intent for this symbol
+        if side != "FLAT" and size > 0.0:
+            debug(f"[dt_exec] 📊 {sym}: intent={side} size={size:.3f} conf={conf:.2%}")
+        
         # Log feature importance for this trading decision
         try:
             if get_feature_tracker is not None:
@@ -773,6 +806,7 @@ def execute_from_policy(
 
         if conf < float(cfg.min_confidence):
             blocked += 1
+            debug(f"[dt_exec] ⚠️ Risk check failed: {sym} conf={conf:.2%} < min={cfg.min_confidence:.2%}")
             append_trade_event(
                 {
                     "type": "no_trade",
@@ -798,7 +832,8 @@ def execute_from_policy(
                         "lgb_prob": conf,
                     }
                     track_missed_signal(signal, f"conf<{cfg.min_confidence}")
-            except Exception:
+            except Exception as e:
+                debug(f"[dt_exec] Failed to track missed signal for {sym}: {e}")
                 pass
             
             continue
@@ -814,6 +849,7 @@ def execute_from_policy(
                     age_min = (ts_now - last_exit_ts).total_seconds() / 60.0
                     if age_min < float(cfg.min_flip_minutes):
                         blocked += 1
+                        log(f"[dt_exec] 🔄 Trade gap enforcement for {sym}: cooldown {age_min:.1f}m < {cfg.min_flip_minutes}m")
                         append_trade_event(
                             {
                                 "type": "no_trade",
@@ -854,6 +890,7 @@ def execute_from_policy(
                     
                     if not can_exit:
                         blocked += 1
+                        log(f"[dt_exec] ⏱️ Hold time check for {sym}: {reason}")
                         append_trade_event(
                             {
                                 "type": "no_trade",
@@ -867,7 +904,9 @@ def execute_from_policy(
                         log(f"[exec] ⏸ {sym}: {reason} - holding position")
                         continue
             except Exception as e:
-                log(f"[exec] ⚠️ Error checking hold time for {sym}: {e}")
+                log(f"[exec] ⚠️ Error checking hold time for {sym}: {e}", level="error")
+                if get_aggregator:
+                    get_aggregator().forward_log("ERROR", f"Hold time validation error for {sym}: {e}", "dt_exec")
 
         # ============================================================================
         # INTELLIGENT POSITION HOLDING (Human Day Trader Logic)
@@ -1048,17 +1087,22 @@ def execute_from_policy(
                                 # But also respect hard stops from position_manager_dt
                         except Exception as e:
                             # Log error but continue - don't block trading on PnL calculation issues
-                            log(f"[dt_exec] ⚠️ Error calculating PnL for {sym}: {e}")
+                            log(f"[dt_exec] ⚠️ Error calculating PnL for {sym}: {e}", level="error")
+                            if get_aggregator:
+                                get_aggregator().forward_log("ERROR", f"PnL calculation error for {sym}: {e}", "dt_exec")
                             pass
         except Exception as e:
             # Log error but continue - don't block trading on position hold logic issues
-            log(f"[dt_exec] ⚠️ Error in position hold logic for {sym}: {e}")
+            log(f"[dt_exec] ⚠️ Error in position hold logic for {sym}: {e}", level="error")
+            if get_aggregator:
+                get_aggregator().forward_log("ERROR", f"Position hold logic error for {sym}: {e}", "dt_exec")
             pass
 
         # Don't stack entries in the same direction (keeps it sane).
         try:
             if side == "BUY" and pos is not None and getattr(pos, "qty", 0.0) > 0:
                 blocked += 1
+                debug(f"[dt_exec] 🚫 Position limit: {sym} already long, not stacking")
                 append_trade_event({"type": "no_trade", "symbol": sym, "reason": "already_long", "side": side, "confidence": conf, "size": size})
                 continue
         except Exception:
@@ -1067,6 +1111,7 @@ def execute_from_policy(
         # Phase 0 only closes longs on SELL unless allow_shorts is enabled.
         if side == "SELL" and (pos is None or getattr(pos, "qty", 0.0) <= 0.0) and not cfg.allow_shorts:
             blocked += 1
+            debug(f"[dt_exec] 🚫 Risk check: {sym} SELL without position (shorts disabled)")
             append_trade_event(
                 {
                     "type": "no_trade",
@@ -1128,6 +1173,8 @@ def execute_from_policy(
                 cfg=cfg
             )
             
+            debug(f"[dt_exec] 🎯 Conviction sizing: phit={phit:.2%} → size={size_fraction:.3f}")
+            
             # Convert size fraction to share quantity
             # Get account equity for position sizing
             last_px = _extract_last_price(node)
@@ -1138,7 +1185,8 @@ def execute_from_policy(
                     account = broker.get_account()
                     if isinstance(account, dict):
                         equity = _safe_float(account.get("equity", 100000.0), 100000.0)
-                except Exception:
+                except Exception as e:
+                    debug(f"[dt_exec] Failed to get account equity for {sym}: {e}")
                     pass
                 
                 qty = max(1, int(size_fraction * equity / last_px))
@@ -1146,7 +1194,9 @@ def execute_from_policy(
                 # Fallback to old method if something went wrong
                 qty = _qty_from_size(size, cfg)
         except Exception as e:
-            log(f"[exec] ⚠️ Error in conviction sizing for {sym}: {e}")
+            log(f"[exec] ⚠️ Error in conviction sizing for {sym}: {e}", level="error")
+            if get_aggregator:
+                get_aggregator().forward_log("ERROR", f"Conviction sizing error for {sym}: {e}", "dt_exec")
             # Fallback to old method
             qty = _qty_from_size(size, cfg)
         
@@ -1181,6 +1231,7 @@ def execute_from_policy(
                 
                 if trades_today >= max_daily:
                     blocked += 1
+                    log(f"[dt_exec] 🛑 Emergency stop: {sym} reached daily trade limit ({trades_today}/{max_daily})")
                     plan = node.get("execution_plan_dt") if isinstance(node.get("execution_plan_dt"), dict) else {}
                     append_trade_event({
                         "type": "no_trade",
@@ -1190,7 +1241,8 @@ def execute_from_policy(
                         "bot": plan.get("bot") if isinstance(plan, dict) else None,
                     })
                     continue  # Skip this symbol
-            except Exception:
+            except Exception as e:
+                debug(f"[dt_exec] Failed to check daily trade limit for {sym}: {e}")
                 pass
         
         # NEW (Phase 3): Max loss per symbol per day check
@@ -1202,6 +1254,7 @@ def execute_from_policy(
                 
                 if symbol_pnl < -abs(max_loss_per_symbol):
                     blocked += 1
+                    log(f"[dt_exec] 🛑 Emergency stop: {sym} max daily loss hit pnl=${symbol_pnl:.2f} limit=${max_loss_per_symbol:.2f}")
                     append_trade_event({
                         "type": "no_trade",
                         "symbol": sym,
@@ -1211,7 +1264,8 @@ def execute_from_policy(
                         "size": size,
                     })
                     continue  # Skip this symbol
-            except Exception:
+            except Exception as e:
+                debug(f"[dt_exec] Failed to check max loss per symbol for {sym}: {e}")
                 pass
 
         try:
@@ -1239,9 +1293,11 @@ def execute_from_policy(
             debug(f"[dt_exec] 📝 Phase 1 (pending): {exec_id} {side} {qty} {sym}")
             
             # Submit order to broker
+            log(f"[dt_exec] 📤 Submitting order: {sym} {side} {qty} @ ${last_px:.2f}")
             res = broker.submit_order(order, last_price=(last_px if last_px > 0 else None))
             orders += 1
             bump_metric("orders_submitted", 1.0)
+            log(f"[dt_exec] ✅ Order submitted: {sym} {side} {qty}")
             append_trade_event(
                 {
                     "type": "order_result",
@@ -1448,7 +1504,11 @@ def execute_from_policy(
                         log(f"[dt_exec] ❌ Order not filled: {exec_id} status={status}")
             except Exception as e:
                 # Something went wrong during position update, record failure
-                log(f"[dt_exec] ⚠️ Error in saga phase 2/3 for {exec_id}: {e}")
+                log(f"[dt_exec] ⚠️ Error in saga phase 2/3 for {exec_id}: {e}", level="error")
+                if get_aggregator:
+                    import traceback
+                    stack_trace = traceback.format_exc()
+                    get_aggregator().forward_log("ERROR", f"Saga phase 2/3 error for {exec_id}: {e}\n{stack_trace}", "dt_exec")
                 execution_ledger.record_failed(
                     execution_id=exec_id,
                     error_msg=f"Phase 2/3 error: {str(e)[:200]}",
@@ -1457,6 +1517,13 @@ def execute_from_policy(
         except Exception as e:
             blocked += 1
             bump_metric("order_errors", 1.0)
+            
+            # Log error with full details and send to Slack
+            log(f"[dt_exec] ⚠️ Error processing {sym}: {e}", level="error")
+            if get_aggregator:
+                import traceback
+                stack_trace = traceback.format_exc()
+                get_aggregator().forward_log("ERROR", f"Order error for {sym}: {e}\n{stack_trace}", "dt_exec")
             
             # Try to record failure in ledger if we have exec_id
             if exec_id is not None:
@@ -1512,4 +1579,5 @@ def execute_from_policy(
         debug(f"[dt_exec] Feature drift check failed: {e}")
 
     debug(f"[dt_exec] ✅ execute_from_policy done: {out}")
+    log(f"[dt_exec] ✅ Execution complete: orders={orders} blocked={blocked} considered={considered}")
     return out
