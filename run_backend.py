@@ -228,6 +228,13 @@ if __name__ == "__main__":
         print("   • logs              → supervisor_agent SILENCED (set SILENCE_SUPERVISOR_AGENT=0 to show)")
     print("────────────────────────────────────────", flush=True)
 
+    # Validate configuration before launching services (PR #6: Config Validation)
+    try:
+        from dt_backend.core.knob_validator_dt import validate_and_warn
+        validate_and_warn()
+    except Exception as e:
+        print(f"⚠️  Configuration validation failed: {e}")
+
     append_log("AION system starting")
     prune_old_logs()
 

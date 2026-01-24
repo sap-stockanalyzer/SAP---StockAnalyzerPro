@@ -186,7 +186,8 @@ class MLFeaturePipeline:
                 entry_dt = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
                 now = datetime.now(timezone.utc)
                 hold_minutes = (now - entry_dt).total_seconds() / 60.0
-            except:
+            except Exception as e:
+                log(f"[ml_pipeline] ⚠️ Error parsing entry_ts '{entry_ts}': {e}")
                 hold_minutes = 0.0
         else:
             hold_minutes = 0.0
