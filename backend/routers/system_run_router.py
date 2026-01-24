@@ -132,7 +132,7 @@ def _task_nightly():
 
 
 def _task_train():
-    from backend.ai_model import train_all_models
+    from backend.core.ai_model.core_training import train_all_models
     return train_all_models()
 
 
