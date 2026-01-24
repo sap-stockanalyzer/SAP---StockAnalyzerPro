@@ -768,11 +768,11 @@ class SwingBot:
         universe_scores: Dict[str, float] = {}
 
         # Phase S0: optional rejection logging for "missed opportunities" analytics.
-        log_reject = str(os.getenv("SWING_LOG_REJECTIONS", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
-        max_reject_events = int(os.getenv("SWING_LOG_REJECTIONS_MAX", "250"))
+        log_reject = str(os.getenv("SWING_LOG_REJECTIONS", "1")).strip().lower() in {"1", "true", "yes", "y", "on"}
+        max_reject_events = int(os.getenv("SWING_LOG_REJECTIONS_MAX", "500"))
         # Slack rejection alerts (separate from logging)
-        send_reject_alerts = str(os.getenv("SWING_SEND_REJECTIONS", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
-        max_reject_alerts = int(os.getenv("SWING_SEND_REJECTIONS_MAX", "20"))
+        send_reject_alerts = str(os.getenv("SWING_SEND_REJECTIONS", "1")).strip().lower() in {"1", "true", "yes", "y", "on"}
+        max_reject_alerts = int(os.getenv("SWING_SEND_REJECTIONS_MAX", "50"))
         reject_events = 0
         reject_alerts_sent = 0
         reject_counts: Dict[str, int] = {}
