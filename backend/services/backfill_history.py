@@ -650,7 +650,6 @@ def backfill_symbols(symbols: List[str], min_days: int = 180, max_workers: int =
         log(f"🔄 Replay mode: loading rolling cache from snapshot ({replay_date})")
         try:
             rolling = load_rolling_for_replay(replay_date)
-            from backend.core.data_pipeline import save_rolling
             save_rolling(rolling)
             log(f"✅ Replay mode: loaded {len(rolling)} symbols from snapshot")
             return len(rolling)
