@@ -75,6 +75,11 @@ try:
 except Exception:
     select_best_setup = None  # type: ignore
 
+try:
+    from dt_backend.ml.feature_importance_tracker import get_tracker as get_feature_tracker
+except Exception:
+    get_feature_tracker = None  # type: ignore
+
 
 # ============================================================
 # 🔐 POSITION DETECTION (NEW, SAFE, BACKWARD-COMPATIBLE)
@@ -917,6 +922,21 @@ def apply_intraday_policy(
                 "bot": node["execution_plan_dt"].get("bot"),
                 "_state": new_state,
             }
+            
+            # Log feature importance for this policy decision
+            try:
+                if get_feature_tracker is not None and isinstance(feats, dict) and feats:
+                    tracker = get_feature_tracker()
+                    tracker.log_prediction(
+                        symbol=sym,
+                        features_dict=feats,
+                        prediction=action,
+                        confidence=float(conf_final),
+                        metadata={"cycle": "policy", "bot": node["execution_plan_dt"].get("bot")}
+                    )
+            except Exception:
+                pass
+            
             rolling[sym] = node
             updated += 1
             continue
@@ -1034,6 +1054,21 @@ def apply_intraday_policy(
             "ts": _utc_now_iso(),
             "_state": new_state if isinstance(new_state, dict) else {},
         }
+        
+        # Log feature importance for model-based policy decision
+        try:
+            if get_feature_tracker is not None and isinstance(feats, dict) and feats:
+                tracker = get_feature_tracker()
+                tracker.log_prediction(
+                    symbol=sym,
+                    features_dict=feats,
+                    prediction=action,
+                    confidence=float(conf_final),
+                    metadata={"cycle": "policy", "model": "ensemble"}
+                )
+        except Exception:
+            pass
+        
         rolling[sym] = node
         updated += 1
 

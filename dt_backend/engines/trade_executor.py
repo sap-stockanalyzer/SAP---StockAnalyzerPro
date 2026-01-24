@@ -64,6 +64,12 @@ try:
 except ImportError:
     DecisionRecorder = None  # type: ignore
 
+# Feature importance tracking for ML interpretability
+try:
+    from dt_backend.ml.feature_importance_tracker import get_tracker as get_feature_tracker
+except ImportError:
+    get_feature_tracker = None  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -608,6 +614,22 @@ def execute_from_policy(
 
         side, size, conf = _extract_intent(node)
         considered += 1
+        
+        # Log feature importance for this trading decision
+        try:
+            if get_feature_tracker is not None:
+                feats = node.get("features_dt", {})
+                if isinstance(feats, dict) and feats:
+                    tracker = get_feature_tracker()
+                    tracker.log_prediction(
+                        symbol=sym,
+                        features_dict=feats,
+                        prediction=side,
+                        confidence=conf,
+                        metadata={"cycle": "execution"}
+                    )
+        except Exception as e:
+            debug(f"[dt_exec] Feature importance logging failed for {sym}: {e}")
 
         # Nothing to do.
         if side == "FLAT" or size <= 0.0:
@@ -1184,6 +1206,15 @@ def execute_from_policy(
         debug("[dt_exec] 💾 saved rolling cache with position updates")
     except Exception as e:
         log(f"[dt_exec] ⚠️ failed to save rolling cache: {e}")
+    
+    # Check for feature importance drift (ML interpretability)
+    try:
+        if get_feature_tracker is not None and orders > 0:
+            tracker = get_feature_tracker()
+            if tracker.detect_drift(threshold=0.15):
+                log("[dt_exec] ⚠️ Feature importance drift detected - consider retraining")
+    except Exception as e:
+        debug(f"[dt_exec] Feature drift check failed: {e}")
 
     debug(f"[dt_exec] ✅ execute_from_policy done: {out}")
     return out
