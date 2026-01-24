@@ -34,6 +34,14 @@ from dt_backend.core.logger_dt import log, debug
 from dt_backend.core.time_override_dt import now_utc as _now_utc_override
 from dt_backend.services.dt_truth_store import append_trade_event, bump_metric
 from dt_backend.services import execution_ledger
+from dt_backend.core.constants_dt import (
+    ORDERS_MAX_PER_CYCLE,
+    TRADE_GAP_MIN_MINUTES,
+    ORDER_TIMEOUT_SEC,
+    HOLD_MIN_TIME_MINUTES,
+    CONFIDENCE_MIN,
+    POSITION_DEFAULT_QTY,
+)
 
 # Optional: dt_state tags (safe if unavailable)
 try:
@@ -82,10 +90,10 @@ class ExecutionConfig:
     """
 
     dry_run: bool = True
-    max_orders_per_cycle: int = 5
+    max_orders_per_cycle: int = ORDERS_MAX_PER_CYCLE
     allow_shorts: bool = False
-    min_confidence: float = 0.25
-    default_qty: float = 1.0
+    min_confidence: float = CONFIDENCE_MIN
+    default_qty: float = POSITION_DEFAULT_QTY
 
     # Phase 5: synthetic brackets + state machine
     enable_brackets: bool = True
@@ -93,7 +101,7 @@ class ExecutionConfig:
     eod_flatten_minutes: int = 5
 
     # Anti-flip hysteresis (direction changes) after an exit
-    min_flip_minutes: int = 12
+    min_flip_minutes: int = TRADE_GAP_MIN_MINUTES
 
     # Fallback risk if a plan doesn't specify stop/tp
     fallback_stop_atr: float = 1.25

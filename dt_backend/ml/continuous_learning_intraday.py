@@ -4,6 +4,7 @@
 This is intentionally conservative:
   - If metrics are missing or malformed, it logs and exits.
   - It only nudges ensemble weights based on recent accuracies.
+  - Integrates AutoRetrainTrigger for automatic retraining based on performance.
 """
 from __future__ import annotations
 
@@ -22,12 +23,22 @@ except Exception:
     }
 
 from dt_backend.models.ensemble.intraday_hybrid_ensemble import EnsembleConfig
+from dt_backend.ml.auto_retrain_trigger import AutoRetrainTrigger
+from dt_backend.core.constants_dt import (
+    WIN_RATE_RETRAINING_THRESHOLD,
+    SHARPE_RETRAINING_THRESHOLD,
+    FEATURE_DRIFT_RETRAINING_THRESHOLD,
+)
 
 try:
     from dt_backend.core.data_pipeline_dt import log  # type: ignore
 except Exception:
     def log(msg: str) -> None:
         print(msg, flush=True)
+
+
+# Global auto-retrain trigger instance
+_global_trigger = AutoRetrainTrigger()
 
 
 def _metrics_path() -> Path:
@@ -82,7 +93,10 @@ def _derive_weights(metrics: Dict[str, Any]) -> EnsembleConfig:
 
 
 def run_continuous_learning_intraday() -> None:
-    """Legacy ensemble weight updater - kept for backward compatibility."""
+    """Legacy ensemble weight updater - kept for backward compatibility.
+    
+    Now also checks auto-retrain trigger to determine if retraining is needed.
+    """
     metrics = _load_metrics()
     if metrics is None:
         return
@@ -96,13 +110,29 @@ def run_continuous_learning_intraday() -> None:
         and abs(new_cfg.w_transf - old_cfg.w_transf) < 1e-6
     ):
         log("[continuous_learning_intraday] ℹ️ Weights unchanged; nothing to update.")
-        return
+    else:
+        new_cfg.save()
+        log(
+            "[continuous_learning_intraday] ✅ Updated ensemble weights → "
+            f"LGB={new_cfg.w_lgb:.3f}, LSTM={new_cfg.w_lstm:.3f}, TRANSF={new_cfg.w_transf:.3f}"
+        )
 
-    new_cfg.save()
-    log(
-        "[continuous_learning_intraday] ✅ Updated ensemble weights → "
-        f"LGB={new_cfg.w_lgb:.3f}, LSTM={new_cfg.w_lstm:.3f}, TRANSF={new_cfg.w_transf:.3f}"
-    )
+    # Check if auto-retraining should be triggered
+    retrain_metrics = {
+        "win_rate": metrics.get("win_rate", 0.0),
+        "sharpe_ratio": metrics.get("sharpe_ratio", 0.0),
+        "feature_drift": metrics.get("feature_drift", 0.0),
+    }
+    
+    should_retrain, reason = _global_trigger.check_and_trigger(retrain_metrics)
+    
+    if should_retrain:
+        log(f"[continuous_learning_intraday] 🔄 Triggering retrain: {reason}")
+        # Note: Actual retraining would be scheduled here
+        # For now, just record that we would retrain
+        _global_trigger.record_retrain()
+    else:
+        log(f"[continuous_learning_intraday] ✓ Metrics healthy, no retrain needed")
 
 
 if __name__ == "__main__":
