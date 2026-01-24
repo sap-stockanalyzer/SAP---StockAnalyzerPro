@@ -401,11 +401,9 @@ def _adjust_conf(
 
     # Vol penalty
     if vol_bkt == "high":
-        penalty = 1.0 - cfg.vol_penalty_high
         conf *= cfg.vol_penalty_high
         detail.append("vol=high")
     elif vol_bkt == "medium":
-        penalty = 1.0 - cfg.vol_penalty_medium
         conf *= cfg.vol_penalty_medium
         detail.append("vol=medium")
     else:
@@ -414,35 +412,28 @@ def _adjust_conf(
     # Trend alignment boosts
     if intent == "BUY":
         if trend == "strong_bull":
-            boost = cfg.trend_boost_strong - 1.0
             conf *= cfg.trend_boost_strong
             detail.append("trend=strong_bull")
         elif trend == "bull":
-            boost = cfg.trend_boost_mild - 1.0
             conf *= cfg.trend_boost_mild
             detail.append("trend=bull")
     elif intent == "SELL":
         if trend == "strong_bear":
-            boost = cfg.trend_boost_strong - 1.0
             conf *= cfg.trend_boost_strong
             detail.append("trend=strong_bear")
         elif trend == "bear":
-            boost = cfg.trend_boost_mild - 1.0
             conf *= cfg.trend_boost_mild
             detail.append("trend=bear")
 
     # Regime effects (global)
     r = (regime_label or "unknown").lower()
     if r in {"chop"}:
-        penalty = 1.0 - cfg.chop_penalty
         conf *= cfg.chop_penalty
         detail.append("regime=chop")
     elif r in {"bear"} and intent == "BUY":
-        penalty = 1.0 - cfg.bear_buy_penalty
         conf *= cfg.bear_buy_penalty
         detail.append("regime=bear_buy_penalty")
     elif r in {"bull"} and intent == "SELL":
-        penalty = 1.0 - cfg.bull_sell_penalty
         conf *= cfg.bull_sell_penalty
         detail.append("regime=bull_sell_penalty")
     elif r in {"crash", "stress"}:
@@ -555,10 +546,6 @@ def apply_intraday_policy(
     # Count symbols for entry log
     symbol_count = sum(1 for k in rolling.keys() if not str(k).startswith("_"))
     log(f"[policy] 🧠 Computing policy: symbols={symbol_count}")
-    
-    if not rolling:
-        log("[policy_dt] ⚠️ rolling empty.")
-        return {"symbols": 0, "updated": 0}
 
     # normalize max_positions
     try:
