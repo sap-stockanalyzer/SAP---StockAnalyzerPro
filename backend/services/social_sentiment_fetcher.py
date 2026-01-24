@@ -43,6 +43,18 @@ if not REDDIT_CLIENT_SECRET:
 REDDIT_USER_AGENT = (os.getenv("REDDIT_USER_AGENT", "aion/1.0 (wallstreetbets sentiment)") or "").strip()
 
 
+# =====================================================================
+# Env helpers
+# =====================================================================
+
+def _env_int(name: str, default: int) -> int:
+    """Read integer environment variable with safe fallback."""
+    try:
+        v = str(os.getenv(name, "")).strip()
+        return int(float(v)) if v else int(default)
+    except Exception:
+        return int(default)
+
 
 # =====================================================================
 # Heuristics for sentiment
