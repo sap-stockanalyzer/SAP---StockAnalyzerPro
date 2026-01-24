@@ -228,6 +228,18 @@ if __name__ == "__main__":
         print("   • logs              → supervisor_agent SILENCED (set SILENCE_SUPERVISOR_AGENT=0 to show)")
     print("────────────────────────────────────────", flush=True)
 
+    # Validate configuration before launching services (PR #6: Config Validation)
+    # Fail-safe: startup continues even if validation fails
+    try:
+        from dt_backend.core.knob_validator_dt import validate_and_warn
+        validate_and_warn()
+    except (ImportError, ModuleNotFoundError) as e:
+        print(f"⚠️  Config validator not available: {e}")
+    except Exception as e:
+        # Catch-all for any unexpected errors during validation
+        # This is intentionally broad to ensure startup continues
+        print(f"⚠️  Configuration validation error: {e}")
+
     append_log("AION system starting")
     prune_old_logs()
 
