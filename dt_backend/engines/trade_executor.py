@@ -25,6 +25,7 @@ v0.3 updates
 from __future__ import annotations
 
 import os
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -369,7 +370,7 @@ def _run_liquidation_if_enabled(broker: BrokerAPI, cfg: ExecutionConfig, *, now_
         except Exception as e:
             errors += 1
             log(f"[dt_exec] ⚠️ Liquidation error for {sym_u}: {e}", level="error")
-            if get_aggregator:
+            if get_aggregator is not None:
                 get_aggregator().forward_log("ERROR", f"Liquidation error for {sym_u}: {e}", "dt_exec")
             append_trade_event(
                 {
@@ -500,7 +501,7 @@ def _can_exit_position(node: Dict, entry_ts: str, cfg: ExecutionConfig) -> Tuple
         return True, None
     except Exception as e:
         log(f"[dt_exec] ⚠️ Error checking hold time: {e}", level="error")
-        if get_aggregator:
+        if get_aggregator is not None:
             get_aggregator().forward_log("ERROR", f"Hold time check error: {e}", "dt_exec")
         return True, None
 
@@ -683,12 +684,12 @@ def execute_from_policy(
         log("[dt_exec] ✅ Rolling validation passed")
     except ValidationError as e:
         log(f"[dt_exec] ❌ Validation error: {e}", level="error")
-        if get_aggregator:
+        if get_aggregator is not None:
             get_aggregator().forward_log("ERROR", f"Validation error: {e}", "dt_exec")
         return {"error": str(e), "trades": [], "orders": 0}
     except Exception as e:
         log(f"[dt_exec] ⚠️ Validation exception: {e}", level="error")
-        if get_aggregator:
+        if get_aggregator is not None:
             get_aggregator().forward_log("ERROR", f"Validation exception: {e}", "dt_exec")
         # Continue execution despite validation errors
 
@@ -905,7 +906,7 @@ def execute_from_policy(
                         continue
             except Exception as e:
                 log(f"[exec] ⚠️ Error checking hold time for {sym}: {e}", level="error")
-                if get_aggregator:
+                if get_aggregator is not None:
                     get_aggregator().forward_log("ERROR", f"Hold time validation error for {sym}: {e}", "dt_exec")
 
         # ============================================================================
@@ -1088,13 +1089,13 @@ def execute_from_policy(
                         except Exception as e:
                             # Log error but continue - don't block trading on PnL calculation issues
                             log(f"[dt_exec] ⚠️ Error calculating PnL for {sym}: {e}", level="error")
-                            if get_aggregator:
+                            if get_aggregator is not None:
                                 get_aggregator().forward_log("ERROR", f"PnL calculation error for {sym}: {e}", "dt_exec")
                             pass
         except Exception as e:
             # Log error but continue - don't block trading on position hold logic issues
             log(f"[dt_exec] ⚠️ Error in position hold logic for {sym}: {e}", level="error")
-            if get_aggregator:
+            if get_aggregator is not None:
                 get_aggregator().forward_log("ERROR", f"Position hold logic error for {sym}: {e}", "dt_exec")
             pass
 
@@ -1195,7 +1196,7 @@ def execute_from_policy(
                 qty = _qty_from_size(size, cfg)
         except Exception as e:
             log(f"[exec] ⚠️ Error in conviction sizing for {sym}: {e}", level="error")
-            if get_aggregator:
+            if get_aggregator is not None:
                 get_aggregator().forward_log("ERROR", f"Conviction sizing error for {sym}: {e}", "dt_exec")
             # Fallback to old method
             qty = _qty_from_size(size, cfg)
@@ -1505,8 +1506,7 @@ def execute_from_policy(
             except Exception as e:
                 # Something went wrong during position update, record failure
                 log(f"[dt_exec] ⚠️ Error in saga phase 2/3 for {exec_id}: {e}", level="error")
-                if get_aggregator:
-                    import traceback
+                if get_aggregator is not None:
                     stack_trace = traceback.format_exc()
                     get_aggregator().forward_log("ERROR", f"Saga phase 2/3 error for {exec_id}: {e}\n{stack_trace}", "dt_exec")
                 execution_ledger.record_failed(
@@ -1520,8 +1520,7 @@ def execute_from_policy(
             
             # Log error with full details and send to Slack
             log(f"[dt_exec] ⚠️ Error processing {sym}: {e}", level="error")
-            if get_aggregator:
-                import traceback
+            if get_aggregator is not None:
                 stack_trace = traceback.format_exc()
                 get_aggregator().forward_log("ERROR", f"Order error for {sym}: {e}\n{stack_trace}", "dt_exec")
             
