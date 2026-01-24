@@ -526,6 +526,17 @@ def execute_from_policy(
     if not isinstance(rolling, dict) or not rolling:
         log("[dt_exec] ⚠️ rolling empty; nothing to execute")
         return {"status": "empty", "orders": 0, "dry_run": cfg.dry_run}
+    
+    # Validate rolling structure before execution (PR #4)
+    try:
+        from dt_backend.core.schema_validator_dt import validate_rolling, ValidationError
+        validate_rolling(rolling)
+    except ValidationError as e:
+        log(f"[dt_exec] ❌ Validation error: {e}")
+        return {"error": str(e), "trades": [], "orders": 0}
+    except Exception as e:
+        log(f"[dt_exec] ⚠️ Validation exception: {e}")
+        # Continue execution despite validation errors
 
     # Initialize decision recorder for this cycle
     recorder = None

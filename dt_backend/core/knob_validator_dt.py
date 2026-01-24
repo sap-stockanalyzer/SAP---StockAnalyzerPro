@@ -11,6 +11,9 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List
 
+from dt_backend.core.schema_validator_dt import validate_config_value, ValidationError
+from dt_backend.core.constants_dt import VALID_RANGES
+
 
 def _safe_float(val: str, default: float = 0.0) -> float:
     """Convert string to float safely."""
@@ -36,41 +39,14 @@ def validate_knobs() -> List[str]:
     """
     errors = []
     
-    # Validate numeric ranges
-    max_positions = _safe_int(os.getenv("DT_MAX_POSITIONS", "3"), 3)
-    if max_positions < 1 or max_positions > 50:
-        errors.append(f"DT_MAX_POSITIONS={max_positions} out of range [1, 50]")
-    
-    exec_min_conf = _safe_float(os.getenv("DT_EXEC_MIN_CONF", "0.25"), 0.25)
-    if exec_min_conf < 0.0 or exec_min_conf > 1.0:
-        errors.append(f"DT_EXEC_MIN_CONF={exec_min_conf} out of range [0.0, 1.0]")
-    
-    max_orders = _safe_int(os.getenv("DT_MAX_ORDERS_PER_CYCLE", "3"), 3)
-    if max_orders < 1 or max_orders > 100:
-        errors.append(f"DT_MAX_ORDERS_PER_CYCLE={max_orders} out of range [1, 100]")
-    
-    # Validate loss limits
-    daily_loss_limit = _safe_float(os.getenv("DT_DAILY_LOSS_LIMIT_USD", "300"), 300)
-    if daily_loss_limit < 0 or daily_loss_limit > 10000:
-        errors.append(f"DT_DAILY_LOSS_LIMIT_USD={daily_loss_limit} out of range [0, 10000]")
-    
-    weekly_dd_pct = _safe_float(os.getenv("DT_MAX_WEEKLY_DRAWDOWN_PCT", "8.0"), 8.0)
-    if weekly_dd_pct < 0 or weekly_dd_pct > 50:
-        errors.append(f"DT_MAX_WEEKLY_DRAWDOWN_PCT={weekly_dd_pct} out of range [0, 50]")
-    
-    monthly_dd_pct = _safe_float(os.getenv("DT_MAX_MONTHLY_DRAWDOWN_PCT", "15.0"), 15.0)
-    if monthly_dd_pct < 0 or monthly_dd_pct > 100:
-        errors.append(f"DT_MAX_MONTHLY_DRAWDOWN_PCT={monthly_dd_pct} out of range [0, 100]")
-    
-    # Validate VIX threshold
-    vix_threshold = _safe_float(os.getenv("DT_VIX_SPIKE_THRESHOLD", "35.0"), 35.0)
-    if vix_threshold < 10 or vix_threshold > 100:
-        errors.append(f"DT_VIX_SPIKE_THRESHOLD={vix_threshold} out of range [10, 100]")
-    
-    # Validate exposure limits
-    max_exposure = _safe_float(os.getenv("DT_MAX_EXPOSURE_FRAC", "0.55"), 0.55)
-    if max_exposure < 0.0 or max_exposure > 1.0:
-        errors.append(f"DT_MAX_EXPOSURE_FRAC={max_exposure} out of range [0.0, 1.0]")
+    # Use schema validator for all parameters in VALID_RANGES
+    for key, (min_val, max_val) in VALID_RANGES.items():
+        value = os.getenv(key)
+        if value:
+            try:
+                validate_config_value(key, value)
+            except ValidationError as e:
+                errors.append(str(e))
     
     # Validate paths exist
     da_brains = os.getenv("DA_BRAINS_ROOT")

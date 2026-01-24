@@ -38,9 +38,10 @@ from backend.routers.admin_consolidated_router import router as admin_consolidat
 from backend.routers.health_router import router as health_router
 from backend.routers.events_router import router as events_router
 from backend.routers.unified_cache_router import router as unified_cache_router
-from backend.admin. routes import router as admin_router
-from backend.admin. admin_tools_router import router as admin_tools_router
-from backend. routers.system_run_router import router as system_run_router
+from backend.admin.routes import router as admin_router
+from backend.admin.admin_tools_router import router as admin_tools_router
+from backend.routers.system_run_router import router as system_run_router
+from backend.routers.pnl_dashboard_router import router as pnl_dashboard_router
 
 # Commented out non-existent routers (for future use)
 # from backend.routers.page_data_router import router as page_data_router
@@ -55,6 +56,7 @@ ROUTERS = [
     admin_router,
     admin_tools_router,
     system_run_router,
+    pnl_dashboard_router,
 ]
 
 for router in ROUTERS:

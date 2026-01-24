@@ -1134,6 +1134,16 @@ def apply_intraday_policy(
 
     if save:
         save_rolling(rolling)
+    
+    # Validate rolling structure before returning (PR #4)
+    try:
+        from dt_backend.core.schema_validator_dt import validate_rolling, ValidationError
+        validate_rolling(rolling)
+    except ValidationError as e:
+        log(f"[policy_dt] ❌ Schema validation failed: {e}")
+        # Log but don't raise - allow graceful degradation
+    except Exception as e:
+        log(f"[policy_dt] ⚠️ Validation error: {e}")
 
     extra = f", capped={capped}, max_positions={max_positions_n}" if max_positions_n is not None else ""
     lane_note = f", lane_symbols={len(lane_syms)}" if isinstance(lane_syms, list) else ""
