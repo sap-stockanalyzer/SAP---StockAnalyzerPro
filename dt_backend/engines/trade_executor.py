@@ -26,12 +26,13 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from dt_backend.core.data_pipeline_dt import _read_rolling, save_rolling
 from dt_backend.core.logger_dt import log, debug
 from dt_backend.core.time_override_dt import now_utc as _now_utc_override
+from dt_backend.core.constants_dt import HOLD_MIN_TIME_MINUTES, POSITION_MAX_FRACTION
 from dt_backend.services.dt_truth_store import append_trade_event, bump_metric
 from dt_backend.services import execution_ledger
 
@@ -103,6 +104,13 @@ class ExecutionConfig:
     trail_atr_mult: float = 1.2
     scratch_min: int = 12
     scratch_atr_frac: float = 0.15
+    
+    # Bug Fix #1: Minimum hold time
+    min_hold_time_minutes: int = HOLD_MIN_TIME_MINUTES
+    
+    # Bug Fix #2: Position sizing parameters
+    min_phit: float = 0.50  # Minimum P(Hit) to consider trading
+    max_symbol_fraction: float = 0.15  # Maximum fraction of portfolio per symbol
 
 
 def _safe_float(x: Any, default: float = 0.0) -> float:
@@ -424,6 +432,103 @@ def _extract_atr(node: Dict[str, Any]) -> float:
     return 0.0
 
 
+# ---------------------------------------------------------------------------
+# Bug Fix #1: Minimum hold time enforcement
+# ---------------------------------------------------------------------------
+
+
+def _can_exit_position(node: Dict, entry_ts: str, cfg: ExecutionConfig) -> Tuple[bool, str]:
+    """
+    Check if position held long enough to exit.
+    
+    Returns: (can_exit: bool, reason: str)
+    """
+    if not entry_ts:
+        return True, "no_entry_timestamp"
+    
+    try:
+        entry_dt = datetime.fromisoformat(entry_ts.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        hold_minutes = (now - entry_dt).total_seconds() / 60.0
+        
+        if hold_minutes < cfg.min_hold_time_minutes:
+            return False, f"held_{hold_minutes:.0f}m_<_{cfg.min_hold_time_minutes}m"
+        
+        return True, None
+    except Exception as e:
+        log(f"[exec] ⚠️ Error checking hold time: {e}")
+        return True, None
+
+
+# ---------------------------------------------------------------------------
+# Bug Fix #2: Conviction-based position sizing
+# ---------------------------------------------------------------------------
+
+
+def _size_from_phit_with_conviction(
+    phit: float,
+    expected_r: float,
+    vol_bkt: str,
+    position_qty: float = 0.0,
+    cfg: ExecutionConfig = None,
+) -> float:
+    """
+    Calculate position size based on conviction (P(Hit)) with position-aware scaling.
+    
+    Logic:
+    - If no position: size based on P(Hit) conviction
+    - If small position (<50% of target): scale up
+    - If at target position: reduce size
+    - If above target: reduce or reverse
+    """
+    cfg = cfg or ExecutionConfig()
+    phit = _safe_float(phit, 0.5)
+    
+    # Check minimum P(Hit) threshold
+    if phit < cfg.min_phit:
+        return 0.0
+    
+    # Base edge from calibrated probability
+    # P(Hit) = 0.52 → edge = 0.04
+    # P(Hit) = 0.75 → edge = 0.50
+    edge = max(0.0, min(1.0, (phit - 0.5) / 0.5))
+    
+    # Risk-reward scaling
+    er = max(0.5, min(2.0, _safe_float(expected_r, 1.0)))
+    r_factor = 0.5 + 0.5 * (er / 2.0)  # 0.5..1.0
+    
+    # Volatility scaling
+    vol_scale = {
+        "high": 0.4,     # High vol: reduce size
+        "medium": 0.7,   # Medium vol: normal size
+        "low": 1.0,      # Low vol: full size
+    }.get(vol_bkt, 0.7)
+    
+    # Base size from conviction
+    base_size = cfg.max_symbol_fraction * edge * r_factor * vol_scale
+    
+    # Position-aware scaling
+    if position_qty > 0:
+        # Calculate target position (full conviction)
+        target_qty = cfg.max_symbol_fraction * POSITION_MAX_FRACTION
+        current_fraction = position_qty / target_qty if target_qty > 0 else 0
+        
+        if current_fraction >= 0.9:
+            # Already at/above target: reduce size
+            base_size *= 0.3
+        elif current_fraction >= 0.5:
+            # Halfway to target: maintain pace
+            base_size = base_size  # No change
+        elif current_fraction >= 0.25:
+            # Quarter to target: scale up moderately
+            base_size *= 1.2
+        else:
+            # Well below target: scale up aggressively
+            base_size *= 1.5
+    
+    return max(0.0, min(cfg.max_symbol_fraction, base_size))
+
+
 def _entry_meta_from_global(rolling: Dict[str, Any], now_utc: Optional[datetime] = None) -> Dict[str, Any]:
     """Pull lightweight tags from _GLOBAL_DT + dt_state for analytics/replay."""
     g = rolling.get("_GLOBAL_DT") if isinstance(rolling, dict) else None
@@ -671,6 +776,47 @@ def execute_from_policy(
             pass
 
         # ============================================================================
+        # BUG FIX #1: Minimum Hold Time Check
+        # ============================================================================
+        # Prevent 2-minute buy/sell flips by enforcing minimum hold time
+        if side == "SELL":
+            try:
+                # Get position entry timestamp
+                position_dt = node.get("position_dt", {})
+                entry_ts = position_dt.get("entry_ts") if isinstance(position_dt, dict) else None
+                
+                # If no entry_ts in position_dt, try to get it from position manager
+                if not entry_ts and pos is not None:
+                    try:
+                        entry_ts = getattr(pos, "entry_ts", None)
+                    except Exception:
+                        pass
+                
+                if entry_ts:
+                    can_exit, reason = _can_exit_position(
+                        node=node,
+                        entry_ts=entry_ts,
+                        cfg=cfg
+                    )
+                    
+                    if not can_exit:
+                        blocked += 1
+                        append_trade_event(
+                            {
+                                "type": "no_trade",
+                                "symbol": sym,
+                                "reason": f"min_hold_time: {reason}",
+                                "side": side,
+                                "confidence": conf,
+                                "size": size,
+                            }
+                        )
+                        log(f"[exec] ⏸ {sym}: {reason} - holding position")
+                        continue
+            except Exception as e:
+                log(f"[exec] ⚠️ Error checking hold time for {sym}: {e}")
+
+        # ============================================================================
         # INTELLIGENT POSITION HOLDING (Human Day Trader Logic)
         # ============================================================================
         # If we have an open position and signal says SELL, apply hold strategy
@@ -832,7 +978,77 @@ def execute_from_policy(
             )
             continue
 
-        qty = _qty_from_size(size, cfg)
+        # ============================================================================
+        # BUG FIX #2: Conviction-Based Position Sizing
+        # ============================================================================
+        # Calculate qty based on conviction (P(Hit)) with position-aware scaling
+        try:
+            # Get current position qty for position-aware scaling
+            current_qty = float(getattr(pos, "qty", 0.0)) if pos else 0.0
+            
+            # Extract policy features for conviction sizing
+            policy = node.get("policy_dt", {})
+            phit = _safe_float(policy.get("p_hit"), conf) if isinstance(policy, dict) else conf
+            
+            # Get expected R from execution plan or features
+            plan = node.get("execution_plan_dt", {})
+            features = node.get("features_dt", {})
+            expected_r = 1.0
+            if isinstance(plan, dict) and plan.get("risk"):
+                risk = plan.get("risk")
+                if isinstance(risk, dict):
+                    stop = risk.get("stop")
+                    tp = risk.get("take_profit")
+                    last_px = _extract_last_price(node)
+                    if stop and tp and last_px > 0:
+                        r_dist = abs(tp - last_px)
+                        stop_dist = abs(last_px - stop)
+                        if stop_dist > 0:
+                            expected_r = r_dist / stop_dist
+            
+            # Get volatility bucket
+            vol_bkt = "medium"
+            if isinstance(features, dict):
+                atr = _safe_float(features.get("atr_14"), 0.0)
+                last_px = _extract_last_price(node)
+                if atr > 0 and last_px > 0:
+                    atr_pct = (atr / last_px) * 100.0
+                    if atr_pct > 3.0:
+                        vol_bkt = "high"
+                    elif atr_pct < 1.5:
+                        vol_bkt = "low"
+            
+            # Calculate conviction-aware size (fraction of portfolio)
+            size_fraction = _size_from_phit_with_conviction(
+                phit=phit,
+                expected_r=expected_r,
+                vol_bkt=vol_bkt,
+                position_qty=abs(current_qty),
+                cfg=cfg
+            )
+            
+            # Convert size fraction to share quantity
+            # Get account equity for position sizing
+            last_px = _extract_last_price(node)
+            if last_px > 0 and size_fraction > 0:
+                # Estimate equity (can be improved with actual account value)
+                equity = 100000.0  # Default assumption
+                try:
+                    account = broker.get_account()
+                    if isinstance(account, dict):
+                        equity = _safe_float(account.get("equity", 100000.0), 100000.0)
+                except Exception:
+                    pass
+                
+                qty = max(1, int(size_fraction * equity / last_px))
+            else:
+                # Fallback to old method if something went wrong
+                qty = _qty_from_size(size, cfg)
+        except Exception as e:
+            log(f"[exec] ⚠️ Error in conviction sizing for {sym}: {e}")
+            # Fallback to old method
+            qty = _qty_from_size(size, cfg)
+        
         if qty <= 0.0:
             continue
 
