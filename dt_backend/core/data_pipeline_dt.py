@@ -33,6 +33,11 @@ from typing import Any, Dict, Iterable, List
 from .config_dt import DT_PATHS
 from .logger_dt import log
 
+try:
+    from backend.monitoring.log_aggregator import get_aggregator
+except ImportError:
+    get_aggregator = None
+
 
 def _rolling_path() -> Path:
     override = os.getenv("DT_ROLLING_PATH", "").strip()
@@ -86,6 +91,7 @@ def _acquire_lock(timeout_s: float = 30.0) -> bool:
     lock = _lock_path()
     lock.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.time() + max(0.0, float(timeout_s))
+    retry_count = 0
 
     while True:
         try:
@@ -95,11 +101,13 @@ def _acquire_lock(timeout_s: float = 30.0) -> bool:
                 os.write(fd, payload.encode("utf-8", errors="ignore"))
             finally:
                 os.close(fd)
+            log("[pipeline] 🔒 Lock acquired")
             return True
 
         except FileExistsError:
             pid = _read_lock_pid(lock)
             if pid > 0 and not _pid_alive(pid):
+                log(f"[pipeline] 🧹 Removing stale lock (pid={pid} not alive)")
                 try:
                     lock.unlink(missing_ok=True)  # type: ignore[arg-type]
                     continue
@@ -107,7 +115,19 @@ def _acquire_lock(timeout_s: float = 30.0) -> bool:
                     pass
 
             if time.time() >= deadline:
+                log(f"[pipeline] ⏰ Lock timeout after {timeout_s}s")
+                if get_aggregator:
+                    try:
+                        agg = get_aggregator()
+                        agg.forward_log("ERROR", f"Lock timeout after {timeout_s}s (holder pid={pid})", "pipeline")
+                    except Exception:
+                        pass
                 return False
+            
+            # Log concurrent access attempts periodically (every 10 retries to avoid spam)
+            retry_count += 1
+            if retry_count % 10 == 1:
+                log(f"[pipeline] ⏳ Waiting for lock (holder pid={pid})")
             time.sleep(0.15)
 
         except Exception:
@@ -119,6 +139,7 @@ def _release_lock() -> None:
         return
     try:
         _lock_path().unlink(missing_ok=True)  # type: ignore[arg-type]
+        log("[pipeline] 🔓 Lock released")
     except Exception:
         pass
 
@@ -126,14 +147,30 @@ def _release_lock() -> None:
 def _read_rolling() -> Dict[str, Any]:
     path = _rolling_path()
     if not path.exists():
+        log(f"[pipeline] ⚠️ Rolling cache not found or empty: {path}")
         return {}
 
     try:
+        log(f"[pipeline] 📖 Reading rolling cache: {path}")
+        start_time = time.time()
         with gzip.open(path, "rt", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
+        duration = time.time() - start_time
+        if duration > 1.0:
+            log(f"[pipeline] ⏱️ Read operation took {duration:.2f}s")
+        
+        if not isinstance(data, dict):
+            log("[pipeline] ⚠️ Invalid rolling structure, using empty dict")
+            return {}
+        return data
     except Exception as e:
-        log(f"⚠️ failed to read rolling cache {path}: {e}")
+        log(f"[pipeline] ❌ Failed to read rolling cache: {e}")
+        if get_aggregator:
+            try:
+                agg = get_aggregator()
+                agg.forward_log("ERROR", f"Failed to read rolling cache {path}: {e}", "pipeline")
+            except Exception:
+                pass
         return {}
 
 
@@ -143,6 +180,9 @@ def save_rolling(rolling: Dict[str, Any]) -> None:
     tmp = path.with_name(path.name + ".tmp")
 
     try:
+        log(f"[pipeline] 💾 Saving rolling cache: {path}")
+        start_time = time.time()
+        
         if not _acquire_lock(timeout_s=float(os.getenv("DT_LOCK_TIMEOUT", "60"))):
             log(f"⚠️ rolling lock timeout; skipping save: {path}")
             return
@@ -150,10 +190,22 @@ def save_rolling(rolling: Dict[str, Any]) -> None:
         with gzip.open(tmp, "wt", encoding="utf-8") as f:
             json.dump(rolling or {}, f, ensure_ascii=False, indent=2)
 
+        log(f"[pipeline] ✨ Atomic rename: {tmp.name} → {path.name}")
         tmp.replace(path)
+        
+        duration = time.time() - start_time
+        log(f"[pipeline] ✅ Rolling cache saved: {path}")
+        if duration > 1.0:
+            log(f"[pipeline] ⏱️ Save operation took {duration:.2f}s")
 
     except Exception as e:
-        log(f"⚠️ failed to save rolling cache {path}: {e}")
+        log(f"[pipeline] ❌ Failed to save rolling cache: {e}")
+        if get_aggregator:
+            try:
+                agg = get_aggregator()
+                agg.forward_log("ERROR", f"Failed to save rolling cache {path}: {e}", "pipeline")
+            except Exception:
+                pass
     finally:
         _release_lock()
 
@@ -171,7 +223,13 @@ def load_universe() -> List[str]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        log(f"⚠️ failed to parse universe file {path}: {e}")
+        log(f"[pipeline] ❌ Failed to parse universe: {e}")
+        if get_aggregator:
+            try:
+                agg = get_aggregator()
+                agg.forward_log("ERROR", f"Failed to parse universe file {path}: {e}", "pipeline")
+            except Exception:
+                pass
         return []
 
     if isinstance(raw, dict) and "symbols" in raw:
@@ -179,7 +237,13 @@ def load_universe() -> List[str]:
     elif isinstance(raw, list):
         items = raw
     else:
-        log(f"⚠️ unexpected universe schema in {path}, expected list or dict['symbols'].")
+        log(f"[pipeline] ⚠️ Unexpected universe schema in {path}, expected list or dict['symbols'].")
+        if get_aggregator:
+            try:
+                agg = get_aggregator()
+                agg.forward_log("ERROR", f"Unexpected universe schema in {path}", "pipeline")
+            except Exception:
+                pass
         return []
 
     out: List[str] = []
@@ -189,13 +253,17 @@ def load_universe() -> List[str]:
         if s and s not in seen:
             seen.add(s)
             out.append(s)
+    
+    log(f"[pipeline] 📋 Universe loaded: {len(out)} symbols")
     return out
 
 
 def ensure_symbol_node(rolling: Dict[str, Any], symbol: str) -> Dict[str, Any]:
     sym = _norm_sym(symbol)
     node = rolling.get(sym)
-    if not isinstance(node, dict):
+    is_new = not isinstance(node, dict)
+    
+    if is_new:
         node = {}
 
     node.setdefault("bars_intraday", [])
@@ -205,4 +273,8 @@ def ensure_symbol_node(rolling: Dict[str, Any], symbol: str) -> Dict[str, Any]:
     node.setdefault("policy_dt", {})
 
     rolling[sym] = node
+    
+    if is_new:
+        log(f"[pipeline] 🆕 Created node for {sym}")
+    
     return node

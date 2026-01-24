@@ -33,6 +33,12 @@ except ImportError:
     alert_dt = None  # type: ignore
     alert_error = None  # type: ignore
 
+# Slack-aware logger
+try:
+    from backend.monitoring.log_aggregator import get_aggregator
+except ImportError:
+    get_aggregator = None
+
 from dt_backend.core import (
     log,
     warn,
@@ -292,7 +298,13 @@ def run_daytrading_cycle(
         from dt_backend.risk.emergency_stop_dt import check_emergency_stop
         is_stopped, reason = check_emergency_stop()
         if is_stopped:
-            log(f"[daytrading_job] 🛑 EMERGENCY STOP: {reason}")
+            log(f"[dt_job] 🚨 Emergency stop active")
+            if get_aggregator:
+                try:
+                    agg = get_aggregator()
+                    agg.log(f"[dt_job] 🚨 Emergency stop triggered: {reason}", level="critical", forward_to_slack=True)
+                except Exception:
+                    pass
             append_trade_event({
                 "type": "emergency_stop",
                 "cycle_id": cycle_id,
@@ -322,6 +334,9 @@ def run_daytrading_cycle(
     else:
         lk = None
 
+    import time
+    cycle_start_time = time.time()
+    log(f"[dt_job] 🚀 Starting cycle #{cycle_seq if 'cycle_seq' in locals() else '?'} at {time.strftime('%H:%M:%S')}")
     log(f"[daytrading_job] 🚀 starting intraday cycle cycle_id={cycle_id}")
 
     os.environ.pop("DT_ROLLING_PATH", None)
@@ -329,6 +344,11 @@ def run_daytrading_cycle(
 
     lane = _lane_config()
     cycle_seq = _bump_cycle_seq(cycle_id)
+    
+    # Check for dry run mode
+    dry_run = str(os.getenv("DT_DRY_RUN", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    if dry_run:
+        log(f"[dt_job] 🏜️ DRY RUN mode active")
 
     try:
         update_dt_state({
@@ -355,6 +375,7 @@ def run_daytrading_cycle(
             lane_label = "SLOW" if is_slow else "FAST"
             fast_n = int(lane.get("fast_n") or 450)
             slow_n = int(lane.get("slow_n") or 2500)
+            log(f"[dt_job] 🛤️ Lanes configured: FAST={fast_n} symbols, SLOW={slow_n} symbols (every {slow_every} cycles)")
         lane_max_symbols = max_symbols
 
         # Persist plan once per date
@@ -389,29 +410,51 @@ def run_daytrading_cycle(
                 "lane_slow_every_n": lane.get("slow_every_n"),
             })
             append_trade_event({"type": "lane", "cycle_id": cycle_id, "cycle_seq": cycle_seq, "lane": lane_label})
+            log(f"[dt_job] 📊 Lane {lane_label}: max {lane_max_symbols or 'unlimited'} symbols")
         except Exception:
             pass
 
         # Phase 0 — Hard risk rails
         try:
             if assess_and_update_risk_rails is not None:
+                log(f"[dt_job] 🛡️ Assessing risk rails...")
                 risk_rails_summary = assess_and_update_risk_rails()
                 rolling_now = _read_rolling() or {}
                 gdt = rolling_now.get("_GLOBAL_DT") if isinstance(rolling_now.get("_GLOBAL_DT"), dict) else {}
                 gdt["risk_rails_dt"] = risk_rails_summary
-                gdt["stand_down"] = bool(risk_rails_summary.get("stand_down")) if isinstance(risk_rails_summary, dict) else False
-                gdt["stand_down_reason"] = str(risk_rails_summary.get("reason")) if isinstance(risk_rails_summary, dict) else ""
+                stand_down = bool(risk_rails_summary.get("stand_down")) if isinstance(risk_rails_summary, dict) else False
+                stand_down_reason = str(risk_rails_summary.get("reason")) if isinstance(risk_rails_summary, dict) else ""
+                gdt["stand_down"] = stand_down
+                gdt["stand_down_reason"] = stand_down_reason
                 rolling_now["_GLOBAL_DT"] = gdt
                 save_rolling(rolling_now)
+                
+                if stand_down:
+                    log(f"[dt_job] 🚨 Stand-down triggered: {stand_down_reason}")
+                    if get_aggregator:
+                        try:
+                            agg = get_aggregator()
+                            agg.log(f"[dt_job] 🚨 Stand-down triggered: {stand_down_reason}", level="warning", forward_to_slack=True)
+                        except Exception:
+                            pass
+                else:
+                    log(f"[dt_job] 🛡️ Risk assessment: OK")
+                    
                 append_trade_event({
                     "type": "risk_rail",
                     "cycle_id": cycle_id,
                     "event": "assessed",
-                    "stand_down": gdt.get("stand_down"),
-                    "reason": gdt.get("stand_down_reason"),
+                    "stand_down": stand_down,
+                    "reason": stand_down_reason,
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            warn(f"[dt_job] ⚠️ Error in risk rails: {e}")
+            if get_aggregator:
+                try:
+                    agg = get_aggregator()
+                    agg.log(f"[dt_job] ⚠️ Error in risk rails: {e}", level="error", forward_to_slack=True, include_trace=True)
+                except Exception:
+                    pass
 
         # ---------------------------------------------
         # Context refresh strategy:
@@ -420,12 +463,19 @@ def run_daytrading_cycle(
         # ---------------------------------------------
         rolling_pre = _read_rolling() or {}
         candidate_pre = _get_candidate_symbols(rolling_pre)
+        
+        if candidate_pre:
+            log(f"[dt_job] 🎯 Universe: {len(candidate_pre)} symbols (from candidates)")
 
         # If slow cycle, optionally refresh broad context first.
         ctx_summary = None
+        stage_start = time.time()
         if lane.get("enabled") and is_slow and bool(lane.get("refresh_candidates_on_slow")):
             lane_max_symbols = slow_n
+            log(f"[dt_job] [1/5] 📥 Fetching market data (broad context)...")
             ctx_summary = _call_maybe(build_intraday_context, symbols=None, max_symbols=lane_max_symbols)
+            stage_duration = time.time() - stage_start
+            log(f"[dt_job] ✅ Data fetch complete: {stage_duration:.2f}s")
 
         # Choose symbol lane universe
         rolling_now = _read_rolling() or {}
@@ -441,30 +491,55 @@ def run_daytrading_cycle(
             if not symbols_lane:
                 symbols_lane = _choose_plan_symbols(plan if isinstance(plan, dict) else {}, n=n)
             lane_max_symbols = n
+            
+        if symbols_lane:
+            log(f"[dt_job] ⭐ Top symbols: {len(symbols_lane)} selected for {lane_label} lane")
 
         # If we didn't run broad context above, run lane-scoped context now.
         if ctx_summary is None:
+            stage_start = time.time()
+            log(f"[dt_job] [1/5] 📥 Fetching market data...")
             ctx_summary = _call_maybe(build_intraday_context, symbols=symbols_lane, max_symbols=lane_max_symbols)
+            stage_duration = time.time() - stage_start
+            log(f"[dt_job] ✅ Data fetch complete: {stage_duration:.2f}s")
 
         # Lane-scoped pipeline (backward-compatible calls)
+        stage_start = time.time()
+        log(f"[dt_job] [2/5] 🧮 Computing features...")
         feat_summary = _call_maybe(build_intraday_features, symbols=symbols_lane, max_symbols=lane_max_symbols)
+        feat_duration = time.time() - stage_start
+        log(f"[dt_job] ✅ Feature computation complete: {feat_duration:.2f}s")
+        
+        stage_start = time.time()
+        log(f"[dt_job] [3/5] 🤖 Running ML inference...")
         score_summary = _call_maybe(score_intraday_tickers, symbols=symbols_lane, max_symbols=lane_max_symbols)
+        ml_duration = time.time() - stage_start
+        log(f"[dt_job] ✅ ML inference complete: {ml_duration:.2f}s")
+        
         regime_summary = classify_intraday_regime()
 
         # Policy (scoped if signature supports it)
         try:
+            stage_start = time.time()
+            log(f"[dt_job] [4/5] 🧠 Computing policy...")
             policy_summary = _call_maybe(
                 apply_intraday_policy,
                 symbols=symbols_lane,
                 max_symbols=lane_max_symbols,
                 max_positions=max_positions,
             )
+            policy_duration = time.time() - stage_start
+            log(f"[dt_job] ✅ Policy computation complete: {policy_duration:.2f}s")
         except TypeError:
             policy_summary = apply_intraday_policy(max_positions=max_positions)
 
         # Execution + signals
         try:
+            stage_start = time.time()
+            log(f"[dt_job] [5/5] ⚡ Executing trades...")
             exec_dt_summary = _call_maybe(run_execution_intraday, symbols=symbols_lane, max_symbols=lane_max_symbols)
+            exec_duration = time.time() - stage_start
+            log(f"[dt_job] ✅ Execution complete: {exec_duration:.2f}s")
         except TypeError:
             exec_dt_summary = run_execution_intraday()
 
@@ -483,15 +558,48 @@ def run_daytrading_cycle(
                 every_n = int(os.getenv("DT_SHADOW_EVERY_N", "1") or "1")
                 h = sum(bytearray(str(cycle_id).encode("utf-8", errors="ignore")))
                 if every_n <= 1 or (h % max(1, every_n) == 0):
+                    log(f"[dt_job] 👻 Running shadow cycle...")
                     live_path = DT_PATHS.get("rolling_intraday_file")
                     if live_path is not None:
+                        shadow_start = time.time()
                         shadow_summary = run_shadow_cycle(
                             cycle_id=cycle_id,
                             live_rolling_path=live_path,
                             max_symbols=lane_max_symbols,
                             max_positions=max_positions,
                         )
-        except Exception:
+                        shadow_duration = time.time() - shadow_start
+                        
+                        # Check for divergences
+                        if isinstance(shadow_summary, dict):
+                            divergences = shadow_summary.get("divergences", 0)
+                            total_compared = shadow_summary.get("compared", 0)
+                            agreements = total_compared - divergences if total_compared > 0 else 0
+                            
+                            if divergences > 0:
+                                log(f"[dt_job] 🔍 Shadow divergence detected: {divergences}/{total_compared} symbols")
+                                if get_aggregator:
+                                    try:
+                                        agg = get_aggregator()
+                                        agg.log(
+                                            f"[dt_job] 🔍 Shadow divergence: {divergences}/{total_compared} symbols differ between live and shadow",
+                                            level="warning",
+                                            forward_to_slack=True
+                                        )
+                                    except Exception:
+                                        pass
+                            else:
+                                log(f"[dt_job] ✅ Shadow agreement: {agreements}/{total_compared} symbols")
+                                
+                        log(f"[dt_job] ✅ Shadow cycle complete: {shadow_duration:.2f}s")
+        except Exception as e:
+            warn(f"[dt_job] ⚠️ Error in shadow cycle: {e}")
+            if get_aggregator:
+                try:
+                    agg = get_aggregator()
+                    agg.log(f"[dt_job] ⚠️ Error in shadow cycle: {e}", level="error", forward_to_slack=True, include_trace=True)
+                except Exception:
+                    pass
             shadow_summary = None
 
         # Persist latest view
@@ -531,6 +639,7 @@ def run_daytrading_cycle(
 
         exec_summary: Dict[str, Any] | None = None
         if execute:
+            log(f"[dt_job] 🔄 Trading enabled={execute}")
             exec_summary = execute_from_policy(execution_cfg)
             
             # Send cycle completion alert
@@ -560,6 +669,18 @@ def run_daytrading_cycle(
 
         log(f"[daytrading_job] ✅ intraday cycle complete cycle_id={cycle_id} lane={lane_label}")
         
+        # Cycle completion logging
+        cycle_duration = time.time() - cycle_start_time
+        log(f"[dt_job] ✅ Cycle #{cycle_seq} complete: duration={cycle_duration:.1f}s")
+        
+        # Performance metrics
+        if 'feat_duration' in locals() and 'ml_duration' in locals() and 'policy_duration' in locals() and 'exec_duration' in locals():
+            log(f"[dt_job] ⏱️ Timing: features={feat_duration:.1f}s ml={ml_duration:.1f}s policy={policy_duration:.1f}s exec={exec_duration:.1f}s")
+        
+        if symbols_lane and cycle_duration > 0:
+            throughput = len(symbols_lane) / cycle_duration
+            log(f"[dt_job] 📈 Throughput: {throughput:.1f} symbols/sec")
+        
         # SSE Broadcast Note:
         # Data changes are picked up by SSE polling in events_router.py (/events/bots, /events/intraday)
         # which polls every 5 seconds. When this cycle completes, file writes update:
@@ -584,6 +705,37 @@ def run_daytrading_cycle(
             "signals": signals_summary,
             "execution": exec_summary,
         }
+    except Exception as e:
+        # Critical error - log with Slack integration
+        cycle_duration = time.time() - cycle_start_time if 'cycle_start_time' in locals() else 0
+        log(f"[dt_job] ❌ Cycle #{cycle_seq} failed: {e}")
+        warn(f"[daytrading_job] ❌ cycle failed cycle_id={cycle_id}: {e}")
+        
+        if get_aggregator:
+            try:
+                agg = get_aggregator()
+                agg.log(
+                    f"[dt_job] ❌ Critical error in cycle #{cycle_seq}: {e}",
+                    level="critical",
+                    forward_to_slack=True,
+                    include_trace=True
+                )
+            except Exception:
+                pass
+        
+        # Log failure event
+        try:
+            append_trade_event({
+                "type": "cycle_failed",
+                "cycle_id": cycle_id,
+                "cycle_seq": cycle_seq,
+                "error": str(e),
+                "duration": cycle_duration,
+            })
+        except Exception:
+            pass
+        
+        raise
     finally:
         try:
             if lk is not None:
