@@ -265,9 +265,11 @@ def run_dt_nightly_job(session_date: Optional[str] = None) -> Dict[str, Any]:
     try:
         if callable(run_dt_knob_tuner):
             tuner_result = run_dt_knob_tuner(dry_run=False)  # type: ignore[call-arg]
-            # Ensure status is "ok" if tuner ran successfully
-            if isinstance(tuner_result, dict) and tuner_result.get("status") != "error":
-                tuner_result["status"] = "ok"
+            # Ensure status is "ok" if tuner ran successfully (make a copy to avoid side effects)
+            if isinstance(tuner_result, dict):
+                tuner_result = dict(tuner_result)  # Create a copy
+                if tuner_result.get("status") != "error":
+                    tuner_result["status"] = "ok"
             summary["knob_tuner"] = tuner_result
         else:
             summary["knob_tuner"] = {"status": "ok", "tuned_at": _utc_now_iso(), "version": "1.0"}

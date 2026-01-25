@@ -38,9 +38,13 @@ def _get_us_market_holidays(year: int) -> set[date]:
     holidays = set()
     
     # New Year's Day (observed)
+    # If Jan 1 is Saturday, market is closed Friday Dec 31 (previous year)
+    # If Jan 1 is Sunday, observed on Monday Jan 2
     new_year = date(year, 1, 1)
     if new_year.weekday() == 5:  # Saturday
-        holidays.add(date(year - 1, 12, 31))  # Observed Friday before
+        # Market closed on Friday Dec 31 of previous year
+        # For this year's holidays, we just note Jan 1 is closed
+        holidays.add(new_year)
     elif new_year.weekday() == 6:  # Sunday
         holidays.add(date(year, 1, 2))  # Observed Monday after
     else:
